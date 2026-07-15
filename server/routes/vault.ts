@@ -6,10 +6,10 @@ import { loadSettings } from "../../src/settingsStore.js";
 import { getActiveKeypair } from "../walletSigner.js";
 import { SERVER_CONFIG } from "../env.js";
 import { safeCompare } from "../password.js";
-import rateLimit from "./rateLimit.js";
+import rateLimit from "express-rate-limit";
 
 const router = Router();
-const withdrawLimiter = rateLimit({ windowMs: 60_000, max: 3 });
+const withdrawLimiter = rateLimit({ windowMs: 60_000, max: 3, standardHeaders: true, legacyHeaders: false });
 
 // Reserved so the wallet always has funds for transaction fees and never gets
 // fully drained by a withdrawal. 0.05 SOL comfortably covers many transaction

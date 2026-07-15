@@ -1,6 +1,7 @@
 import express, { Express } from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
+import rateLimit from "express-rate-limit";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import authRoutes from "./routes/auth.js";
@@ -11,7 +12,6 @@ import vaultRoutes from "./routes/vault.js";
 import securityRoutes from "./routes/security.js";
 import marketRoutes from "./routes/market.js";
 import { requireAuth } from "./middleware/auth.js";
-import rateLimit from "./routes/rateLimit.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIST_DIR = path.resolve(__dirname, "../web/dist");
@@ -35,7 +35,7 @@ export function createApp(): Express {
   // Coarse-grained rate limit applied directly to each mounted route (in
   // addition to the stricter, endpoint-specific limiters on login/withdraw/
   // wallet actions) so every authorized handler is covered by a limiter.
-  const apiLimiter = rateLimit({ windowMs: 60_000, max: 120 });
+  const apiLimiter = rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false });
 
   app.get("/api/health", apiLimiter, (_req, res) => {
     res.json({ status: "ok", timestamp: Date.now() });
@@ -54,7 +54,8 @@ export function createApp(): Express {
   // Serve the built frontend, if present (production mode).
   app.use(express.static(WEB_DIST_DIR));
   // Express 5 (path-to-regexp v6) requires a named wildcard segment for
-  // catch-all routes; a bare "*" throws at startup.
+  // catch-all routes; a bare "*" throws at startup. This app targets
+  // Express 5+ specifically — this syntax is not valid on Express 4.
   app.get("/{*splat}", apiLimiter, (req, res, next) => {
     if (req.path.startsWith("/api/")) {
       next();

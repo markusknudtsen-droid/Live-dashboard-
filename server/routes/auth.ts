@@ -1,12 +1,12 @@
 import { Router } from "express";
-import rateLimitFactory from "./rateLimit.js";
+import rateLimit from "express-rate-limit";
 import { SERVER_CONFIG } from "../env.js";
 import { verifyPassword } from "../password.js";
 import { issueSessionToken, SESSION_COOKIE_NAME } from "../middleware/auth.js";
 
 const router = Router();
-const loginLimiter = rateLimitFactory({ windowMs: 60_000, max: 5 });
-const logoutLimiter = rateLimitFactory({ windowMs: 60_000, max: 20 });
+const loginLimiter = rateLimit({ windowMs: 60_000, max: 5, standardHeaders: true, legacyHeaders: false });
+const logoutLimiter = rateLimit({ windowMs: 60_000, max: 20, standardHeaders: true, legacyHeaders: false });
 
 router.post("/login", loginLimiter, (req, res) => {
   const { password } = req.body ?? {};

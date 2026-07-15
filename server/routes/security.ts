@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { Connection } from "@solana/web3.js";
 import { CONFIG } from "../../src/config.js";
-import rateLimit from "./rateLimit.js";
+import rateLimit from "express-rate-limit";
 import {
   getActivePublicKey,
   isWalletUnlocked,
@@ -13,7 +13,7 @@ import {
 import { loadEncryptedWallet, saveEncryptedWallet, isValidBase58SolanaPrivateKey, encryptSecret } from "../walletVault.js";
 
 const router = Router();
-const sensitiveLimiter = rateLimit({ windowMs: 60_000, max: 5 });
+const sensitiveLimiter = rateLimit({ windowMs: 60_000, max: 5, standardHeaders: true, legacyHeaders: false });
 
 function maskSecret(secret: string): string {
   // Only ever return a masked preview; never log or return the full value.
