@@ -6,7 +6,7 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "check": "tsc --noEmit",
+    "check": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
     "lint": "npm run check",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
@@ -14,16 +14,31 @@
     "analyze": "tsx src/analyze.ts",
     "inspect-web": "tsx src/web-audit.ts",
     "trade": "tsx src/index.ts",
-    "test": "tsx --test tests/*.test.ts"
+    "test": "tsx --test tests/*.test.ts",
+    "server:dev": "tsx watch server/index.ts",
+    "server:build": "tsc -p tsconfig.server.json",
+    "server:start": "node dist-server/server/index.js",
+    "web:dev": "npm --prefix web run dev",
+    "web:build": "npm --prefix web run build",
+    "web:install": "npm --prefix web install",
+    "hash-password": "tsx server/hash-password.ts"
   },
   "dependencies": {
-    "@solana/web3.js": "^1.95.0",
     "@solana/spl-token": "^0.4.0",
+    "@solana/web3.js": "^1.95.0",
     "axios": "^1.7.0",
     "bs58": "^5.0.0",
-    "dotenv": "^16.4.0"
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.6",
+    "dotenv": "^16.4.0",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3"
   },
   "devDependencies": {
+    "@types/cookie-parser": "^1.4.10",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"
