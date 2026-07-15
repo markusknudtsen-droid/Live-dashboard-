@@ -32,29 +32,30 @@ export function createApp(): Express {
   app.use(express.json({ limit: "256kb" }));
   app.use(cookieParser());
 
-  // Coarse-grained rate limit applied to every API route (in addition to the
-  // stricter, endpoint-specific limiters on login/withdraw/wallet actions).
-  app.use("/api", rateLimit({ windowMs: 60_000, max: 120 }));
+  // Coarse-grained rate limit applied directly to each mounted route (in
+  // addition to the stricter, endpoint-specific limiters on login/withdraw/
+  // wallet actions) so every authorized handler is covered by a limiter.
+  const apiLimiter = rateLimit({ windowMs: 60_000, max: 120 });
 
-  app.get("/api/health", (_req, res) => {
+  app.get("/api/health", apiLimiter, (_req, res) => {
     res.json({ status: "ok", timestamp: Date.now() });
   });
 
-  app.use("/api/auth", authRoutes);
+  app.use("/api/auth", apiLimiter, authRoutes);
 
   // Everything below requires an authenticated session.
-  app.use("/api/portfolio", requireAuth, portfolioRoutes);
-  app.use("/api/trades", requireAuth, tradesRoutes);
-  app.use("/api/settings", requireAuth, settingsRoutes);
-  app.use("/api/vault", requireAuth, vaultRoutes);
-  app.use("/api/security", requireAuth, securityRoutes);
-  app.use("/api/market", requireAuth, marketRoutes);
+  app.use("/api/portfolio", apiLimiter, requireAuth, portfolioRoutes);
+  app.use("/api/trades", apiLimiter, requireAuth, tradesRoutes);
+  app.use("/api/settings", apiLimiter, requireAuth, settingsRoutes);
+  app.use("/api/vault", apiLimiter, requireAuth, vaultRoutes);
+  app.use("/api/security", apiLimiter, requireAuth, securityRoutes);
+  app.use("/api/market", apiLimiter, requireAuth, marketRoutes);
 
   // Serve the built frontend, if present (production mode).
   app.use(express.static(WEB_DIST_DIR));
   // Express 5 (path-to-regexp v6) requires a named wildcard segment for
   // catch-all routes; a bare "*" throws at startup.
-  app.get("/{*splat}", (req, res, next) => {
+  app.get("/{*splat}", apiLimiter, (req, res, next) => {
     if (req.path.startsWith("/api/")) {
       next();
       return;

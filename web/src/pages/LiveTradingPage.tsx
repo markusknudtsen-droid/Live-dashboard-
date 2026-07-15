@@ -4,7 +4,10 @@ import type { PortfolioResponse, TrendingToken } from "../api/types";
 
 /**
  * Memecoin prices are often sub-cent, so a fixed decimal count avoids
- * scientific notation while still showing meaningful precision.
+ * scientific notation while still showing meaningful precision. Thresholds:
+ * sub-cent prices get 8 decimals (e.g. 0.00000123), sub-dollar prices get 6
+ * (e.g. 0.123456), and anything >= $1 gets 4 — enough to distinguish typical
+ * token prices at each order of magnitude without overwhelming the table.
  */
 function formatUsdPrice(value: number): string {
   if (!Number.isFinite(value)) return "0";

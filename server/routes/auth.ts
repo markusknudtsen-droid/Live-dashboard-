@@ -6,6 +6,7 @@ import { issueSessionToken, SESSION_COOKIE_NAME } from "../middleware/auth.js";
 
 const router = Router();
 const loginLimiter = rateLimitFactory({ windowMs: 60_000, max: 5 });
+const logoutLimiter = rateLimitFactory({ windowMs: 60_000, max: 20 });
 
 router.post("/login", loginLimiter, (req, res) => {
   const { password } = req.body ?? {};
@@ -29,7 +30,7 @@ router.post("/login", loginLimiter, (req, res) => {
   res.json({ token, expiresIn: SERVER_CONFIG.sessionTtlSeconds });
 });
 
-router.post("/logout", (_req, res) => {
+router.post("/logout", logoutLimiter, (_req, res) => {
   res.clearCookie(SESSION_COOKIE_NAME);
   res.json({ ok: true });
 });

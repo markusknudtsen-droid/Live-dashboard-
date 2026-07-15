@@ -11,8 +11,11 @@ import rateLimit from "./rateLimit.js";
 const router = Router();
 const withdrawLimiter = rateLimit({ windowMs: 60_000, max: 3 });
 
-const RESERVE_SOL = 0.05; // Reserved so the wallet always has funds for transaction fees and
-// never gets fully drained by a withdrawal; matches the bot's own low-balance safety threshold.
+// Reserved so the wallet always has funds for transaction fees and never gets
+// fully drained by a withdrawal. 0.05 SOL comfortably covers many transaction
+// fees at current network rates and matches the bot's own low-balance safety
+// threshold (see src/index.ts), keeping the reserve consistent across the app.
+const RESERVE_SOL = 0.05;
 
 router.get("/", async (_req, res) => {
   const connection = new Connection(CONFIG.solanaRpcUrl, "confirmed");
