@@ -2,6 +2,16 @@ import { usePolling } from "../hooks/usePolling";
 import { api } from "../api/client";
 import type { PortfolioResponse, TrendingToken } from "../api/types";
 
+/**
+ * Memecoin prices are often sub-cent, so a fixed decimal count avoids
+ * scientific notation while still showing meaningful precision.
+ */
+function formatUsdPrice(value: number): string {
+  if (!Number.isFinite(value)) return "0";
+  const decimals = value < 0.01 ? 8 : value < 1 ? 6 : 4;
+  return value.toFixed(decimals);
+}
+
 export function LiveTradingPage() {
   const portfolio = usePolling<PortfolioResponse>(() => api.get("/portfolio"), 6000);
   const trending = usePolling<TrendingToken[]>(() => api.get("/market/trending"), 20000);
@@ -35,8 +45,8 @@ export function LiveTradingPage() {
               portfolio.data.positions.map((position) => (
                 <tr key={position.token_address}>
                   <td>{position.symbol}</td>
-                  <td>${position.entry_price.toPrecision(6)}</td>
-                  <td>${position.current_price.toPrecision(6)}</td>
+                  <td>${formatUsdPrice(position.entry_price)}</td>
+                  <td>${formatUsdPrice(position.current_price)}</td>
                   <td className={position.pnl_percent >= 0 ? "stat-card__value--positive" : "stat-card__value--negative"}>
                     {position.pnl_percent >= 0 ? "+" : ""}
                     {position.pnl_percent.toFixed(2)}%
@@ -84,7 +94,7 @@ export function LiveTradingPage() {
                       {token.symbol}
                     </a>
                   </td>
-                  <td>${token.price_usd.toPrecision(6)}</td>
+                  <td>${formatUsdPrice(token.price_usd)}</td>
                   <td className={token.price_change_24h >= 0 ? "stat-card__value--positive" : "stat-card__value--negative"}>
                     {token.price_change_24h >= 0 ? "+" : ""}
                     {token.price_change_24h.toFixed(2)}%

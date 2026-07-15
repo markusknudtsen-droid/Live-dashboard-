@@ -1,5 +1,7 @@
 import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 
+// 64 bytes of scrypt output gives ample entropy margin for password
+// verification while keeping derivation time reasonable for interactive login.
 const KEY_LENGTH = 64;
 
 /**

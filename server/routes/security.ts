@@ -16,6 +16,7 @@ const router = Router();
 const sensitiveLimiter = rateLimit({ windowMs: 60_000, max: 5 });
 
 function maskSecret(secret: string): string {
+  // Only ever return a masked preview; never log or return the full value.
   if (!secret) return "";
   if (secret.length <= 8) return "••••••••";
   return `${secret.slice(0, 4)}${"•".repeat(Math.max(4, secret.length - 8))}${secret.slice(-4)}`;

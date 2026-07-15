@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { usePolling } from "../hooks/usePolling";
 import { api } from "../api/client";
 import type { PortfolioResponse, TradeLogResponse, BotSettings } from "../api/types";
@@ -19,7 +20,7 @@ export function DashboardPage() {
   const summary = portfolio.data?.summary;
   const pnlPositive = (summary?.pnl_percent ?? 0) >= 0;
 
-  const chartData = buildPnlSeries(trades.data);
+  const chartData = useMemo(() => buildPnlSeries(trades.data), [trades.data]);
 
   return (
     <>

@@ -5,9 +5,9 @@ import bs58 from "bs58";
 import { Keypair } from "@solana/web3.js";
 
 const ALGORITHM = "aes-256-gcm";
-const KEY_LENGTH = 32;
-const SALT_LENGTH = 16;
-const IV_LENGTH = 12;
+const KEY_LENGTH = 32; // AES-256 requires a 256-bit (32-byte) key
+const SALT_LENGTH = 16; // 128-bit salt for scrypt key derivation
+const IV_LENGTH = 12; // 96-bit IV, the standard/recommended size for AES-GCM
 
 export interface EncryptedBlob {
   version: 1;

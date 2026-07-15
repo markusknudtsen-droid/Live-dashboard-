@@ -11,6 +11,7 @@ import vaultRoutes from "./routes/vault.js";
 import securityRoutes from "./routes/security.js";
 import marketRoutes from "./routes/market.js";
 import { requireAuth } from "./middleware/auth.js";
+import rateLimit from "./routes/rateLimit.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIST_DIR = path.resolve(__dirname, "../web/dist");
@@ -18,14 +19,22 @@ const WEB_DIST_DIR = path.resolve(__dirname, "../web/dist");
 export function createApp(): Express {
   const app = express();
 
+  // This is a private, single-user dashboard. Only allow explicitly configured
+  // origins (e.g. the Vite dev server); same-origin requests to the bundled
+  // frontend always work regardless of this setting.
+  const configuredOrigins = process.env.DASHBOARD_CORS_ORIGIN?.split(",").map((o) => o.trim()).filter(Boolean);
   app.use(
     cors({
-      origin: process.env.DASHBOARD_CORS_ORIGIN?.split(",") || true,
+      origin: configuredOrigins && configuredOrigins.length > 0 ? configuredOrigins : false,
       credentials: true,
     })
   );
   app.use(express.json({ limit: "256kb" }));
   app.use(cookieParser());
+
+  // Coarse-grained rate limit applied to every API route (in addition to the
+  // stricter, endpoint-specific limiters on login/withdraw/wallet actions).
+  app.use("/api", rateLimit({ windowMs: 60_000, max: 120 }));
 
   app.get("/api/health", (_req, res) => {
     res.json({ status: "ok", timestamp: Date.now() });
@@ -43,6 +52,8 @@ export function createApp(): Express {
 
   // Serve the built frontend, if present (production mode).
   app.use(express.static(WEB_DIST_DIR));
+  // Express 5 (path-to-regexp v6) requires a named wildcard segment for
+  // catch-all routes; a bare "*" throws at startup.
   app.get("/{*splat}", (req, res, next) => {
     if (req.path.startsWith("/api/")) {
       next();
