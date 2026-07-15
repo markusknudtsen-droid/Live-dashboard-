@@ -1,0 +1,31 @@
+{
+  "name": "memecoin-trading-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "AI-powered Solana memecoin trading bot with high win-rate analysis",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit",
+    "lint": "npm run check",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "scan": "tsx src/scanner.ts",
+    "analyze": "tsx src/analyze.ts",
+    "inspect-web": "tsx src/web-audit.ts",
+    "trade": "tsx src/index.ts",
+    "test": "tsx --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.95.0",
+    "@solana/spl-token": "^0.4.0",
+    "axios": "^1.7.0",
+    "bs58": "^5.0.0",
+    "dotenv": "^16.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
