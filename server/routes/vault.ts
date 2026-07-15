@@ -18,18 +18,23 @@ router.get("/", async (_req, res) => {
   const keypair = getKeypairSafely(res);
   if (!keypair) return;
 
-  const balanceLamports = await connection.getBalance(keypair.publicKey);
-  const balanceSol = balanceLamports / LAMPORTS_PER_SOL;
-  const extractableSol = Math.max(0, balanceSol - RESERVE_SOL);
-  const settings = await loadSettings();
+  try {
+    const balanceLamports = await connection.getBalance(keypair.publicKey);
+    const balanceSol = balanceLamports / LAMPORTS_PER_SOL;
+    const extractableSol = Math.max(0, balanceSol - RESERVE_SOL);
+    const settings = await loadSettings();
 
-  res.json({
-    wallet_address: keypair.publicKey.toBase58(),
-    balance_sol: balanceSol,
-    extractable_sol: extractableSol,
-    reserved_sol: RESERVE_SOL,
-    private_withdrawal_address: settings.private_withdrawal_address,
-  });
+    res.json({
+      wallet_address: keypair.publicKey.toBase58(),
+      balance_sol: balanceSol,
+      extractable_sol: extractableSol,
+      reserved_sol: RESERVE_SOL,
+      private_withdrawal_address: settings.private_withdrawal_address,
+    });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(502).json({ error: `Failed to read wallet balance: ${message}` });
+  }
 });
 
 router.post("/withdraw", withdrawLimiter, async (req, res) => {

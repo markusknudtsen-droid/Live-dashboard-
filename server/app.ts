@@ -43,7 +43,7 @@ export function createApp(): Express {
 
   // Serve the built frontend, if present (production mode).
   app.use(express.static(WEB_DIST_DIR));
-  app.get("*", (req, res, next) => {
+  app.get("/{*splat}", (req, res, next) => {
     if (req.path.startsWith("/api/")) {
       next();
       return;
@@ -51,6 +51,11 @@ export function createApp(): Express {
     res.sendFile(path.join(WEB_DIST_DIR, "index.html"), (err) => {
       if (err) next();
     });
+  });
+
+  app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    const message = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: message });
   });
 
   return app;
