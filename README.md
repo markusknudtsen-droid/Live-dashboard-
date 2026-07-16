@@ -58,6 +58,12 @@ npm run trade
 | `npm run lint` | Lint alias (currently runs type-check rules) |
 | `npm run build` | Compile TypeScript to dist/ |
 | `npm run test` | Run automated tests |
+| `npm run hash-password -- <password>` | Generate a `DASHBOARD_PASSWORD_HASH` value for dashboard login |
+| `npm run server:dev` | Run the dashboard API in dev mode with hot reload |
+| `npm run server:build` / `npm run server:start` | Compile and run the dashboard API for production |
+| `npm run web:install` | Install the dashboard frontend's dependencies |
+| `npm run web:dev` | Run the dashboard frontend in dev mode (Vite) |
+| `npm run web:build` | Build the dashboard frontend for production |
 
 ## Configuration
 
@@ -135,6 +141,60 @@ The inspection command reports:
 - Basic structure (H1/H2/H3 headings, forms, buttons, links)
 - Accessibility hints (missing `lang`, missing image `alt` text)
 - Framework hints and high-level improvement suggestions
+
+## Live Dashboard (Command Center)
+
+This repo now ships a private, self-hosted control center for the bot: an Express API (`server/`) plus a
+React + Vite frontend (`web/`), themed "Arctic" (clean, minimalist, `#2B7FE0` / `#3C82DC`).
+
+### Screens
+
+| Screen | Purpose |
+|--------|---------|
+| Dashboard | Portfolio value, active positions, PnL trend, bot status |
+| Live Trading View | Real-time positions table + trending memecoins by volume |
+| Strategy Config | Base trade amount, risk thresholds, confidence, **Pause Bot** override |
+| Vault Portal | Extractable profit + SOL withdrawal with mandatory secondary confirmation |
+| Transaction Logs | Paginated trade/withdrawal history |
+| System Security | Connection health, masked API keys, encrypted Solana private key import/export |
+
+### Setup
+
+```bash
+# 1. Generate a password hash for dashboard login
+npm run hash-password -- "your-strong-password"
+# Copy the output into DASHBOARD_PASSWORD_HASH in .env
+
+# 2. Configure the remaining dashboard variables in .env
+DASHBOARD_JWT_SECRET=some-long-random-string
+WITHDRAWAL_CONFIRMATION_CODE=a-secret-only-you-know
+
+# 3. Install the frontend's dependencies
+npm run web:install
+
+# 4. Run the API and frontend in dev mode (two terminals)
+npm run server:dev
+npm run web:dev   # Vite dev server proxies /api to the backend
+
+# 5. Or build everything for a single-process production deployment
+npm run web:build
+npm run server:build
+npm run server:start   # serves the built frontend + API on DASHBOARD_PORT
+```
+
+### Security model
+
+- **Authentication**: a password hash (`DASHBOARD_PASSWORD_HASH`, generated with `npm run hash-password`) gates
+  every dashboard screen. Sessions are signed JWTs stored in an `httpOnly` cookie.
+- **Manual override**: the Strategy Config "Pause Bot" toggle writes to `data/settings.json`; the trading loop
+  in `src/index.ts` checks this before every cycle and skips trading (while still monitoring existing positions)
+  when enabled.
+- **Withdrawals**: the Vault Portal requires a secondary `WITHDRAWAL_CONFIRMATION_CODE` in addition to the
+  authenticated session before any SOL leaves the wallet, and always reserves a small SOL buffer for fees.
+- **Private key import/export**: the System Security screen never transmits or displays your plaintext private
+  key. Export encrypts it (AES-256-GCM, scrypt-derived key) with a passphrase you choose and downloads a JSON
+  file; import accepts either a raw base58 key or a previously exported encrypted file, and immediately
+  re-encrypts it at rest under `data/wallet.vault.json`.
 
 ## Security
 

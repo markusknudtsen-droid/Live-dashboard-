@@ -11,6 +11,7 @@ import {
 } from "./trader.js";
 import { logger } from "./logger.js";
 import { loadState, saveState, TradeHistoryItem } from "./persistence.js";
+import { loadSettings } from "./settingsStore.js";
 
 const tradeHistory: TradeHistoryItem[] = [];
 let cycleInProgress = false;
@@ -25,6 +26,20 @@ async function persistRuntimeState(): Promise<void> {
 async function runCycle(): Promise<void> {
   const cycleStart = Date.now();
   logger.info(`🔄 CYCLE START: ${new Date().toISOString()}`);
+
+  const dashboardSettings = await loadSettings();
+  if (dashboardSettings.override_enabled || !dashboardSettings.active_status) {
+    logger.warn("⏸️ Manual override enabled from dashboard. Skipping trading, only monitoring positions.");
+    await monitorPositions();
+    await persistRuntimeState();
+    return;
+  }
+
+  // Apply dashboard-configured strategy values for this cycle.
+  CONFIG.maxPositionSol = dashboardSettings.buy_amount_sol;
+  CONFIG.minConfidence = dashboardSettings.min_confidence;
+  CONFIG.stopLossPercent = dashboardSettings.stop_loss_percent;
+  CONFIG.takeProfitPercent = dashboardSettings.take_profit_percent;
 
   const balance = await getBalance();
   logger.info(`💰 Wallet Balance: ${balance.toFixed(4)} SOL`);
