@@ -41,15 +41,29 @@ npm install
 cp .env.example .env
 # Edit .env with your keys
 
-# 4. Run the bot
+# 4. Test first with a fake SOL balance (no real funds, no real transactions)
+# In .env set: DRY_RUN=true
+npm run trade
+
+# 5. Once you're happy with the results, disable dry-run to trade with real SOL
+# In .env set: DRY_RUN=false (and SOLANA_PRIVATE_KEY=<your real key>)
 npm run trade
 ```
+
+### Paper trading / dry-run mode
+
+Set `DRY_RUN=true` in your `.env` to test the full bot loop (scan → analyze → simulated
+trade) against real market data, but with a **simulated wallet and fake SOL balance**
+(`PAPER_STARTING_BALANCE_SOL`, default 10 SOL). No `SOLANA_PRIVATE_KEY` is required, and
+no real Solana transactions are ever sent - buys/sells only update an in-memory paper
+balance and position list. Use this to validate your confidence/stop-loss/take-profit
+settings before risking real SOL. Always start here before switching to `DRY_RUN=false`.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `npm run trade` | Start the full bot (scan → analyze → trade loop) |
+| `npm run trade` | Start the full bot (scan → analyze → trade loop). Set `DRY_RUN=true` in `.env` to simulate trades with fake SOL first |
 | `npm run scan` | Scan only - find candidates without trading |
 | `npm run analyze` | Scan + analyze - see signals without executing |
 | `npm run inspect-web -- <url>` | Inspect a published MemeScope/Manus web page and print details + improvement suggestions |
@@ -72,7 +86,9 @@ All configuration is via `.env` file:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OPENROUTER_API_KEY` | required | Your OpenRouter API key |
-| `SOLANA_PRIVATE_KEY` | required | Base58 encoded wallet private key |
+| `SOLANA_PRIVATE_KEY` | required (unless `DRY_RUN=true`) | Base58 encoded wallet private key |
+| `DRY_RUN` | false | Simulate trades with a fake wallet and paper balance; no real transactions are sent |
+| `PAPER_STARTING_BALANCE_SOL` | 10 | Fake starting SOL balance used when `DRY_RUN=true` |
 | `MIN_CONFIDENCE` | 80 | Minimum AI confidence to execute (0-100) |
 | `MAX_POSITION_SOL` | 0.5 | Max SOL per trade |
 | `STOP_LOSS_PERCENT` | 15 | Stop loss trigger (-15%) |

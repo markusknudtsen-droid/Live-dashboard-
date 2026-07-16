@@ -19,6 +19,8 @@ export interface AppConfig {
   httpMaxRetries: number;
   logLevel: "debug" | "info" | "warn" | "error";
   stateFilePath: string;
+  dryRun: boolean;
+  paperStartingBalanceSol: number;
 }
 
 function parseNumberInRange(
@@ -89,6 +91,14 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     httpMaxRetries: parseIntegerInRange("HTTP_MAX_RETRIES", env.HTTP_MAX_RETRIES, 3, 0, 10),
     logLevel: parseLogLevel(env.LOG_LEVEL),
     stateFilePath: env.BOT_STATE_FILE || "./data/state.json",
+    dryRun: parseBoolean(env.DRY_RUN, false),
+    paperStartingBalanceSol: parseNumberInRange(
+      "PAPER_STARTING_BALANCE_SOL",
+      env.PAPER_STARTING_BALANCE_SOL,
+      10,
+      0.001,
+      100000
+    ),
   };
 }
 
@@ -98,13 +108,16 @@ export function validateConfig(config: AppConfig = CONFIG): void {
   if (!config.openRouterApiKey) {
     throw new Error("OPENROUTER_API_KEY is required. Set it in your .env file.");
   }
-  if (!config.solanaPrivateKey) {
-    throw new Error("SOLANA_PRIVATE_KEY is required. Set it in your .env file.");
+  if (!config.solanaPrivateKey && !config.dryRun) {
+    throw new Error("SOLANA_PRIVATE_KEY is required. Set it in your .env file (or enable DRY_RUN=true to test with a simulated wallet).");
   }
   if (config.scanChains.length === 0) {
     throw new Error("SCAN_CHAINS must include at least one chain.");
   }
   console.log("✅ Configuration validated");
+  if (config.dryRun) {
+    console.log(`   ⚠️  DRY RUN MODE: no real funds or transactions will be used (paper balance: ${config.paperStartingBalanceSol} SOL)`);
+  }
   console.log(`   Min Confidence: ${config.minConfidence}%`);
   console.log(`   Max Position: ${config.maxPositionSol} SOL`);
   console.log(`   Stop Loss: -${config.stopLossPercent}%`);

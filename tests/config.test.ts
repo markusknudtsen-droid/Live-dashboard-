@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildConfig } from "../src/config.js";
+import { buildConfig, validateConfig } from "../src/config.js";
 
 test("buildConfig parses valid env values", () => {
   const config = buildConfig({
@@ -43,4 +43,30 @@ test("buildConfig rejects invalid scan interval", () => {
       }),
     /SCAN_INTERVAL_SECONDS/
   );
+});
+
+test("buildConfig defaults dryRun to false and parses DRY_RUN/PAPER_STARTING_BALANCE_SOL", () => {
+  const config = buildConfig({});
+  assert.equal(config.dryRun, false);
+  assert.equal(config.paperStartingBalanceSol, 10);
+
+  const dryConfig = buildConfig({
+    DRY_RUN: "true",
+    PAPER_STARTING_BALANCE_SOL: "25",
+  });
+  assert.equal(dryConfig.dryRun, true);
+  assert.equal(dryConfig.paperStartingBalanceSol, 25);
+});
+
+test("validateConfig requires SOLANA_PRIVATE_KEY unless DRY_RUN is enabled", () => {
+  const config = buildConfig({
+    OPENROUTER_API_KEY: "x",
+  });
+  assert.throws(() => validateConfig(config), /SOLANA_PRIVATE_KEY/);
+
+  const dryConfig = buildConfig({
+    OPENROUTER_API_KEY: "x",
+    DRY_RUN: "true",
+  });
+  assert.doesNotThrow(() => validateConfig(dryConfig));
 });
