@@ -401,7 +401,7 @@ function assertValidUrl(value: string): void {
       throw new Error("missing protocol or host");
     }
   } catch {
-    throw new Error(`Invalid URL: ${value}. Expected a full URL like https://your-dashboard.manus.space`);
+    throw new Error(`Invalid URL: ${value}. Expected a full URL like https://memescope-command-center.lovable.app`);
   }
 }
 
