@@ -66,7 +66,7 @@ settings before risking real SOL. Always start here before switching to `DRY_RUN
 | `npm run trade` | Start the full bot (scan → analyze → trade loop). Set `DRY_RUN=true` in `.env` to simulate trades with fake SOL first |
 | `npm run scan` | Scan only - find candidates without trading |
 | `npm run analyze` | Scan + analyze - see signals without executing |
-| `npm run inspect-web -- <url>` | Inspect a published MemeScope/Manus web page and print details + improvement suggestions |
+| `npm run inspect-web -- <url>` | Inspect a published MemeScope web page and print details + improvement suggestions |
 | `npm run dev` | Development mode with hot reload |
 | `npm run check` | Type-check project without emitting files |
 | `npm run lint` | Lint alias (currently runs type-check rules) |
@@ -128,7 +128,7 @@ This bot is designed to connect to the MemeScope AI web dashboard in the future:
 
 ```bash
 # Set these in .env when ready to connect:
-DASHBOARD_API_URL=https://your-dashboard.manus.space/api
+DASHBOARD_API_URL=https://memescope-command-center.lovable.app/api
 DASHBOARD_API_KEY=your-api-key
 ```
 
@@ -142,14 +142,14 @@ You can also inspect a published dashboard page directly from the CLI:
 
 ```bash
 # Inspect a specific deployment
-npm run inspect-web -- https://your-dashboard.manus.space
+npm run inspect-web -- https://memescope-command-center.lovable.app
 
 # Or set a default URL in .env
-DASHBOARD_WEB_URL=https://your-dashboard.manus.space
+DASHBOARD_WEB_URL=https://memescope-command-center.lovable.app
 npm run inspect-web
 
 # Get machine-readable output
-npm run inspect-web -- https://your-dashboard.manus.space --json
+npm run inspect-web -- https://memescope-command-center.lovable.app --json
 ```
 
 The inspection command reports:
@@ -159,6 +159,12 @@ The inspection command reports:
 - Framework hints and high-level improvement suggestions
 
 ## Live Dashboard (Command Center)
+
+> 🔗 **Hosted paper-trading cockpit:** https://memescope-command-center.lovable.app
+> — the public **MemeScope Command Center** that replaces the old `manus.space`
+> site. It pulls live DexScreener boost signals in the browser, mirrors the
+> scanner filters, and simulates the bot's buy/sell behaviour (fake wallet, no
+> real funds) with every trade settling back to the bot wallet.
 
 This repo now ships a private, self-hosted control center for the bot: an Express API (`server/`) plus a
 React + Vite frontend (`web/`), themed "Arctic" (clean, minimalist, `#2B7FE0` / `#3C82DC`).
