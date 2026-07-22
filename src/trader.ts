@@ -6,6 +6,7 @@ import {
   LAMPORTS_PER_SOL,
 } from "@solana/web3.js";
 import bs58 from "bs58";
+import { randomBytes } from "node:crypto";
 import { CONFIG } from "./config.js";
 import { TradeSignal } from "./analyze.js";
 import { logger } from "./logger.js";
@@ -44,6 +45,11 @@ interface DexPairPrice {
 let connection: Connection;
 let wallet: Keypair;
 const activePositions: ActivePosition[] = [];
+let paperBalanceSol = 0;
+
+function generateDryRunTxSignature(): string {
+  return `DRYRUN-${bs58.encode(randomBytes(64))}`;
+}
 
 function isTradeSignalSafe(signal: TradeSignal): { ok: boolean; reason?: string } {
   if (!isValidSolanaMint(signal.token.address)) {
@@ -64,6 +70,14 @@ function isTradeSignalSafe(signal: TradeSignal): { ok: boolean; reason?: string 
 export function initTrader(): { publicKey: string; connection: Connection } {
   connection = new Connection(CONFIG.solanaRpcUrl, "confirmed");
 
+  if (CONFIG.dryRun) {
+    wallet = Keypair.generate();
+    paperBalanceSol = CONFIG.paperStartingBalanceSol;
+    logger.info(`🧪 DRY RUN wallet generated: ${wallet.publicKey.toBase58()}`);
+    logger.info(`🧪 Paper balance: ${paperBalanceSol.toFixed(4)} SOL (fake, no real funds used)`);
+    return { publicKey: wallet.publicKey.toBase58(), connection };
+  }
+
   try {
     const secretKey = bs58.decode(CONFIG.solanaPrivateKey);
     wallet = Keypair.fromSecretKey(secretKey);
@@ -75,9 +89,12 @@ export function initTrader(): { publicKey: string; connection: Connection } {
 }
 
 /**
- * Get wallet SOL balance
+ * Get wallet SOL balance (real, or simulated paper balance in DRY_RUN mode)
  */
 export async function getBalance(): Promise<number> {
+  if (CONFIG.dryRun) {
+    return paperBalanceSol;
+  }
   const balance = await connection.getBalance(wallet.publicKey);
   return balance / LAMPORTS_PER_SOL;
 }
@@ -118,6 +135,38 @@ export async function executeBuy(signal: TradeSignal): Promise<TradeResult> {
         tokenSymbol: token.symbol,
         timestamp: Date.now(),
         error: `Insufficient balance: ${balance.toFixed(4)} SOL (need ${positionSizeSol.toFixed(4)} + fees)`,
+      };
+    }
+
+    if (CONFIG.dryRun) {
+      const txSignature = generateDryRunTxSignature();
+      paperBalanceSol -= positionSizeSol;
+
+      activePositions.push({
+        tokenAddress: token.address,
+        tokenSymbol: token.symbol,
+        chainId: token.chainId,
+        entryPrice: token.priceUsd,
+        currentPrice: token.priceUsd,
+        amountSol: positionSizeSol,
+        stopLoss,
+        takeProfit,
+        entryTime: Date.now(),
+        pnlPercent: 0,
+        txSignature,
+      });
+
+      logger.info(`🧪 [DRY RUN] Simulated buy executed. Fake TX: ${txSignature}`);
+      logger.info(`🧪 [DRY RUN] Paper balance: ${paperBalanceSol.toFixed(4)} SOL`);
+
+      return {
+        success: true,
+        txSignature,
+        entryPrice: token.priceUsd,
+        amountSol: positionSizeSol,
+        tokenAddress: token.address,
+        tokenSymbol: token.symbol,
+        timestamp: Date.now(),
       };
     }
 
@@ -221,6 +270,28 @@ export async function executeSell(position: ActivePosition, reason: string): Pro
   logger.info(`PnL: ${position.pnlPercent >= 0 ? "+" : ""}${position.pnlPercent.toFixed(2)}%`);
 
   try {
+    if (CONFIG.dryRun) {
+      const txSignature = generateDryRunTxSignature();
+      const proceedsSol = position.amountSol * (1 + position.pnlPercent / 100);
+      paperBalanceSol += proceedsSol;
+
+      const idx = activePositions.findIndex((p) => p.tokenAddress === position.tokenAddress);
+      if (idx !== -1) activePositions.splice(idx, 1);
+
+      logger.info(`🧪 [DRY RUN] Simulated sell executed. Fake TX: ${txSignature}`);
+      logger.info(`🧪 [DRY RUN] Paper balance: ${paperBalanceSol.toFixed(4)} SOL`);
+
+      return {
+        success: true,
+        txSignature,
+        entryPrice: position.entryPrice,
+        amountSol: position.amountSol,
+        tokenAddress: position.tokenAddress,
+        tokenSymbol: position.tokenSymbol,
+        timestamp: Date.now(),
+      };
+    }
+
     if (!isValidSolanaMint(position.tokenAddress)) {
       throw new Error(`Invalid position token mint: ${position.tokenAddress}`);
     }
