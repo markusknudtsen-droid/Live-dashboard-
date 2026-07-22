@@ -7,11 +7,13 @@ import { fileURLToPath } from "node:url";
 import authRoutes from "./routes/auth.js";
 import portfolioRoutes from "./routes/portfolio.js";
 import tradesRoutes from "./routes/trades.js";
+import tradeIngestRoutes from "./routes/tradeIngest.js";
 import settingsRoutes from "./routes/settings.js";
 import vaultRoutes from "./routes/vault.js";
 import securityRoutes from "./routes/security.js";
 import marketRoutes from "./routes/market.js";
 import { requireAuth } from "./middleware/auth.js";
+import { requireIngestKey } from "./middleware/apiKey.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIST_DIR = path.resolve(__dirname, "../web/dist");
@@ -42,6 +44,11 @@ export function createApp(): Express {
   });
 
   app.use("/api/auth", apiLimiter, authRoutes);
+
+  // Machine-to-machine trade ingestion from the bot, authenticated by the
+  // shared ingest API key (NOT the browser session). Mounted before the
+  // session-protected /api/trades route so this more specific path wins.
+  app.use("/api/trades/ingest", apiLimiter, requireIngestKey, tradeIngestRoutes);
 
   // Everything below requires an authenticated session.
   app.use("/api/portfolio", apiLimiter, requireAuth, portfolioRoutes);
