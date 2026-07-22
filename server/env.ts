@@ -7,6 +7,12 @@ export interface ServerConfig {
   sessionTtlSeconds: number;
   withdrawalConfirmationCode: string;
   walletEncryptionPassphrase: string;
+  /**
+   * Shared secret the trading bot presents (via the `x-api-key` header) to push
+   * executed trades to POST /api/trades/ingest. When empty, ingestion is
+   * disabled and the endpoint responds 503.
+   */
+  ingestApiKey: string;
 }
 
 function requireEnv(key: string, fallbackForDev?: string): string {
@@ -24,6 +30,7 @@ export function buildServerConfig(env: NodeJS.ProcessEnv = process.env): ServerC
     sessionTtlSeconds: Number(env.DASHBOARD_SESSION_TTL_SECONDS || 3600),
     withdrawalConfirmationCode: env.WITHDRAWAL_CONFIRMATION_CODE || "",
     walletEncryptionPassphrase: env.WALLET_ENCRYPTION_PASSPHRASE || "",
+    ingestApiKey: env.DASHBOARD_INGEST_KEY || "",
   };
 }
 
