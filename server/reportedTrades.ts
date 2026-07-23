@@ -40,12 +40,23 @@ export async function loadReportedTrades(): Promise<ReportedTrade[]> {
   }
 }
 
-export async function appendReportedTrade(trade: ReportedTrade): Promise<void> {
-  const existing = await loadReportedTrades();
-  existing.push(trade);
-  // Keep only the most recent MAX_STORED by timestamp to bound the file size.
-  const trimmed = existing.sort((a, b) => a.timestamp - b.timestamp).slice(-MAX_STORED);
-  const fullPath = path.resolve(storePath());
-  await mkdir(path.dirname(fullPath), { recursive: true });
-  await writeFile(fullPath, JSON.stringify(trimmed, null, 2), "utf-8");
+// Serialise the read-modify-write of the store so concurrent ingestion requests
+// can't clobber each other and silently drop a trade. Each append waits for the
+// previous one to finish.
+let writeChain: Promise<void> = Promise.resolve();
+
+export function appendReportedTrade(trade: ReportedTrade): Promise<void> {
+  const next = writeChain.then(async () => {
+    const existing = await loadReportedTrades();
+    existing.push(trade);
+    // Keep only the most recent MAX_STORED by timestamp to bound the file size.
+    const trimmed = existing.sort((a, b) => a.timestamp - b.timestamp).slice(-MAX_STORED);
+    const fullPath = path.resolve(storePath());
+    await mkdir(path.dirname(fullPath), { recursive: true });
+    await writeFile(fullPath, JSON.stringify(trimmed, null, 2), "utf-8");
+  });
+  // Keep the chain alive even if this write rejects, so one failure doesn't
+  // wedge all future appends.
+  writeChain = next.catch(() => undefined);
+  return next;
 }
