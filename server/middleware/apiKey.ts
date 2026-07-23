@@ -3,10 +3,10 @@ import { timingSafeEqual } from "node:crypto";
 import { SERVER_CONFIG } from "../env.js";
 
 function safeEqual(a: string, b: string): boolean {
-  const ba = Buffer.from(a);
-  const bb = Buffer.from(b);
-  if (ba.length !== bb.length) return false;
-  return timingSafeEqual(ba, bb);
+  // Compare byte lengths first so a mismatch short-circuits without allocating
+  // buffers, and so the length check matches what timingSafeEqual compares.
+  if (Buffer.byteLength(a) !== Buffer.byteLength(b)) return false;
+  return timingSafeEqual(Buffer.from(a), Buffer.from(b));
 }
 
 function extractKey(req: Request): string | null {

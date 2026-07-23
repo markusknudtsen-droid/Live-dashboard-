@@ -37,7 +37,7 @@ const sampleTrade = {
 };
 
 test.after(async () => {
-  server.close();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
   await rm(tmpDir, { recursive: true, force: true });
 });
 
@@ -81,7 +81,7 @@ test("ingest accepts a valid trade with the correct key (201)", async () => {
 
 test("ingested trades appear in the authenticated GET /api/trades log", async () => {
   // Push a SELL too, so both show up.
-  await fetch(`${base}/api/trades/ingest`, {
+  const sellRes = await fetch(`${base}/api/trades/ingest`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-api-key": "shared-bot-key" },
     body: JSON.stringify({
@@ -93,6 +93,7 @@ test("ingested trades appear in the authenticated GET /api/trades log", async ()
       timestamp: 1_700_000_100_000,
     }),
   });
+  assert.equal(sellRes.status, 201, "the SELL ingestion succeeded");
 
   const token = issueSessionToken();
   const res = await fetch(`${base}/api/trades`, {

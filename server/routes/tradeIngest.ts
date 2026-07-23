@@ -4,8 +4,16 @@ import { appendReportedTrade, ReportedTrade } from "../reportedTrades.js";
 const router = Router();
 
 function asFiniteNumber(value: unknown): number | undefined {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : undefined;
+  // Accept only real numbers or numeric strings; reject booleans, null and
+  // other types that Number() would silently coerce (e.g. true -> 1).
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : undefined;
+  }
+  if (typeof value === "string" && value.trim() !== "") {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : undefined;
+  }
+  return undefined;
 }
 
 /**
