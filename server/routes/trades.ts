@@ -8,13 +8,16 @@ interface TradeLogItem {
   id: string;
   type: string;
   pair: string;
+  token_address?: string;
   amount_sol: number | undefined;
   price: number | undefined;
   paper: boolean | undefined;
   pnl_percent: number | undefined;
+  profit_sol: number | undefined;
   timestamp: number;
   confidence: number | undefined;
   outcome: string;
+  status: "completed" | "failed";
   tx_signature?: string;
 }
 
@@ -32,13 +35,16 @@ function reportedToItem(trade: ReportedTrade, index: number): TradeLogItem {
     id: trade.tx_signature ? `ingest-${trade.tx_signature}` : `ingest-${trade.timestamp}-${index}`,
     type: trade.type,
     pair: trade.symbol,
+    token_address: trade.token_address,
     amount_sol: trade.amount_sol,
     price: trade.price,
     paper: trade.paper,
     pnl_percent: trade.pnl_percent,
+    profit_sol: trade.type === "SELL" && trade.pnl_percent !== undefined ? (trade.amount_sol * trade.pnl_percent) / 100 : undefined,
     timestamp: trade.timestamp,
     confidence: trade.confidence,
     outcome,
+    status: outcome.startsWith("FAILED") ? "failed" : "completed",
     tx_signature: trade.tx_signature || undefined,
   };
 }
@@ -52,13 +58,16 @@ router.get("/", async (req, res) => {
     id: `state-${item.timestamp}-${index}`,
     type: item.action,
     pair: item.symbol,
+    token_address: undefined,
     amount_sol: undefined,
     price: undefined,
     paper: undefined,
     pnl_percent: undefined,
+    profit_sol: undefined,
     timestamp: item.timestamp,
     confidence: item.confidence,
     outcome: item.result,
+    status: item.result.startsWith("FAILED") ? "failed" : "completed",
     tx_signature: item.txSignature,
   }));
 
@@ -75,15 +84,34 @@ router.get("/", async (req, res) => {
     merged.push(item);
   }
 
+  const search =
+    typeof req.query.search === "string" && req.query.search.trim().length > 0 ? req.query.search.trim().toLowerCase() : "";
+
+  const filtered = search
+    ? merged.filter((item) =>
+        [
+          item.type,
+          item.pair,
+          item.token_address,
+          item.outcome,
+          item.tx_signature,
+          item.status,
+          item.paper ? "paper" : "live",
+        ]
+          .filter(Boolean)
+          .some((value) => String(value).toLowerCase().includes(search))
+      )
+    : merged;
+
   const start = (page - 1) * pageSize;
-  const items = merged.slice(start, start + pageSize);
+  const items = filtered.slice(start, start + pageSize);
 
   res.json({
     items,
     page,
     pageSize,
-    total: merged.length,
-    totalPages: Math.max(1, Math.ceil(merged.length / pageSize)),
+    total: filtered.length,
+    totalPages: Math.max(1, Math.ceil(filtered.length / pageSize)),
   });
 });
 

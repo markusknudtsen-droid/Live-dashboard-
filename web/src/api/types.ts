@@ -34,7 +34,26 @@ export interface TrendingToken {
   liquidity_usd: number;
   buy_to_sell_ratio: number;
   age_hours: number;
+  boost_count: number;
+  auto_buy_ready: boolean;
+  cto_candidate: boolean;
+  signal_status: "buy-ready" | "cto-watch" | "boost-watch" | "volume-watch";
   url: string;
+}
+
+export interface ScannerAlert {
+  type: "BOOST" | "CTO";
+  token_address: string;
+  symbol: string;
+  boost_count: number;
+  triggered_at: number;
+  status: "active";
+}
+
+export interface ScannerSnapshot {
+  boosted_threshold: number;
+  alerts: ScannerAlert[];
+  tokens: TrendingToken[];
 }
 
 export interface TradeLogItem {
@@ -44,6 +63,13 @@ export interface TradeLogItem {
   timestamp: number;
   confidence: number;
   outcome: string;
+  status: "completed" | "failed";
+  token_address?: string;
+  amount_sol?: number;
+  price?: number;
+  paper?: boolean;
+  pnl_percent?: number;
+  profit_sol?: number;
   tx_signature?: string;
 }
 
@@ -84,9 +110,17 @@ export interface EncryptedWalletBlob {
 
 export interface SecurityStatus {
   connections: {
-    solana_rpc: { healthy: boolean; detail: string };
-    dexscreener: { healthy: boolean; detail: string };
+    solana_rpc: { healthy: boolean; detail: string; latency_ms: number | null };
+    dexscreener: { healthy: boolean; detail: string; latency_ms: number | null };
     openrouter_key_configured: boolean;
+    dashboard_api_url_configured: boolean;
+    dashboard_ingest_key_configured: boolean;
+  };
+  connection_manager: {
+    dashboard_port: number;
+    engine_mode: "paper" | "live";
+    real_trading_ready: boolean;
+    missing_requirements: string[];
   };
   keys: {
     openrouter_api_key: string;

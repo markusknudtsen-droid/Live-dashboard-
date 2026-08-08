@@ -7,6 +7,7 @@ import { Modal } from "../components/Modal";
 export function SystemSecurityPage() {
   const statusPoll = usePolling<SecurityStatus>(() => api.get("/security"), 15000);
   const status = statusPoll.data;
+  const missingRequirements = status?.connection_manager.missing_requirements ?? [];
 
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
@@ -73,7 +74,7 @@ export function SystemSecurityPage() {
       <div className="page-header">
         <div>
           <h1>System Security</h1>
-          <p>API key management, connection health, and Solana wallet import/export.</p>
+          <p>Connection manager, readiness checks, API key management, and Solana wallet import/export.</p>
         </div>
       </div>
 
@@ -81,9 +82,72 @@ export function SystemSecurityPage() {
 
       <div className="grid grid--two">
         <div className="card">
+          <span className="kicker">Connection manager</span>
+          <h2 style={{ marginTop: 6 }}>Trading Engine Link</h2>
+          <div className="field">
+            <label>Dashboard Port</label>
+            <input type="text" readOnly value={status?.connection_manager.dashboard_port ?? "—"} className="mono" />
+          </div>
+          <div className="field">
+            <label>Dashboard API Target</label>
+            <input
+              type="text"
+              readOnly
+              value={status?.connections.dashboard_api_url_configured ? "Configured in .env" : "Not configured"}
+              className="mono"
+            />
+          </div>
+          <div className="field">
+            <label>Trade Ingest Key</label>
+            <input
+              type="text"
+              readOnly
+              value={status?.connections.dashboard_ingest_key_configured ? "Configured for bot push" : "Missing"}
+              className="mono"
+            />
+          </div>
+        </div>
+
+        <div className="card">
+          <span className="kicker">Readiness</span>
+          <h2 style={{ marginTop: 6 }}>Real Solana Status</h2>
+          <p className="text-muted" style={{ marginTop: 0 }}>
+            Mode: <strong>{status?.connection_manager.engine_mode === "live" ? "Live Solana" : "Paper trading"}</strong>
+          </p>
+          <span
+            className={`badge ${
+              status?.connection_manager.real_trading_ready ? "badge--success" : "badge--warning"
+            }`}
+          >
+            {status?.connection_manager.real_trading_ready ? "Ready for live dashboard trading" : "Configuration incomplete"}
+          </span>
+          {missingRequirements.length ? (
+            <ul className="readiness-list">
+              {missingRequirements.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-muted">All required live-trading settings detected.</p>
+          )}
+        </div>
+      </div>
+
+      <div className="grid grid--two">
+        <div className="card">
           <h2 style={{ marginTop: 0 }}>Connection Health</h2>
-          <HealthRow label="Solana RPC" healthy={status?.connections.solana_rpc.healthy} detail={status?.connections.solana_rpc.detail} />
-          <HealthRow label="DexScreener API" healthy={status?.connections.dexscreener.healthy} detail={status?.connections.dexscreener.detail} />
+          <HealthRow
+            label="Solana RPC"
+            healthy={status?.connections.solana_rpc.healthy}
+            detail={status?.connections.solana_rpc.detail}
+            latencyMs={status?.connections.solana_rpc.latency_ms}
+          />
+          <HealthRow
+            label="DexScreener API"
+            healthy={status?.connections.dexscreener.healthy}
+            detail={status?.connections.dexscreener.detail}
+            latencyMs={status?.connections.dexscreener.latency_ms}
+          />
           <HealthRow label="OpenRouter Key" healthy={status?.connections.openrouter_key_configured} detail={status?.connections.openrouter_key_configured ? "configured" : "missing"} />
         </div>
 
@@ -94,7 +158,7 @@ export function SystemSecurityPage() {
             <input type="text" readOnly value={status?.keys.openrouter_api_key || "not set"} className="mono" />
           </div>
           <div className="field">
-            <label>Dashboard API Key</label>
+            <label>Dashboard / Ingest Key</label>
             <input type="text" readOnly value={status?.keys.dashboard_api_key || "not set"} className="mono" />
           </div>
           <p className="text-muted" style={{ fontSize: 13 }}>
@@ -197,13 +261,24 @@ export function SystemSecurityPage() {
   );
 }
 
-function HealthRow({ label, healthy, detail }: { label: string; healthy?: boolean; detail?: string }) {
+function HealthRow({
+  label,
+  healthy,
+  detail,
+  latencyMs,
+}: {
+  label: string;
+  healthy?: boolean;
+  detail?: string;
+  latencyMs?: number | null;
+}) {
   return (
     <div className="field field--inline" style={{ marginBottom: 12 }}>
       <span>{label}</span>
       <span className={`badge ${healthy ? "badge--success" : "badge--danger"}`}>
         <span className={`status-dot ${healthy ? "status-dot--ok" : "status-dot--fail"}`} />
         {detail || (healthy ? "ok" : "unavailable")}
+        {latencyMs !== undefined && latencyMs !== null ? ` · ${latencyMs}ms` : ""}
       </span>
     </div>
   );

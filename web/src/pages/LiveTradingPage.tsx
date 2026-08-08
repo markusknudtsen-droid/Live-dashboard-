@@ -1,6 +1,6 @@
 import { usePolling } from "../hooks/usePolling";
 import { api } from "../api/client";
-import type { PortfolioResponse, TrendingToken } from "../api/types";
+import type { PortfolioResponse, ScannerSnapshot, TrendingToken } from "../api/types";
 
 /**
  * Memecoin prices are often sub-cent, so a fixed decimal count avoids
@@ -18,6 +18,7 @@ function formatUsdPrice(value: number): string {
 export function LiveTradingPage() {
   const portfolio = usePolling<PortfolioResponse>(() => api.get("/portfolio"), 6000);
   const trending = usePolling<TrendingToken[]>(() => api.get("/market/trending"), 20000);
+  const scanner = usePolling<ScannerSnapshot>(() => api.get("/market/scanner"), 20000);
 
   return (
     <>
@@ -74,49 +75,124 @@ export function LiveTradingPage() {
       </div>
 
       <div className="card">
+        <div className="page-header" style={{ marginBottom: 16 }}>
+          <div>
+            <h2 style={{ marginTop: 0, marginBottom: 4 }}>DexBoost & CTO Scanner</h2>
+            <p>
+              Automated alerts for boosted tokens and community-takeover signals. The original volume-ranked market
+              feed remains below as a fallback view.
+            </p>
+          </div>
+        </div>
+        {scanner.error && <div className="alert alert--error">{scanner.error}</div>}
+        <div className="table-shell">
+          <table>
+            <thead>
+              <tr>
+                <th>Alert</th>
+                <th>Symbol</th>
+                <th>Boosts</th>
+                <th>Triggered</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {scanner.data?.alerts.length ? (
+                scanner.data.alerts.map((alert) => (
+                  <tr key={`${alert.type}-${alert.token_address}`}>
+                    <td>{alert.type}</td>
+                    <td>{alert.symbol}</td>
+                    <td>{alert.boost_count}</td>
+                    <td>{new Date(alert.triggered_at).toLocaleTimeString()}</td>
+                    <td>
+                      <span className={`badge ${alert.type === "BOOST" ? "badge--success" : "badge--warning"}`}>
+                        {alert.type === "BOOST"
+                          ? `Buy trigger ready (${scanner.data?.boosted_threshold}+ boosts)`
+                          : "Watch for takeover follow-through"}
+                      </span>
+                    </td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={5} className="text-muted">
+                    {scanner.loading ? "Refreshing scanner…" : "No active boost or CTO alerts this cycle."}
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="card">
         <h2 style={{ marginTop: 0 }}>Trending Memecoins (by volume)</h2>
         {trending.error && <div className="alert alert--error">{trending.error}</div>}
-        <table>
-          <thead>
-            <tr>
-              <th>Symbol</th>
-              <th>Price</th>
-              <th>24h Change</th>
-              <th>Volume 24h</th>
-              <th>Liquidity</th>
-              <th>Buy/Sell</th>
-              <th>Age</th>
-            </tr>
-          </thead>
-          <tbody>
-            {trending.data?.length ? (
-              trending.data.map((token) => (
-                <tr key={token.address}>
-                  <td>
-                    <a href={token.url} target="_blank" rel="noreferrer">
-                      {token.symbol}
-                    </a>
-                  </td>
-                  <td>${formatUsdPrice(token.price_usd)}</td>
-                  <td className={token.price_change_24h >= 0 ? "stat-card__value--positive" : "stat-card__value--negative"}>
-                    {token.price_change_24h >= 0 ? "+" : ""}
-                    {token.price_change_24h.toFixed(2)}%
-                  </td>
-                  <td>${Math.round(token.volume_24h).toLocaleString()}</td>
-                  <td>${Math.round(token.liquidity_usd).toLocaleString()}</td>
-                  <td>{token.buy_to_sell_ratio.toFixed(2)}</td>
-                  <td>{token.age_hours.toFixed(1)}h</td>
-                </tr>
-              ))
-            ) : (
+        <div className="table-shell">
+          <table>
+            <thead>
               <tr>
-                <td colSpan={7} className="text-muted">
-                  {trending.loading ? "Scanning market…" : "No trending tokens found this cycle."}
-                </td>
+                <th>Symbol</th>
+                <th>Price</th>
+                <th>24h Change</th>
+                <th>Volume 24h</th>
+                <th>Liquidity</th>
+                <th>Buy/Sell</th>
+                <th>Boosts</th>
+                <th>Signal</th>
+                <th>Age</th>
               </tr>
-            )}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {trending.data?.length ? (
+                trending.data.map((token) => (
+                  <tr key={token.address}>
+                    <td>
+                      <a href={token.url} target="_blank" rel="noreferrer">
+                        {token.symbol}
+                      </a>
+                    </td>
+                    <td>${formatUsdPrice(token.price_usd)}</td>
+                    <td className={token.price_change_24h >= 0 ? "stat-card__value--positive" : "stat-card__value--negative"}>
+                      {token.price_change_24h >= 0 ? "+" : ""}
+                      {token.price_change_24h.toFixed(2)}%
+                    </td>
+                    <td>${Math.round(token.volume_24h).toLocaleString()}</td>
+                    <td>${Math.round(token.liquidity_usd).toLocaleString()}</td>
+                    <td>{token.buy_to_sell_ratio.toFixed(2)}</td>
+                    <td>{token.boost_count}</td>
+                    <td>
+                      <span
+                        className={`badge ${
+                          token.signal_status === "buy-ready"
+                            ? "badge--success"
+                            : token.signal_status === "cto-watch"
+                              ? "badge--warning"
+                              : "badge--neutral"
+                        }`}
+                      >
+                        {token.signal_status === "buy-ready"
+                          ? "Auto-buy ready"
+                          : token.signal_status === "cto-watch"
+                            ? "CTO watch"
+                            : token.signal_status === "boost-watch"
+                              ? "Boost watch"
+                              : "Volume watch"}
+                      </span>
+                    </td>
+                    <td>{token.age_hours.toFixed(1)}h</td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={9} className="text-muted">
+                    {trending.loading ? "Scanning market…" : "No trending tokens found this cycle."}
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </>
   );

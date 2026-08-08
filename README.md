@@ -175,10 +175,10 @@ React + Vite frontend (`web/`), themed "Arctic" (clean, minimalist, `#2B7FE0` / 
 |--------|---------|
 | Dashboard | Portfolio value, active positions, PnL trend, bot status |
 | Live Trading View | Real-time positions table + trending memecoins by volume |
-| Strategy Config | Base trade amount, risk thresholds, confidence, **Pause Bot** override |
+| Strategy Config | Base trade amount, risk thresholds, confidence, **Emergency Kill Switch** + pause override |
 | Vault Portal | Extractable profit + SOL withdrawal with mandatory secondary confirmation |
 | Transaction Logs | Paginated trade/withdrawal history |
-| System Security | Connection health, masked API keys, encrypted Solana private key import/export |
+| System Security | Connection manager, real-Solana readiness checks, masked API keys, encrypted Solana private key import/export |
 
 ### Setup
 
@@ -190,6 +190,8 @@ npm run hash-password -- "your-strong-password"
 # 2. Configure the remaining dashboard variables in .env
 DASHBOARD_JWT_SECRET=some-long-random-string
 WITHDRAWAL_CONFIRMATION_CODE=a-secret-only-you-know
+WALLET_ENCRYPTION_PASSPHRASE=another-long-random-string
+DASHBOARD_INGEST_KEY=shared-secret-used-by-the-bot
 
 # 3. Install the frontend's dependencies
 npm run web:install
@@ -203,6 +205,12 @@ npm run web:build
 npm run server:build
 npm run server:start   # serves the built frontend + API on DASHBOARD_PORT
 ```
+
+The dashboard now keeps the original volume-ranked market feed as a fallback view, while adding:
+- a **Connection Manager** card for dashboard port + bot ingest key visibility
+- an **Emergency Kill Switch** that immediately enables the manual trading override
+- a **DexBoost / CTO scanner** feed that highlights 50+ boost buy triggers and takeover-watch candidates
+- searchable trade logs with token-address and PnL context for historical review
 
 ### Security model
 

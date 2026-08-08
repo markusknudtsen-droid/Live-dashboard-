@@ -2,6 +2,7 @@ import { Router } from "express";
 import { Connection } from "@solana/web3.js";
 import { CONFIG } from "../../src/config.js";
 import rateLimit from "express-rate-limit";
+import { SERVER_CONFIG } from "../env.js";
 import {
   getActivePublicKey,
   isWalletUnlocked,
@@ -22,9 +23,22 @@ function maskSecret(secret: string): string {
   return `${secret.slice(0, 4)}${"•".repeat(Math.max(4, secret.length - 8))}${secret.slice(-4)}`;
 }
 
+async function runCheck(check: () => Promise<string>): Promise<{ healthy: boolean; detail: string; latency_ms: number | null }> {
+  const startedAt = Date.now();
+  try {
+    const detail = await check();
+    return { healthy: true, detail, latency_ms: Date.now() - startedAt };
+  } catch (error: unknown) {
+    return {
+      healthy: false,
+      detail: error instanceof Error ? error.message : String(error),
+      latency_ms: null,
+    };
+  }
+}
+
 router.get("/", async (_req, res) => {
-  const checks = await Promise.allSettled([checkSolanaRpc(), checkDexScreener()]);
-  const [rpcResult, dexResult] = checks;
+  const [rpcStatus, dexStatus] = await Promise.all([runCheck(checkSolanaRpc), runCheck(checkDexScreener)]);
 
   let walletAddress: string | null = null;
   try {
@@ -34,22 +48,35 @@ router.get("/", async (_req, res) => {
   }
 
   const hasVault = (await loadEncryptedWallet()) !== null;
+  const missingRequirements: string[] = [];
+  if (CONFIG.dryRun) missingRequirements.push("Set DRY_RUN=false to enable real-Solana execution.");
+  if (!CONFIG.solanaPrivateKey) missingRequirements.push("Add SOLANA_PRIVATE_KEY for the live wallet.");
+  if (!CONFIG.openRouterApiKey) missingRequirements.push("Add OPENROUTER_API_KEY for live AI analysis.");
+  if (!SERVER_CONFIG.ingestApiKey) missingRequirements.push("Set DASHBOARD_INGEST_KEY so the bot can push trades into the dashboard.");
+  if (!SERVER_CONFIG.walletEncryptionPassphrase) {
+    missingRequirements.push("Set WALLET_ENCRYPTION_PASSPHRASE to enable encrypted wallet import/export.");
+  }
+  if (!SERVER_CONFIG.withdrawalConfirmationCode) {
+    missingRequirements.push("Set WITHDRAWAL_CONFIRMATION_CODE before allowing live withdrawals.");
+  }
 
   res.json({
     connections: {
-      solana_rpc: {
-        healthy: rpcResult.status === "fulfilled",
-        detail: rpcResult.status === "fulfilled" ? rpcResult.value : String(rpcResult.reason),
-      },
-      dexscreener: {
-        healthy: dexResult.status === "fulfilled",
-        detail: dexResult.status === "fulfilled" ? dexResult.value : String(dexResult.reason),
-      },
+      solana_rpc: rpcStatus,
+      dexscreener: dexStatus,
       openrouter_key_configured: Boolean(CONFIG.openRouterApiKey),
+      dashboard_api_url_configured: Boolean(CONFIG.dashboardApiUrl),
+      dashboard_ingest_key_configured: Boolean(SERVER_CONFIG.ingestApiKey),
+    },
+    connection_manager: {
+      dashboard_port: SERVER_CONFIG.port,
+      engine_mode: CONFIG.dryRun ? "paper" : "live",
+      real_trading_ready: missingRequirements.length === 0,
+      missing_requirements: missingRequirements,
     },
     keys: {
       openrouter_api_key: maskSecret(CONFIG.openRouterApiKey),
-      dashboard_api_key: maskSecret(CONFIG.dashboardApiKey),
+      dashboard_api_key: maskSecret(SERVER_CONFIG.ingestApiKey || CONFIG.dashboardApiKey),
     },
     wallet: {
       active_address: walletAddress,

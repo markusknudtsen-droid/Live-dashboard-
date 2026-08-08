@@ -19,6 +19,13 @@ export function DashboardPage() {
 
   const summary = portfolio.data?.summary;
   const pnlPositive = (summary?.pnl_percent ?? 0) >= 0;
+  const winRate = useMemo(() => {
+    const items = trades.data?.items ?? [];
+    if (items.length === 0) return 0;
+    const wins = items.filter((item) => (item.pnl_percent ?? 0) > 0 || item.outcome === "SUCCESS" || item.outcome.includes("TAKE_PROFIT"))
+      .length;
+    return (wins / items.length) * 100;
+  }, [trades.data]);
 
   const chartData = useMemo(() => buildPnlSeries(trades.data), [trades.data]);
 
@@ -49,6 +56,10 @@ export function DashboardPage() {
             {pnlPositive ? "+" : ""}
             {(summary?.pnl_percent ?? 0).toFixed(2)}%
           </span>
+        </div>
+        <div className="card stat-card">
+          <span className="stat-card__label">Win Rate</span>
+          <span className="stat-card__value">{winRate.toFixed(1)}%</span>
         </div>
         <div className="card stat-card">
           <span className="stat-card__label">Base Buy Amount</span>

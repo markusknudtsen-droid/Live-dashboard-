@@ -46,6 +46,25 @@ export function StrategyConfigPage() {
     }
   }
 
+  async function handleKillSwitch() {
+    if (!form || form.override_enabled) {
+      setMessage({ type: "success", text: "Emergency kill switch is already engaged." });
+      return;
+    }
+
+    setSaving(true);
+    setMessage(null);
+    try {
+      const updated = await api.put<BotSettings>("/settings", { override_enabled: true });
+      setForm(updated);
+      setMessage({ type: "success", text: "Emergency kill switch engaged. Autonomous trading is now halted." });
+    } catch (err) {
+      setMessage({ type: "error", text: err instanceof ApiError ? err.message : "Failed to engage kill switch." });
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <>
       <div className="page-header">
@@ -56,6 +75,27 @@ export function StrategyConfigPage() {
       </div>
 
       {message && <div className={`alert alert--${message.type === "success" ? "success" : "error"}`}>{message.text}</div>}
+
+      <div className="card">
+        <div className="emergency-panel">
+          <div>
+            <span className="kicker">Asset security override</span>
+            <h2 style={{ margin: "6px 0" }}>Emergency Kill Switch</h2>
+            <p className="text-muted" style={{ margin: 0 }}>
+              Immediately freeze autonomous trading. The original pause toggle remains available below as a secondary
+              control for resuming later.
+            </p>
+          </div>
+          <button
+            type="button"
+            className="btn btn--danger"
+            onClick={() => void handleKillSwitch()}
+            disabled={saving || form.override_enabled}
+          >
+            {form.override_enabled ? "Kill Switch Engaged" : "Engage Kill Switch"}
+          </button>
+        </div>
+      </div>
 
       <div className="card">
         <div className="field field--inline">

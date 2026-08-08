@@ -106,6 +106,31 @@ test("ingested trades appear in the authenticated GET /api/trades log", async ()
   const sell = body.items.find((i: { tx_signature?: string }) => i.tx_signature === "DRYRUN-test-sell-1");
   assert.ok(sell, "the pushed SELL is present");
   assert.match(sell.outcome, /PAPER TAKE_PROFIT \+60\.00%/);
+  assert.equal(sell.status, "completed");
+  assert.equal(sell.token_address, sampleTrade.token_address);
+  assert.equal(sell.profit_sol, 0.18);
+});
+
+test("trade log supports text search across symbols, addresses, and status", async () => {
+  const token = issueSessionToken();
+  const searchRes = await fetch(
+    `${base}/api/trades?page=1&pageSize=20&search=${encodeURIComponent(sampleTrade.token_address.slice(0, 12))}`,
+    {
+      headers: { authorization: `Bearer ${token}` },
+    }
+  );
+  assert.equal(searchRes.status, 200);
+  const searchBody = await searchRes.json();
+  assert.ok(searchBody.items.length >= 1);
+  assert.ok(searchBody.items.every((item: { token_address?: string }) => item.token_address?.includes(sampleTrade.token_address.slice(0, 12))));
+
+  const statusRes = await fetch(`${base}/api/trades?page=1&pageSize=20&search=completed`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(statusRes.status, 200);
+  const statusBody = await statusRes.json();
+  assert.ok(statusBody.items.length >= 1);
+  assert.ok(statusBody.items.every((item: { status: string }) => item.status === "completed"));
 });
 
 test("ingestion is disabled (503) when no ingest key is configured", async () => {
