@@ -4,6 +4,7 @@ import { AuthProvider, useAuth } from "./context/AuthContext";
 import { AppLayout } from "./layouts/AppLayout";
 import { LoginPage } from "./pages/LoginPage";
 import { DashboardPage } from "./pages/DashboardPage";
+import { CommandCenterPage } from "./pages/CommandCenterPage";
 import { LiveTradingPage } from "./pages/LiveTradingPage";
 import { StrategyConfigPage } from "./pages/StrategyConfigPage";
 import { VaultPortalPage } from "./pages/VaultPortalPage";
@@ -24,6 +25,14 @@ function AppRoutes() {
       <Route path="/login" element={<LoginPage />} />
       <Route
         path="/"
+        element={
+          <ProtectedRoute>
+            <CommandCenterPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/classic-dashboard"
         element={
           <ProtectedRoute>
             <DashboardPage />

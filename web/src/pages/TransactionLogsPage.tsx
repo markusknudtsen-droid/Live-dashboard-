@@ -26,7 +26,10 @@ export function TransactionLogsPage() {
               <th>Timestamp</th>
               <th>Type</th>
               <th>Pair</th>
+              <th>Token Address</th>
               <th>Confidence</th>
+              <th>Profit (SOL)</th>
+              <th>Status</th>
               <th>Outcome</th>
               <th>Tx Signature</th>
             </tr>
@@ -38,9 +41,23 @@ export function TransactionLogsPage() {
                   <td>{new Date(item.timestamp).toLocaleString()}</td>
                   <td>{item.type}</td>
                   <td>{item.pair}</td>
-                  <td>{item.confidence}%</td>
+                  <td className="mono">{item.token_address ? `${item.token_address.slice(0, 10)}…` : "—"}</td>
+                  <td>{item.confidence !== undefined ? `${item.confidence}%` : "—"}</td>
+                  <td className={item.profit_sol >= 0 ? "stat-card__value--positive" : "stat-card__value--negative"}>
+                    {item.profit_sol >= 0 ? "+" : ""}
+                    {item.profit_sol.toFixed(4)}
+                  </td>
                   <td>
-                    <span className={`badge ${item.outcome === "SUCCESS" ? "badge--success" : "badge--danger"}`}>
+                    <span
+                      className={`badge ${
+                        item.status === "failed" ? "badge--danger" : item.status === "pending" ? "badge--warning" : "badge--success"
+                      }`}
+                    >
+                      {item.status}
+                    </span>
+                  </td>
+                  <td>
+                    <span className={`badge ${item.status === "failed" ? "badge--danger" : "badge--success"}`}>
                       {item.outcome}
                     </span>
                   </td>
@@ -62,7 +79,7 @@ export function TransactionLogsPage() {
               ))
             ) : (
               <tr>
-                <td colSpan={6} className="text-muted">
+                <td colSpan={9} className="text-muted">
                   No transactions recorded yet.
                 </td>
               </tr>

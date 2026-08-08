@@ -10,6 +10,9 @@ export interface BotSettings {
   min_confidence: number;
   stop_loss_percent: number;
   take_profit_percent: number;
+  engine_port: number;
+  engine_api_key: string;
+  preserve_classic_dashboard: boolean;
   updated_at: number;
 }
 
@@ -24,6 +27,9 @@ function defaultSettings(): BotSettings {
     min_confidence: CONFIG.minConfidence,
     stop_loss_percent: CONFIG.stopLossPercent,
     take_profit_percent: CONFIG.takeProfitPercent,
+    engine_port: Number(process.env.BOT_ENGINE_PORT || 5050),
+    engine_api_key: process.env.BOT_ENGINE_API_KEY || "",
+    preserve_classic_dashboard: true,
     updated_at: Date.now(),
   };
 }
@@ -76,6 +82,16 @@ export function validateSettingsPatch(patch: Partial<BotSettings>): string | nul
   if (patch.private_withdrawal_address !== undefined && patch.private_withdrawal_address.length > 0) {
     if (patch.private_withdrawal_address.length < 32 || patch.private_withdrawal_address.length > 44) {
       return "private_withdrawal_address must be a valid Solana address.";
+    }
+  }
+  if (patch.engine_port !== undefined) {
+    if (!Number.isInteger(patch.engine_port) || patch.engine_port < 1 || patch.engine_port > 65535) {
+      return "engine_port must be an integer between 1 and 65535.";
+    }
+  }
+  if (patch.engine_api_key !== undefined) {
+    if (typeof patch.engine_api_key !== "string" || patch.engine_api_key.length > 256) {
+      return "engine_api_key must be a string up to 256 characters.";
     }
   }
   return null;

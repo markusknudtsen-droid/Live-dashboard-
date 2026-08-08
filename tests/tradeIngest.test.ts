@@ -108,6 +108,20 @@ test("ingested trades appear in the authenticated GET /api/trades log", async ()
   assert.match(sell.outcome, /PAPER TAKE_PROFIT \+60\.00%/);
 });
 
+test("trade log supports search and includes enriched fields", async () => {
+  const token = issueSessionToken();
+  const res = await fetch(`${base}/api/trades?q=DezXAZ8z7PnrnRJ`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.ok(body.items.length > 0);
+  const first = body.items[0];
+  assert.equal(typeof first.token_address, "string");
+  assert.equal(typeof first.profit_sol, "number");
+  assert.ok(["pending", "completed", "failed"].includes(first.status));
+});
+
 test("ingestion is disabled (503) when no ingest key is configured", async () => {
   const original = SERVER_CONFIG.ingestApiKey;
   SERVER_CONFIG.ingestApiKey = "";

@@ -34,6 +34,7 @@ export interface TrendingToken {
   liquidity_usd: number;
   buy_to_sell_ratio: number;
   age_hours: number;
+  boost_count?: number;
   url: string;
 }
 
@@ -41,8 +42,14 @@ export interface TradeLogItem {
   id: string;
   type: string;
   pair: string;
+  token_address: string;
+  amount_sol?: number;
+  entry_price?: number;
+  exit_price?: number;
+  profit_sol: number;
   timestamp: number;
-  confidence: number;
+  confidence?: number;
+  status: "pending" | "completed" | "failed";
   outcome: string;
   tx_signature?: string;
 }
@@ -63,6 +70,9 @@ export interface BotSettings {
   min_confidence: number;
   stop_loss_percent: number;
   take_profit_percent: number;
+  engine_port: number;
+  engine_api_key_masked: string;
+  preserve_classic_dashboard: boolean;
   updated_at: number;
 }
 
@@ -97,4 +107,44 @@ export interface SecurityStatus {
     unlocked_override_active: boolean;
     encrypted_vault_present: boolean;
   };
+}
+
+export interface EngineConnectionStatus {
+  port: number;
+  connected: boolean;
+  latency_ms: number;
+  detail: string;
+}
+
+export interface ScannerFeedItem {
+  token_address: string;
+  symbol: string;
+  chain_id: string;
+  price_usd: number;
+  volume_24h: number;
+  liquidity_usd: number;
+  buy_to_sell_ratio: number;
+  age_hours: number;
+  boost_count: number;
+  url: string;
+}
+
+export interface ScannerFeedResponse {
+  filters: {
+    min_volume_24h: number;
+    min_liquidity_usd: number;
+    min_buy_ratio: number;
+    max_age_hours: number;
+  };
+  items: ScannerFeedItem[];
+}
+
+export interface AlertItem {
+  id: string;
+  type: "CTO" | "Boost";
+  token_address: string;
+  boost_count: number;
+  triggered_at: number;
+  status: "viewed" | "dismissed";
+  detail: string;
 }

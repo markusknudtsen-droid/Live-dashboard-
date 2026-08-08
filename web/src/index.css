@@ -476,3 +476,95 @@ tbody tr:hover {
   gap: 12px;
   flex-wrap: wrap;
 }
+
+.command-center {
+  --editorial-bg: #1a1208;
+  --editorial-surface: #1e140a;
+  --editorial-border: #3b2b19;
+  --editorial-text: #f6ead3;
+  --editorial-muted: #c5ae86;
+  --editorial-success: #53c891;
+  --editorial-danger: #ff6c5c;
+  --editorial-warning: #ffba57;
+  font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", "Times New Roman", serif;
+  color: var(--editorial-text);
+}
+
+.command-center .card {
+  background: linear-gradient(170deg, rgba(41, 28, 16, 0.96), rgba(30, 20, 10, 0.98));
+  border: 1px solid var(--editorial-border);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.25);
+}
+
+.command-center .page-header p,
+.command-center .text-muted,
+.command-center th,
+.command-center .stat-card__label {
+  color: var(--editorial-muted);
+}
+
+.command-center .stat-card__value--positive {
+  color: var(--editorial-success);
+}
+
+.command-center .stat-card__value--negative {
+  color: var(--editorial-danger);
+}
+
+.command-center table th,
+.command-center table td {
+  border-bottom: 1px solid rgba(197, 174, 134, 0.18);
+}
+
+.command-center tbody tr:hover {
+  background: rgba(59, 43, 25, 0.25);
+}
+
+.command-center .field input,
+.command-center .field select {
+  background: rgba(16, 10, 5, 0.65);
+  border-color: rgba(197, 174, 134, 0.25);
+  color: var(--editorial-text);
+}
+
+.command-center .field input:focus,
+.command-center .field select:focus {
+  outline: 2px solid var(--editorial-warning);
+}
+
+.command-center .btn--secondary {
+  background: rgba(59, 43, 25, 0.45);
+  border-color: rgba(197, 174, 134, 0.28);
+  color: var(--editorial-text);
+}
+
+.command-center .badge--success {
+  background: rgba(83, 200, 145, 0.16);
+  color: var(--editorial-success);
+}
+
+.command-center .badge--danger {
+  background: rgba(255, 108, 92, 0.16);
+  color: var(--editorial-danger);
+}
+
+.command-center .badge--warning {
+  background: rgba(255, 186, 87, 0.16);
+  color: var(--editorial-warning);
+}
+
+.btn--kill-switch {
+  width: 100%;
+  min-height: 64px;
+  letter-spacing: 0.12em;
+  font-size: 15px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+body:has(.command-center) {
+  background:
+    radial-gradient(circle at 20% -10%, rgba(198, 140, 64, 0.28), transparent 42%),
+    radial-gradient(circle at 85% 0%, rgba(103, 54, 22, 0.3), transparent 38%),
+    linear-gradient(170deg, #130b04, #1a1208 55%, #21150a);
+}

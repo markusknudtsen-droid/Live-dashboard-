@@ -24,7 +24,12 @@ export function StrategyConfigPage() {
     setSaving(true);
     setMessage(null);
     try {
-      const updated = await api.put<BotSettings>("/settings", form);
+      const updated = await api.put<BotSettings>("/settings", {
+        buy_amount_sol: form.buy_amount_sol,
+        min_confidence: form.min_confidence,
+        stop_loss_percent: form.stop_loss_percent,
+        take_profit_percent: form.take_profit_percent,
+      });
       setForm(updated);
       setMessage({ type: "success", text: "Strategy configuration saved." });
     } catch (err) {

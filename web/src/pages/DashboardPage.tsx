@@ -115,7 +115,7 @@ function buildPnlSeries(trades: TradeLogResponse | null): { label: string; succe
   const sorted = [...trades.items].sort((a, b) => a.timestamp - b.timestamp);
   let successes = 0;
   return sorted.map((item, index) => {
-    if (item.outcome === "SUCCESS") successes += 1;
+    if (item.status === "completed" && !item.outcome.toUpperCase().includes("LOSS")) successes += 1;
     return {
       label: new Date(item.timestamp).toLocaleDateString(undefined, { month: "short", day: "numeric" }),
       successRate: Math.round((successes / (index + 1)) * 100),
@@ -133,6 +133,6 @@ function StatusPill({ active }: { active: boolean }) {
 }
 
 function OutcomeBadge({ outcome }: { outcome: string }) {
-  const isSuccess = outcome === "SUCCESS";
+  const isSuccess = !outcome.toUpperCase().includes("FAIL");
   return <span className={`badge ${isSuccess ? "badge--success" : "badge--danger"}`}>{outcome}</span>;
 }

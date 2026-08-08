@@ -173,12 +173,16 @@ React + Vite frontend (`web/`), themed "Arctic" (clean, minimalist, `#2B7FE0` / 
 
 | Screen | Purpose |
 |--------|---------|
+| Editorial Command Center (new default) | Connection manager (port/API key + ping latency), emergency kill switch, CTO/Boost alerts, scanner feed, searchable trade feed, and risk summary |
+| Original Dashboard (fallback) | Previous overview page, still available as a second-choice route at `/classic-dashboard` |
 | Dashboard | Portfolio value, active positions, PnL trend, bot status |
 | Live Trading View | Real-time positions table + trending memecoins by volume |
 | Strategy Config | Base trade amount, risk thresholds, confidence, **Pause Bot** override |
 | Vault Portal | Extractable profit + SOL withdrawal with mandatory secondary confirmation |
 | Transaction Logs | Paginated trade/withdrawal history |
 | System Security | Connection health, masked API keys, encrypted Solana private key import/export |
+
+The command center is optimized for desktop operators, while preserving the original dashboard route as a fallback during migration.
 
 ### Setup
 

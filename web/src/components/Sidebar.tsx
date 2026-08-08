@@ -2,7 +2,8 @@ import { NavLink } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 
 const NAV_ITEMS = [
-  { to: "/", label: "Dashboard", icon: "◱" },
+  { to: "/", label: "Command Center", icon: "◱" },
+  { to: "/classic-dashboard", label: "Original Dashboard", icon: "◧" },
   { to: "/live-trading", label: "Live Trading", icon: "⚡" },
   { to: "/strategy", label: "Strategy Config", icon: "⚙" },
   { to: "/vault", label: "Vault Portal", icon: "🔒" },
