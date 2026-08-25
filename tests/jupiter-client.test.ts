@@ -73,6 +73,6 @@ test("isValidSolanaMint still validates independent of the Jupiter API config", 
   assert.equal(isValidSolanaMint("not-a-mint"), false);
 });
 
-after(() => {
-  server.close();
+after(async () => {
+  await new Promise<void>((resolve) => server.close(() => resolve()));
 });
