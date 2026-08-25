@@ -100,6 +100,25 @@ All configuration is via `.env` file:
 | `HTTP_MAX_RETRIES` | 3 | Retry attempts for retryable API errors |
 | `ALLOW_SKIP_PREFLIGHT` | false | Skip transaction preflight (unsafe; keep disabled for safety) |
 | `BOT_STATE_FILE` | `./data/state.json` | Local JSON file used to persist positions and trade history |
+| `JUPITER_API_KEY` (alias: `JUPITER_API`) | none | Optional Jupiter API key for higher rate limits; swaps work fine without one |
+| `JUPITER_API_BASE_URL` | `https://quote-api.jup.ag/v6` | Jupiter quote/swap host; only change if your Jupiter plan uses a different authenticated endpoint |
+
+### Using a Jupiter API key
+
+The bot works out of the box against Jupiter's free public endpoint — no key
+required. If you've generated a key from [Jupiter's API portal](https://dev.jup.ag/)
+(the dashboard may label the value `JUPITER_API`), set it in `.env`:
+
+```bash
+JUPITER_API_KEY=your-jupiter-api-key
+# Only if your plan uses a different host than the default free endpoint —
+# check your Jupiter portal for the exact base URL:
+# JUPITER_API_BASE_URL=https://api.jup.ag/swap/v1
+```
+
+When set, every quote and swap request sends it as the `x-api-key` header.
+This only affects rate limits / reliability of Jupiter's routing — it has no
+effect on `DRY_RUN`, position sizing, or any other risk setting.
 
 ## Risk Management
 

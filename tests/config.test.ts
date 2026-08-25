@@ -70,3 +70,20 @@ test("validateConfig requires SOLANA_PRIVATE_KEY unless DRY_RUN is enabled", () 
   });
   assert.doesNotThrow(() => validateConfig(dryConfig));
 });
+
+test("buildConfig defaults to the free, unauthenticated Jupiter endpoint with no key set", () => {
+  const config = buildConfig({});
+  assert.equal(config.jupiterApiBaseUrl, "https://quote-api.jup.ag/v6");
+  assert.equal(config.jupiterApiKey, "");
+});
+
+test("buildConfig accepts JUPITER_API_KEY or the JUPITER_API alias, and a custom base URL", () => {
+  const viaCanonicalName = buildConfig({ JUPITER_API_KEY: "key-1" });
+  assert.equal(viaCanonicalName.jupiterApiKey, "key-1");
+
+  const viaPortalLabel = buildConfig({ JUPITER_API: "key-2" });
+  assert.equal(viaPortalLabel.jupiterApiKey, "key-2");
+
+  const customBase = buildConfig({ JUPITER_API_BASE_URL: "https://api.jup.ag/swap/v1" });
+  assert.equal(customBase.jupiterApiBaseUrl, "https://api.jup.ag/swap/v1");
+});

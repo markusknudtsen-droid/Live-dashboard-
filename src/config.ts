@@ -12,6 +12,8 @@ export interface AppConfig {
   scanIntervalSeconds: number;
   solanaRpcUrl: string;
   dexScreenerApiUrl: string;
+  jupiterApiBaseUrl: string;
+  jupiterApiKey: string;
   scanChains: string[];
   dashboardApiUrl: string;
   dashboardApiKey: string;
@@ -133,6 +135,13 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     scanIntervalSeconds: parseIntegerInRange("SCAN_INTERVAL_SECONDS", env.SCAN_INTERVAL_SECONDS, 60, 5, 3600),
     solanaRpcUrl: env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com",
     dexScreenerApiUrl: env.DEXSCREENER_API_URL || "https://api.dexscreener.com",
+    // Default preserves prior behavior exactly (the free, unauthenticated
+    // legacy endpoint). Point this at your paid Jupiter API host (check your
+    // Jupiter portal for the exact base URL) once JUPITER_API_KEY is set.
+    jupiterApiBaseUrl: env.JUPITER_API_BASE_URL || "https://quote-api.jup.ag/v6",
+    // Accept either name: JUPITER_API_KEY, or JUPITER_API (the label Jupiter's
+    // own portal shows when you generate a key).
+    jupiterApiKey: env.JUPITER_API_KEY || env.JUPITER_API || "",
     scanChains: parseScanChains(env.SCAN_CHAINS),
     dashboardApiUrl: env.DASHBOARD_API_URL || "",
     dashboardApiKey: env.DASHBOARD_API_KEY || "",
@@ -177,4 +186,7 @@ export function validateConfig(config: AppConfig = CONFIG): void {
   console.log(`   Take Profit: +${config.takeProfitPercent}%`);
   console.log(`   Scan Interval: ${config.scanIntervalSeconds}s`);
   console.log(`   Chains: ${config.scanChains.join(", ")}`);
+  console.log(
+    `   Jupiter API: ${config.jupiterApiKey ? "authenticated key configured" : "unauthenticated (free tier)"} @ ${config.jupiterApiBaseUrl}`
+  );
 }
