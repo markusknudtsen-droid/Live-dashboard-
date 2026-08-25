@@ -138,7 +138,8 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     // Default preserves prior behavior exactly (the free, unauthenticated
     // legacy endpoint). Point this at your paid Jupiter API host (check your
     // Jupiter portal for the exact base URL) once JUPITER_API_KEY is set.
-    jupiterApiBaseUrl: env.JUPITER_API_BASE_URL || "https://quote-api.jup.ag/v6",
+    // Strip any trailing slash(es) so `${base}/quote` never double-slashes.
+    jupiterApiBaseUrl: (env.JUPITER_API_BASE_URL || "https://quote-api.jup.ag/v6").replace(/\/+$/, ""),
     // Accept either name: JUPITER_API_KEY, or JUPITER_API (the label Jupiter's
     // own portal shows when you generate a key).
     jupiterApiKey: env.JUPITER_API_KEY || env.JUPITER_API || "",

@@ -87,3 +87,11 @@ test("buildConfig accepts JUPITER_API_KEY or the JUPITER_API alias, and a custom
   const customBase = buildConfig({ JUPITER_API_BASE_URL: "https://api.jup.ag/swap/v1" });
   assert.equal(customBase.jupiterApiBaseUrl, "https://api.jup.ag/swap/v1");
 });
+
+test("buildConfig strips trailing slashes from JUPITER_API_BASE_URL to avoid double-slash request URLs", () => {
+  const oneSlash = buildConfig({ JUPITER_API_BASE_URL: "https://api.jup.ag/swap/v1/" });
+  assert.equal(oneSlash.jupiterApiBaseUrl, "https://api.jup.ag/swap/v1");
+
+  const manySlashes = buildConfig({ JUPITER_API_BASE_URL: "https://api.jup.ag/swap/v1///" });
+  assert.equal(manySlashes.jupiterApiBaseUrl, "https://api.jup.ag/swap/v1");
+});
