@@ -91,7 +91,7 @@ All configuration is via `.env` file:
 | `PAPER_STARTING_BALANCE_SOL` | 10 | Fake starting SOL balance used when `DRY_RUN=true` |
 | `MIN_CONFIDENCE` | 80 | Minimum AI confidence to execute (0-100) |
 | `MAX_POSITION_SOL` | 0.5 | Max SOL per trade |
-| `STOP_LOSS_PERCENT` | 15 | Stop loss trigger (-15%) |
+| `STOP_LOSS_PERCENT` | 33 | Stop loss trigger (-33%; widened from an earlier -15% default — memecoins often dip before reversing) |
 | `TAKE_PROFIT_PERCENT` | 50 | Take profit trigger (+50%) |
 | `SCAN_INTERVAL_SECONDS` | 60 | Time between scan cycles |
 | `SCAN_CHAINS` | solana | Chains to scan (comma-separated) |
@@ -123,7 +123,7 @@ effect on `DRY_RUN`, position sizing, or any other risk setting.
 ## Risk Management
 
 - **Position sizing**: Max 0.5 SOL per trade (configurable)
-- **Stop loss**: Automatic -15% exit (configurable)
+- **Stop loss**: Automatic -33% exit (configurable)
 - **Take profit**: Automatic +50% exit (configurable)
 - **Max positions**: 3 concurrent trades maximum
 - **Confidence threshold**: Only trades at 80%+ AI confidence

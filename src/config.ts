@@ -130,7 +130,12 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     solanaPrivateKey: env.SOLANA_PRIVATE_KEY || "",
     minConfidence: parseNumberInRange("MIN_CONFIDENCE", env.MIN_CONFIDENCE, 80, 0, 100),
     maxPositionSol: parseNumberInRange("MAX_POSITION_SOL", env.MAX_POSITION_SOL, 0.5, 0.001, 10),
-    stopLossPercent: parseNumberInRange("STOP_LOSS_PERCENT", env.STOP_LOSS_PERCENT, 15, 1, 95),
+    // Widened from the original 15% default: memecoins commonly dip before
+    // reversing, so a tight stop can exit a trade that would have recovered.
+    // 33% accepts a deeper drawdown in exchange for more room to work.
+    // (settingsStore.ts seeds its own default from this value, so a fresh
+    // dashboard settings file picks this up automatically.)
+    stopLossPercent: parseNumberInRange("STOP_LOSS_PERCENT", env.STOP_LOSS_PERCENT, 33, 1, 95),
     takeProfitPercent: parseNumberInRange("TAKE_PROFIT_PERCENT", env.TAKE_PROFIT_PERCENT, 50, 1, 1000),
     scanIntervalSeconds: parseIntegerInRange("SCAN_INTERVAL_SECONDS", env.SCAN_INTERVAL_SECONDS, 60, 5, 3600),
     solanaRpcUrl: env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com",
