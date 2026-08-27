@@ -27,3 +27,27 @@ test("normalizeAiAnalysis clamps numeric values and invalid enums", () => {
   assert.equal(normalized.momentum, "steady");
   assert.equal(normalized.riskLevel, "high");
 });
+
+// The AI's structured-output schema requires stopLossPercent on every
+// response, so this fallback only fires if a model returns malformed JSON
+// despite that. It must match CONFIG.stopLossPercent's default (33, see
+// src/config.ts) rather than a stale figure predating that change —
+// otherwise the one code path meant to catch a misbehaving model would
+// silently use a tighter stop than the operator configured everywhere else.
+test("normalizeAiAnalysis falls back to the 33% default stop-loss when the AI omits it", () => {
+  const normalized = normalizeAiAnalysis({
+    confidence: 90,
+    action: "BUY",
+    reasoning: "Test",
+    // stopLossPercent omitted entirely.
+    takeProfitPercent: 50,
+    positionSizePercent: 50,
+    riskRewardRatio: 2,
+    trendStrength: "strong_up",
+    momentum: "accelerating",
+    riskLevel: "medium",
+    narrative: "meme",
+  });
+
+  assert.equal(normalized.stopLossPercent, 33);
+});

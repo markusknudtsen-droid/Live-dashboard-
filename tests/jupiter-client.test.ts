@@ -36,6 +36,17 @@ await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 server.unref();
 const { port } = server.address() as AddressInfo;
 
+// tests/*.test.ts all run in one shared process (see package.json's test
+// script), so mutating process.env here without restoring it would leak
+// these values into whichever test file happens to run next — save the
+// originals now and put them back in after(), regardless of what this
+// file itself set them to.
+const previousEnv = {
+  JUPITER_API_BASE_URL: process.env.JUPITER_API_BASE_URL,
+  JUPITER_API_KEY: process.env.JUPITER_API_KEY,
+  HTTP_MAX_RETRIES: process.env.HTTP_MAX_RETRIES,
+};
+
 process.env.JUPITER_API_BASE_URL = `http://127.0.0.1:${port}`;
 process.env.JUPITER_API_KEY = "test-jupiter-key";
 process.env.HTTP_MAX_RETRIES = "0";
@@ -75,4 +86,8 @@ test("isValidSolanaMint still validates independent of the Jupiter API config", 
 
 after(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
+  for (const [key, value] of Object.entries(previousEnv)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
 });
