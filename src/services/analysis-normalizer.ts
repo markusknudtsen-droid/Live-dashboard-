@@ -32,7 +32,20 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
 
-export function normalizeAiAnalysis(raw: unknown): RawAiAnalysis {
+/**
+ * `stopLossFallbackPercent` defaults to 33 (config.ts's own default) so
+ * every existing caller/test keeps working unchanged, but CONFIG.stopLossPercent
+ * is actually mutable at runtime — index.ts overwrites it every cycle from
+ * dashboard settings — so a hardcoded literal here would silently diverge
+ * from whatever the operator has it set to the moment they change it away
+ * from 33. analyzeToken() passes CONFIG.stopLossPercent explicitly so this
+ * fallback (which only fires when the AI's own structured output is
+ * missing/invalid despite the schema requiring the field) always tracks
+ * the currently active setting, not a snapshot of its default. Threaded in
+ * as a parameter, rather than importing CONFIG directly, to keep this
+ * normalizer a pure, easily testable function.
+ */
+export function normalizeAiAnalysis(raw: unknown, stopLossFallbackPercent = 33): RawAiAnalysis {
   const source = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const actionCandidate = String(source.action || "SKIP").toUpperCase() as RawAiAnalysis["action"];
   const trendCandidate = String(source.trendStrength || "neutral") as RawAiAnalysis["trendStrength"];
@@ -43,14 +56,7 @@ export function normalizeAiAnalysis(raw: unknown): RawAiAnalysis {
     confidence: clamp(asFiniteNumber(source.confidence, 0), 0, 100),
     action: validActions.has(actionCandidate) ? actionCandidate : "SKIP",
     reasoning: String(source.reasoning || "No reasoning provided."),
-    // 33 mirrors CONFIG.stopLossPercent's default (src/config.ts) — this
-    // normalizer stays a pure function with no CONFIG import (for
-    // testability), so this only fires when the AI's own structured
-    // output is missing/invalid despite the schema requiring the field.
-    // Falling back to a stale, tighter default here would undercut the
-    // whole point of that config change on exactly the trades where the
-    // AI didn't give a usable recommendation.
-    stopLossPercent: clamp(asFiniteNumber(source.stopLossPercent, 33), 1, 95),
+    stopLossPercent: clamp(asFiniteNumber(source.stopLossPercent, stopLossFallbackPercent), 1, 95),
     takeProfitPercent: clamp(asFiniteNumber(source.takeProfitPercent, 50), 1, 1000),
     positionSizePercent: clamp(asFiniteNumber(source.positionSizePercent, 0), 0, 100),
     riskRewardRatio: clamp(asFiniteNumber(source.riskRewardRatio, 0), 0, 50),
