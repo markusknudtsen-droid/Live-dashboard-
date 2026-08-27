@@ -107,7 +107,12 @@ Current market context: Solana memecoins are the primary focus. Look for tokens 
 
     const content = response.choices?.[0]?.message?.content;
     if (!content) throw new Error("Empty AI response");
-    const analysis = normalizeAiAnalysis(JSON.parse(content));
+    // Passes the currently active CONFIG.stopLossPercent (mutable at
+    // runtime — index.ts overwrites it from dashboard settings each cycle)
+    // as the fallback used only when the AI's own stopLossPercent is
+    // missing/invalid, so that rare path tracks the operator's actual
+    // setting instead of a hardcoded snapshot of its default.
+    const analysis = normalizeAiAnalysis(JSON.parse(content), CONFIG.stopLossPercent);
 
     const entryPrice = candidate.priceUsd;
     const stopLoss = entryPrice * (1 - analysis.stopLossPercent / 100);
