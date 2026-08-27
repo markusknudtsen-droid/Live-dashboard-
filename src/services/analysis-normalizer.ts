@@ -43,7 +43,14 @@ export function normalizeAiAnalysis(raw: unknown): RawAiAnalysis {
     confidence: clamp(asFiniteNumber(source.confidence, 0), 0, 100),
     action: validActions.has(actionCandidate) ? actionCandidate : "SKIP",
     reasoning: String(source.reasoning || "No reasoning provided."),
-    stopLossPercent: clamp(asFiniteNumber(source.stopLossPercent, 15), 1, 95),
+    // 33 mirrors CONFIG.stopLossPercent's default (src/config.ts) — this
+    // normalizer stays a pure function with no CONFIG import (for
+    // testability), so this only fires when the AI's own structured
+    // output is missing/invalid despite the schema requiring the field.
+    // Falling back to a stale, tighter default here would undercut the
+    // whole point of that config change on exactly the trades where the
+    // AI didn't give a usable recommendation.
+    stopLossPercent: clamp(asFiniteNumber(source.stopLossPercent, 33), 1, 95),
     takeProfitPercent: clamp(asFiniteNumber(source.takeProfitPercent, 50), 1, 1000),
     positionSizePercent: clamp(asFiniteNumber(source.positionSizePercent, 0), 0, 100),
     riskRewardRatio: clamp(asFiniteNumber(source.riskRewardRatio, 0), 0, 50),
