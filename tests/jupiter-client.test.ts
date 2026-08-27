@@ -36,11 +36,12 @@ await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 server.unref();
 const { port } = server.address() as AddressInfo;
 
-// tests/*.test.ts all run in one shared process (see package.json's test
-// script), so mutating process.env here without restoring it would leak
-// these values into whichever test file happens to run next — save the
-// originals now and put them back in after(), regardless of what this
-// file itself set them to.
+// node --test (which tsx --test wraps) spawns a separate process per test
+// file — verified: two files' process.pid differ — so mutating process.env
+// here doesn't actually leak into a DIFFERENT test file's process. Still
+// worth restoring: any code in this same file that runs after these tests
+// (or gets added later) sees the environment this file found it in, not one
+// left mutated by tests earlier in this file.
 const previousEnv = {
   JUPITER_API_BASE_URL: process.env.JUPITER_API_BASE_URL,
   JUPITER_API_KEY: process.env.JUPITER_API_KEY,
