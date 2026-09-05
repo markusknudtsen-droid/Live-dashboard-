@@ -1,9 +1,9 @@
 import "dotenv/config";
 
-export type ExitStrategy = "strict" | "dynamic";
-
 export interface AppConfig {
   openRouterApiKey: string;
+  openRouterModel: string;
+  openRouterApiUrl: string;
   solanaPrivateKey: string;
   minConfidence: number;
   maxPositionSol: number;
@@ -25,50 +25,8 @@ export interface AppConfig {
   stateFilePath: string;
   dryRun: boolean;
   paperStartingBalanceSol: number;
-  /**
-   * "strict" (default, `npm run Runbot`): full exit at stopLoss/takeProfit,
-   * position sizing driven by confidence tiers (see CONFIDENCE_SIZE_TIERS).
-   * "dynamic" (`npm run Runbotfreedom`): full exit at stopLoss, but at
-   * takeProfit only PARTIAL_SELL_FRACTION of the position is sold and the
-   * remainder is self-managed until a bearish reversal is detected.
-   * Selected via CLI flag at startup (`--strategy=strict|dynamic`), not env,
-   * so both modes can share the same .env file.
-   */
-  exitStrategy: ExitStrategy;
-  /** Optional forced buy-in amount (SOL) for this run only, set via CLI. */
-  buyAmountOverrideSol: number | null;
+  requireProfitableFirstTrade: boolean;
 }
-
-/**
- * Confidence-based position sizing tiers used in "strict" mode. Intended for
- * cautious live-money testing: small, graduated buy-ins instead of a single
- * flat MAX_POSITION_SOL amount. The bot only ever sizes into the highest
- * tier whose confidence threshold is met.
- */
-export const STRICT_CONFIDENCE_SIZE_TIERS: Array<{ minConfidence: number; positionSizeSol: number }> = [
-  { minConfidence: 85, positionSizeSol: 0.3 },
-  { minConfidence: 80, positionSizeSol: 0.2 },
-  { minConfidence: 70, positionSizeSol: 0.1 },
-];
-
-/** Lowest confidence tier floor for strict mode - trades below this are skipped. */
-export const STRICT_MIN_TIER_CONFIDENCE = Math.min(
-  ...STRICT_CONFIDENCE_SIZE_TIERS.map((t) => t.minConfidence)
-);
-
-/** Freeform position sizing band used in "dynamic" mode. */
-export const DYNAMIC_MIN_POSITION_SOL = 0.2;
-export const DYNAMIC_MAX_POSITION_SOL = 0.7;
-
-/** Fraction of the position sold once the take-profit / partial-exit level is hit in "dynamic" mode. */
-export const DYNAMIC_PARTIAL_SELL_FRACTION = 0.5;
-
-/**
- * Percentage-point pullback from the post-partial-exit peak PnL that is
- * treated as a bearish reversal, triggering a full exit of the remainder in
- * "dynamic" mode.
- */
-export const DYNAMIC_TRAIL_DRAWDOWN_PERCENT = 40;
 
 function parseNumberInRange(
   key: string,
@@ -118,33 +76,37 @@ function parseScanChains(raw: string | undefined): string[] {
     .filter(Boolean);
 }
 
-function parseExitStrategy(raw: string | undefined): ExitStrategy {
-  const value = (raw || "strict").toLowerCase();
-  if (value === "strict" || value === "dynamic") return value;
-  throw new Error("EXIT_STRATEGY must be one of: strict, dynamic.");
-}
-
 export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   return {
     openRouterApiKey: env.OPENROUTER_API_KEY || "",
+    // The analysis model. Configurable because model IDs get retired — the
+    // previous hardcoded google/gemini-2.0-flash-001 was withdrawn from
+    // OpenRouter, which silently turned every analysis into a zero-confidence
+    // SKIP. See checkAnalysisModel() in src/model-preflight.ts, which verifies
+    // this model actually works before any trading starts.
+    openRouterModel: env.OPENROUTER_MODEL || "deepseek/deepseek-v3.2",
+    // Configurable purely so tests can point analyzeToken() at a local
+    // stand-in server (see tests/analyze.test.ts) instead of a real network
+    // call — same convention as jupiterApiBaseUrl below. Not meant to be
+    // changed in normal use; strip trailing slash(es) so `${base}/chat/...`
+    // never double-slashes.
+    openRouterApiUrl: (env.OPENROUTER_API_URL || "https://openrouter.ai/api/v1").replace(/\/+$/, ""),
     solanaPrivateKey: env.SOLANA_PRIVATE_KEY || "",
     minConfidence: parseNumberInRange("MIN_CONFIDENCE", env.MIN_CONFIDENCE, 80, 0, 100),
     maxPositionSol: parseNumberInRange("MAX_POSITION_SOL", env.MAX_POSITION_SOL, 0.5, 0.001, 10),
     // Widened from the original 15% default: memecoins commonly dip before
     // reversing, so a tight stop can exit a trade that would have recovered.
     // 33% accepts a deeper drawdown in exchange for more room to work.
-    // (settingsStore.ts seeds its own default from this value, so a fresh
-    // dashboard settings file picks this up automatically.)
     stopLossPercent: parseNumberInRange("STOP_LOSS_PERCENT", env.STOP_LOSS_PERCENT, 33, 1, 95),
     takeProfitPercent: parseNumberInRange("TAKE_PROFIT_PERCENT", env.TAKE_PROFIT_PERCENT, 50, 1, 1000),
     scanIntervalSeconds: parseIntegerInRange("SCAN_INTERVAL_SECONDS", env.SCAN_INTERVAL_SECONDS, 60, 5, 3600),
     solanaRpcUrl: env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com",
     dexScreenerApiUrl: env.DEXSCREENER_API_URL || "https://api.dexscreener.com",
-    // Default preserves prior behavior exactly (the free, unauthenticated
-    // legacy endpoint). Point this at your paid Jupiter API host (check your
-    // Jupiter portal for the exact base URL) once JUPITER_API_KEY is set.
-    // Strip any trailing slash(es) so `${base}/quote` never double-slashes.
-    jupiterApiBaseUrl: (env.JUPITER_API_BASE_URL || "https://quote-api.jup.ag/v6").replace(/\/+$/, ""),
+    // Jupiter Swap V2 Meta-Aggregator: /order + /execute. Keyless access is
+    // available at a lower rate limit; configure JUPITER_API_KEY for a
+    // production bot and higher reliability. Strip trailing slashes so
+    // `${base}/order` never produces a double slash.
+    jupiterApiBaseUrl: (env.JUPITER_API_BASE_URL || "https://api.jup.ag/swap/v2").replace(/\/+$/, ""),
     // Accept either name: JUPITER_API_KEY, or JUPITER_API (the label Jupiter's
     // own portal shows when you generate a key).
     jupiterApiKey: env.JUPITER_API_KEY || env.JUPITER_API || "",
@@ -165,27 +127,45 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       0.001,
       100000
     ),
-    exitStrategy: parseExitStrategy(env.EXIT_STRATEGY),
-    buyAmountOverrideSol: null,
+    // Opt-in safety gate for going live with a new wallet/strategy: open
+    // exactly one position, wait for it to close, and only resume normal
+    // trading if that first trade's realized PnL was positive. See
+    // src/first-trade-gate.ts. Off by default — existing behavior unchanged.
+    requireProfitableFirstTrade: parseBoolean(env.REQUIRE_PROFITABLE_FIRST_TRADE, false),
   };
 }
 
 export const CONFIG = buildConfig();
 
 export function validateConfig(config: AppConfig = CONFIG): void {
-  if (!config.openRouterApiKey) {
-    throw new Error("OPENROUTER_API_KEY is required. Set it in your .env file.");
-  }
+  // OPENROUTER_API_KEY is deliberately NOT checked here. A missing key only
+  // breaks AI analysis, not the bot as a whole — checkAnalysisModel()
+  // (src/model-preflight.ts) catches an EMPTY key at startup and represents
+  // it as a broken analysisModelStatus the same way a retired/incompatible
+  // model is, which blocks new entries but never position monitoring. An
+  // invalid-but-present key (revoked, typo'd, wrong account) isn't caught
+  // there — the /models catalogue endpoint it checks against doesn't
+  // require authentication — so it only surfaces once a real completion
+  // request gets rejected, handled by analyze.ts's existing per-call
+  // failure tracking and streak escalation instead. Either way, throwing
+  // here would exit the whole process before state is even restored,
+  // leaving any already-open position completely unmonitored — exactly the
+  // outcome this PR's analysis-failure handling elsewhere exists to prevent.
   if (!config.solanaPrivateKey && !config.dryRun) {
-    throw new Error("SOLANA_PRIVATE_KEY is required. Set it in your .env file (or enable DRY_RUN=true to test with a simulated wallet).");
+    throw new Error(
+      "SOLANA_PRIVATE_KEY is required. Set it in your .env file (or enable DRY_RUN=true to test with a simulated paper wallet)."
+    );
   }
   if (config.scanChains.length === 0) {
     throw new Error("SCAN_CHAINS must include at least one chain.");
   }
   console.log("✅ Configuration validated");
   if (config.dryRun) {
-    console.log(`   ⚠️  DRY RUN MODE: no real funds or transactions will be used (paper balance: ${config.paperStartingBalanceSol} SOL)`);
+    console.log(
+      `   🧪 DRY RUN MODE: no real funds or transactions are used (paper balance: ${config.paperStartingBalanceSol} SOL)`
+    );
   }
+  console.log(`   Analysis model: ${config.openRouterModel}`);
   console.log(`   Min Confidence: ${config.minConfidence}%`);
   console.log(`   Max Position: ${config.maxPositionSol} SOL`);
   console.log(`   Stop Loss: -${config.stopLossPercent}%`);
@@ -195,4 +175,7 @@ export function validateConfig(config: AppConfig = CONFIG): void {
   console.log(
     `   Jupiter API: ${config.jupiterApiKey ? "authenticated key configured" : "unauthenticated (free tier)"} @ ${config.jupiterApiBaseUrl}`
   );
+  if (config.requireProfitableFirstTrade) {
+    console.log("   🔒 REQUIRE_PROFITABLE_FIRST_TRADE enabled: only one position until it proves profitable.");
+  }
 }
