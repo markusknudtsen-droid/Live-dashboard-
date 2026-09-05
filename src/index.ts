@@ -8,50 +8,97 @@ import {
   getBalance,
   getActivePositions,
   setActivePositions,
+  setTradeListener,
+  MAX_CONCURRENT_POSITIONS,
 } from "./trader.js";
 import { logger } from "./logger.js";
-import { loadState, saveState, TradeHistoryItem } from "./persistence.js";
-import { loadSettings } from "./settingsStore.js";
+import { filterRestorablePositions, loadState, saveState, TradeHistoryItem } from "./persistence.js";
+import { isDashboardReportingEnabled, reportTrade } from "./dashboard-reporter.js";
+import {
+  describeGateState,
+  maxNewEntries,
+  resolveFirstTradeValidation,
+  shouldSkipNewEntries,
+} from "./first-trade-gate.js";
+import type { FirstTradeValidation } from "./first-trade-gate.js";
+import { checkAnalysisModel, formatModelCheck } from "./model-preflight.js";
 
 const tradeHistory: TradeHistoryItem[] = [];
 let cycleInProgress = false;
+let monitoringInProgress = false;
+let firstTradeValidated: FirstTradeValidation = null;
+// Tracks the analysis model preflight relative to the scheduled cycle loop,
+// which starts immediately and does NOT wait for the preflight to resolve.
+// Position monitoring (see runMonitoringTick()) runs on its own independent
+// schedule and never depends on this at all. "pending" and "broken" both
+// block new scans/entries in runCycle(); only "ok" allows them. This is
+// deliberately NOT a boolean: while the preflight (an external HTTP call
+// with retries) is still in flight, entries must stay blocked exactly like
+// a confirmed failure — "pending" is not "assume it's fine".
+type AnalysisModelStatus = "pending" | "ok" | "broken";
+let analysisModelStatus: AnalysisModelStatus = "pending";
 
 async function persistRuntimeState(): Promise<void> {
+  // saveState() itself serializes concurrent writes (see persistence.ts), so
+  // callers here don't need to queue on top of it.
   await saveState({
     activePositions: getActivePositions(),
     tradeHistory,
+    firstTradeValidated,
   });
+}
+
+/**
+ * Position monitoring runs on its own independent schedule (see main()),
+ * separate from the scan/analyze/buy cycle below — a provider outage can
+ * make batchAnalyze() spend its full retry/timeout budget on every one of
+ * up to 5 candidates sequentially (potentially several minutes), and
+ * runScheduledCycle()'s cycleInProgress guard means a slow cycle blocks
+ * every interval tick behind it. If monitoring lived inside that same
+ * cycle, an AI-provider outage would starve stop-loss/take-profit checks on
+ * real open positions for exactly as long as it starves analysis — the
+ * opposite of the guarantee the rest of this file works to provide.
+ * monitoringInProgress mirrors cycleInProgress so overlapping monitoring
+ * ticks can't double-evaluate (and potentially double-sell) the same
+ * position; it's a separate flag because the two loops are now independent
+ * and neither should be able to block the other.
+ */
+async function runMonitoringTick(): Promise<void> {
+  if (monitoringInProgress) return;
+  monitoringInProgress = true;
+  try {
+    await monitorPositions();
+    await persistRuntimeState();
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error(`Monitoring tick failed: ${message}`);
+  } finally {
+    monitoringInProgress = false;
+  }
 }
 
 async function runCycle(): Promise<void> {
   const cycleStart = Date.now();
   logger.info(`🔄 CYCLE START: ${new Date().toISOString()}`);
 
-  const dashboardSettings = await loadSettings();
-  if (dashboardSettings.override_enabled || !dashboardSettings.active_status) {
-    logger.warn("⏸️ Manual override enabled from dashboard. Skipping trading, only monitoring positions.");
-    await monitorPositions();
-    await persistRuntimeState();
-    return;
-  }
-
-  // Apply dashboard-configured strategy values for this cycle.
-  CONFIG.maxPositionSol = dashboardSettings.buy_amount_sol;
-  CONFIG.minConfidence = dashboardSettings.min_confidence;
-  CONFIG.stopLossPercent = dashboardSettings.stop_loss_percent;
-  CONFIG.takeProfitPercent = dashboardSettings.take_profit_percent;
-
   const balance = await getBalance();
   logger.info(`💰 Wallet Balance: ${balance.toFixed(4)} SOL`);
 
   if (balance < 0.05) {
-    logger.warn("Low balance! Skipping trading, only monitoring positions.");
-    await monitorPositions();
+    logger.warn("Low balance! Skipping trading this cycle (positions are still monitored independently).");
     await persistRuntimeState();
     return;
   }
 
-  await monitorPositions();
+  if (analysisModelStatus !== "ok") {
+    const reason =
+      analysisModelStatus === "pending"
+        ? "the analysis model preflight is still checking OpenRouter"
+        : "the analysis model preflight failed at startup (see above)";
+    logger.warn(`⛔ Skipping scan/analysis this cycle: ${reason}. Existing positions are still being monitored.`);
+    await persistRuntimeState();
+    return;
+  }
 
   logger.info("📡 Scanning for candidates...");
   const candidates = await scanForCandidates();
@@ -77,15 +124,30 @@ async function runCycle(): Promise<void> {
   }
 
   const activePositions = getActivePositions();
-  const maxConcurrentPositions = 3;
 
-  if (activePositions.length >= maxConcurrentPositions) {
-    logger.warn(`Max concurrent positions (${maxConcurrentPositions}) reached. Skipping new entries.`);
-    await persistRuntimeState();
-    return;
+  let slotsAvailable: number;
+  if (CONFIG.requireProfitableFirstTrade) {
+    const gate = shouldSkipNewEntries(firstTradeValidated, activePositions.length);
+    if (gate.skip) {
+      logger.warn(`⛔ New entries paused: ${gate.reason}`);
+      await persistRuntimeState();
+      return;
+    }
+    slotsAvailable = maxNewEntries(firstTradeValidated, MAX_CONCURRENT_POSITIONS, activePositions.length);
+    if (slotsAvailable <= 0) {
+      logger.warn(`Max concurrent positions (${MAX_CONCURRENT_POSITIONS}) reached. Skipping new entries.`);
+      await persistRuntimeState();
+      return;
+    }
+  } else {
+    if (activePositions.length >= MAX_CONCURRENT_POSITIONS) {
+      logger.warn(`Max concurrent positions (${MAX_CONCURRENT_POSITIONS}) reached. Skipping new entries.`);
+      await persistRuntimeState();
+      return;
+    }
+    slotsAvailable = MAX_CONCURRENT_POSITIONS - activePositions.length;
   }
 
-  const slotsAvailable = maxConcurrentPositions - activePositions.length;
   const tradesToExecute = buySignals.slice(0, slotsAvailable);
 
   for (const signal of tradesToExecute) {
@@ -155,13 +217,109 @@ async function main(): Promise<void> {
 
   validateConfig();
 
+  // Kick off the analysis-model preflight WITHOUT awaiting it yet. It's an
+  // external HTTP call (retries + timeouts can add up to tens of seconds, or
+  // minutes with a generous HTTP_MAX_RETRIES/HTTP_TIMEOUT_MS), and awaiting
+  // it here would delay restoring positions and running the first
+  // monitorPositions() by exactly that long — leaving an already-open
+  // real-money position without a stop-loss check for the duration. The
+  // result is consumed below, after state is restored, so a slow or hanging
+  // preflight can never postpone position protection.
+  const modelCheckPromise = checkAnalysisModel();
+
+  // Attach the handler now, not after the first scheduled cycle runs below.
+  // Promise callbacks only fire once *attached*, so if this were attached
+  // later (even via .then() on an already-resolved promise), an earlier
+  // synchronous read of analysisModelStatus — e.g. runCycle()'s check on the
+  // very first scheduled cycle — would still see "pending" regardless of how
+  // long the preflight actually took, wasting one full scan interval before
+  // the bot could ever act on a fast-resolving preflight.
+  void modelCheckPromise.then((modelCheck) => {
+    const modelReport = formatModelCheck(modelCheck, CONFIG.openRouterModel);
+    if (modelReport) {
+      // Match the log level to the worst thing the report contains, so it
+      // can't be suppressed by a LOG_LEVEL the user set to quiet down normal
+      // info noise. Fatal failures matter most: this is the only place the
+      // diagnostics (which model, why it failed, what to set instead) get
+      // printed — the branch below doesn't throw, it fails soft into
+      // analysisModelStatus = "broken", so there's no second "see above"
+      // error to fall back on if this were suppressed.
+      if (!modelCheck.ok) logger.error(modelReport);
+      else if (modelCheck.warnings.length > 0) logger.warn(modelReport);
+      else logger.info(modelReport);
+    }
+    if (!modelCheck.ok) {
+      // Do NOT throw/exit here: that would stop the whole process, including
+      // monitorPositions() — which has nothing to do with AI and is exactly
+      // what protects any already-open position with stop-loss/take-profit.
+      // Block only new scanning/entries (enforced in runCycle()); the bot
+      // keeps running and watching positions regardless.
+      analysisModelStatus = "broken";
+      logger.error("⛔ Trading new positions is disabled until OPENROUTER_MODEL is fixed and the bot is restarted. Existing positions will still be monitored.");
+    } else {
+      analysisModelStatus = "ok";
+    }
+  });
+
+  // Push every executed buy/sell to the dashboard (best-effort, non-blocking),
+  // and — when enabled — resolve the first-trade validation gate on SELL.
+  setTradeListener((event) => {
+    void reportTrade(event);
+    if (CONFIG.requireProfitableFirstTrade) {
+      const next = resolveFirstTradeValidation(event, firstTradeValidated);
+      if (next !== firstTradeValidated) {
+        firstTradeValidated = next;
+        logger.info(`🔒 First-trade validation resolved: ${describeGateState(firstTradeValidated)}`);
+        // Persist immediately rather than waiting for cycle-end: a crash
+        // between resolution and the next scheduled persist would otherwise
+        // lose the outcome and re-open the gate on restart.
+        persistRuntimeState().catch((error) => logger.error("Failed to persist first-trade gate state", error));
+      }
+    }
+  });
+  if (isDashboardReportingEnabled()) {
+    logger.info(`📡 Dashboard trade reporting enabled → ${CONFIG.dashboardApiUrl}/trades/ingest`);
+  }
+
   const { publicKey } = initTrader();
   const loadedState = await loadState();
-  setActivePositions(loadedState.activePositions);
+  firstTradeValidated = loadedState.firstTradeValidated;
+  const restorable = filterRestorablePositions(loadedState.activePositions, CONFIG.dryRun);
+  const skipped = loadedState.activePositions.length - restorable.length;
+  if (skipped > 0) {
+    logger.info(
+      CONFIG.dryRun
+        ? `🧪 DRY RUN: skipping ${skipped} persisted position(s) from a previous run (fresh paper wallet).`
+        : `Skipping ${skipped} paper (DRYRUN-) position(s) from persisted state — they were never bought on-chain.`
+    );
+  }
+  setActivePositions(restorable);
   tradeHistory.push(...loadedState.tradeHistory);
   logger.info(
-    `Recovered state: ${loadedState.activePositions.length} active positions, ${loadedState.tradeHistory.length} history entries`
+    `Recovered state: ${restorable.length} active positions, ${loadedState.tradeHistory.length} history entries`
   );
+
+  // Protect restored positions IMMEDIATELY, before anything that can block.
+  // Restoring them into memory does nothing on its own — monitorPositions()
+  // is what actually checks prices and fires stop-loss/take-profit. The
+  // independent monitoring interval set up below (runMonitoringTick) won't
+  // fire its own first tick until a full scanIntervalSeconds from now (60s
+  // by default); without this pass, a position carried across a restart
+  // would sit unchecked for that entire gap while the price moved. The
+  // model preflight kicked off above is never awaited here — it resolves in
+  // the background via modelCheckPromise.then() — so it has no bearing on
+  // this wait; this one-off pass exists purely to cover the scan-interval
+  // gap, with no risk of a near-instant duplicate once the real interval
+  // starts.
+  if (restorable.length > 0) {
+    try {
+      await monitorPositions();
+      await persistRuntimeState();
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error(`Initial position monitoring pass failed: ${message}`);
+    }
+  }
 
   const balance = await getBalance();
   logger.info(`💰 Starting Balance: ${balance.toFixed(4)} SOL`);
@@ -171,7 +329,26 @@ async function main(): Promise<void> {
   logger.info(`Max position size: ${CONFIG.maxPositionSol} SOL`);
   logger.info(`Stop loss: -${CONFIG.stopLossPercent}%`);
   logger.info(`Take profit: +${CONFIG.takeProfitPercent}%`);
+  if (CONFIG.requireProfitableFirstTrade) {
+    logger.info(`🔒 First-trade validation gate: ${describeGateState(firstTradeValidated)}`);
+  }
 
+  // Position monitoring runs on its own independent interval, decoupled from
+  // the scan/analyze/buy cycle below — see runMonitoringTick()'s comment for
+  // why: a stuck cycle (e.g. an AI-provider outage) must never starve
+  // stop-loss/take-profit checks on real open positions. The first tick
+  // fires one scanIntervalSeconds from now, not immediately — the pass just
+  // above already covers right now.
+  setInterval(() => {
+    void runMonitoringTick();
+  }, CONFIG.scanIntervalSeconds * 1000);
+
+  // Start the scan/analyze/buy cycle loop NOW, without waiting for the
+  // preflight. runCycle() checks analysisModelStatus itself: if the
+  // preflight (kicked off, and its handler attached, above) already
+  // resolved by now, this first cycle can scan immediately; otherwise it
+  // stays "pending" and this cycle skips scanning/entries same as any other
+  // in-flight state.
   await runScheduledCycle();
 
   setInterval(() => {
