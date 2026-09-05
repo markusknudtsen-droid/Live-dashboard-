@@ -1,134 +1,418 @@
-import test from "node:test";
+import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { CONFIG } from "../src/config.js";
-import {
+
+// Enable DRY_RUN before the config module is first loaded. In dry-run no
+// SOLANA_PRIVATE_KEY is required; OPENROUTER_API_KEY is only set so building the
+// config succeeds (these tests never call the AI analyzer).
+process.env.DRY_RUN = "true";
+process.env.PAPER_STARTING_BALANCE_SOL = "5";
+process.env.OPENROUTER_API_KEY = "test";
+
+type TradeSignalT = import("../src/analyze.js").TradeSignal;
+type TokenCandidateT = import("../src/scanner.js").TokenCandidate;
+
+const {
   initTrader,
+  getBalance,
   executeBuy,
   executeSell,
-  getBalance,
+  evaluatePositionAtPrice,
   getActivePositions,
+  getWalletAddress,
   setActivePositions,
-} from "../src/trader.js";
-import type { TradeSignal } from "../src/analyze.js";
-import type { TokenCandidate } from "../src/scanner.js";
+  setTradeListener,
+  MAX_CONCURRENT_POSITIONS,
+} = await import("../src/trader.js");
+type TradeEventT = import("../src/trader.js").TradeEvent;
 
-function makeCandidate(overrides: Partial<TokenCandidate> = {}): TokenCandidate {
-  return {
-    address: "So11111111111111111111111111111111111111112",
-    symbol: "FAKE",
-    name: "Fake Token",
+const MINT = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263";
+
+function makeSignal(overrides: Partial<TokenCandidateT> = {}): TradeSignalT {
+  const token: TokenCandidateT = {
+    address: MINT,
+    symbol: "BONK",
+    name: "Bonk",
     chainId: "solana",
-    pairAddress: "pair-fake",
-    priceUsd: 0.001,
+    pairAddress: "pair1",
+    priceUsd: 0.00002,
     priceChange5m: 1,
-    priceChange1h: 2,
-    priceChange6h: 3,
-    priceChange24h: 4,
-    volume24h: 10000,
+    priceChange1h: 5,
+    priceChange6h: 10,
+    priceChange24h: 20,
+    volume24h: 1_000_000,
     volumeChange: 0,
-    liquidityUsd: 5000,
-    marketCap: 100000,
-    txns24hBuys: 10,
-    txns24hSells: 5,
-    buyToSellRatio: 2,
-    pairCreatedAt: Date.now(),
+    liquidityUsd: 500_000,
+    marketCap: 100_000_000,
+    txns24hBuys: 800,
+    txns24hSells: 200,
+    buyToSellRatio: 0.8,
+    pairCreatedAt: Date.now() - 3_600_000,
     ageHours: 1,
-    url: "https://dexscreener.com/solana/pair-fake",
+    url: "https://dexscreener.com/solana/pair1",
     ...overrides,
   };
-}
-
-function makeSignal(overrides: Partial<TradeSignal> = {}): TradeSignal {
-  const token = makeCandidate();
   return {
     token,
-    confidence: 90,
+    confidence: 88,
     action: "BUY",
     reasoning: "test",
     entryPrice: token.priceUsd,
     stopLoss: token.priceUsd * 0.85,
     takeProfit: token.priceUsd * 1.5,
-    positionSizeSol: 0.5,
+    positionSizeSol: 0.2,
     riskRewardRatio: 3,
-    trendStrength: "strong",
-    momentum: "high",
+    trendStrength: "strong_up",
+    momentum: "accelerating",
     riskLevel: "medium",
-    narrative: "test",
-    ...overrides,
+    narrative: "dog",
   };
 }
 
-test("dry-run mode simulates buy/sell without real transactions", async () => {
-  const originalDryRun = CONFIG.dryRun;
-  const originalPaperBalance = CONFIG.paperStartingBalanceSol;
-  const originalRpcUrl = CONFIG.solanaRpcUrl;
-
-  CONFIG.dryRun = true;
-  CONFIG.paperStartingBalanceSol = 5;
-  // A Connection object is instantiated in initTrader() but never used to make
-  // network calls in dry-run mode, so any syntactically valid RPC URL works here.
-  CONFIG.solanaRpcUrl = "http://dry-run-placeholder.invalid";
-
-  try {
-    setActivePositions([]);
-    initTrader();
-
-    const startBalance = await getBalance();
-    assert.equal(startBalance, 5);
-
-    const signal = makeSignal({ positionSizeSol: 1 });
-    const buyResult = await executeBuy(signal);
-
-    assert.equal(buyResult.success, true);
-    assert.ok(buyResult.txSignature?.startsWith("DRYRUN-"));
-
-    const afterBuyBalance = await getBalance();
-    assert.equal(afterBuyBalance, 4);
-    assert.equal(getActivePositions().length, 1);
-
-    const [position] = getActivePositions();
-    // Simulate a take-profit price move by replacing the tracked position with
-    // one that has +50% PnL, using the public setActivePositions API rather
-    // than mutating the object returned by getActivePositions() (which is
-    // documented as a defensive copy).
-    const positionAtTakeProfit = { ...position, pnlPercent: 50 };
-    setActivePositions([positionAtTakeProfit]);
-
-    const sellResult = await executeSell(positionAtTakeProfit, "TAKE_PROFIT");
-    assert.equal(sellResult.success, true);
-    assert.ok(sellResult.txSignature?.startsWith("DRYRUN-"));
-
-    const afterSellBalance = await getBalance();
-    assert.equal(afterSellBalance, 5.5);
-    assert.equal(getActivePositions().length, 0);
-  } finally {
-    setActivePositions([]);
-    CONFIG.dryRun = originalDryRun;
-    CONFIG.paperStartingBalanceSol = originalPaperBalance;
-    CONFIG.solanaRpcUrl = originalRpcUrl;
-  }
+// The trader keeps module-level state (wallet, paper balance, positions,
+// listener). Reset it before every test so the suite is order-independent and
+// individual tests can be run in isolation.
+beforeEach(() => {
+  initTrader();
+  setActivePositions([]);
+  setTradeListener(null);
 });
 
-test("dry-run buy rejects when simulated balance is insufficient", async () => {
-  const originalDryRun = CONFIG.dryRun;
-  const originalPaperBalance = CONFIG.paperStartingBalanceSol;
+test("DRY_RUN: initTrader creates a paper wallet with the fake starting balance and no private key", async () => {
+  const { publicKey } = initTrader();
+  assert.ok(publicKey.length > 30, "paper wallet has a public address");
+  assert.equal(await getBalance(), 5, "paper balance equals PAPER_STARTING_BALANCE_SOL");
+  setActivePositions([]);
+});
 
-  CONFIG.dryRun = true;
-  CONFIG.paperStartingBalanceSol = 0.05;
+test("DRY_RUN: a simulated buy debits the paper wallet and opens a position with a fake tx", async () => {
+  setActivePositions([]);
+  const before = await getBalance();
+  const result = await executeBuy(makeSignal());
+  assert.equal(result.success, true);
+  assert.ok(result.txSignature?.startsWith("DRYRUN-"), "buy uses a simulated DRYRUN tx signature");
+  assert.equal(await getBalance(), before - 0.2, "buy debits exactly the position size");
+  assert.equal(getActivePositions().length, 1, "one open position after buy");
+});
 
-  try {
-    setActivePositions([]);
-    initTrader();
+test("DRY_RUN: take-profit exit sells and settles proceeds back to the same wallet", async () => {
+  setActivePositions([]);
+  const walletAddr = getWalletAddress();
+  const before = await getBalance();
+  await executeBuy(makeSignal());
+  const afterBuy = await getBalance();
+  assert.ok(afterBuy < before);
 
-    const signal = makeSignal({ positionSizeSol: 1 });
-    const buyResult = await executeBuy(signal);
+  const position = getActivePositions()[0];
+  // Price rips +60%, above the +50% take-profit level -> auto sell.
+  await evaluatePositionAtPrice(position, position.entryPrice * 1.6);
 
-    assert.equal(buyResult.success, false);
-    assert.match(buyResult.error ?? "", /Insufficient balance/);
-    assert.equal(getActivePositions().length, 0);
-  } finally {
-    setActivePositions([]);
-    CONFIG.dryRun = originalDryRun;
-    CONFIG.paperStartingBalanceSol = originalPaperBalance;
+  assert.equal(getActivePositions().length, 0, "position closed after take-profit");
+  const after = await getBalance();
+  // Proceeds = 0.2 * (1 + 0.60) = 0.32, so net vs the pre-buy balance is +0.12.
+  assert.ok(Math.abs(after - (before + 0.12)) < 1e-9, "profit settled back to the wallet");
+  assert.equal(getWalletAddress(), walletAddr, "wallet address never changes on a trade");
+});
+
+test("DRY_RUN: stop-loss exit sells at a loss but still returns proceeds to the same wallet", async () => {
+  setActivePositions([]);
+  const before = await getBalance();
+  await executeBuy(makeSignal());
+  const position = getActivePositions()[0];
+  // Price drops -20%, below the -15% stop-loss level -> auto sell.
+  await evaluatePositionAtPrice(position, position.entryPrice * 0.8);
+
+  assert.equal(getActivePositions().length, 0, "position closed after stop-loss");
+  const after = await getBalance();
+  // Proceeds = 0.2 * (1 - 0.20) = 0.16, so net vs the pre-buy balance is -0.04.
+  assert.ok(Math.abs(after - (before - 0.04)) < 1e-9, "loss-adjusted proceeds settled back to the wallet");
+});
+
+test("DRY_RUN: a manual sell of an open position credits the paper wallet", async () => {
+  setActivePositions([]);
+  await executeBuy(makeSignal());
+  const position = getActivePositions()[0];
+  const before = await getBalance();
+  const result = await executeSell(position, "MANUAL");
+  assert.equal(result.success, true);
+  assert.ok(result.txSignature?.startsWith("DRYRUN-"));
+  assert.ok((await getBalance()) > before, "manual sell returns funds to the wallet");
+  assert.equal(getActivePositions().length, 0);
+});
+
+test("DRY_RUN: a paper buy for the entire balance succeeds (no fee buffer reserved)", async () => {
+  setActivePositions([]);
+  const balance = await getBalance(); // 5 paper SOL
+  const result = await executeBuy({ ...makeSignal(), positionSizeSol: balance });
+  assert.equal(result.success, true, "buying the full paper balance is allowed in dry-run");
+  assert.equal(await getBalance(), 0);
+});
+
+test("evaluatePositionAtPrice ignores a position with an invalid entry price", async () => {
+  setActivePositions([
+    {
+      tokenAddress: MINT,
+      tokenSymbol: "BONK",
+      chainId: "solana",
+      entryPrice: 0, // corrupt/rehydrated position
+      currentPrice: 0,
+      amountSol: 0.2,
+      stopLoss: 0,
+      takeProfit: 0,
+      entryTime: Date.now(),
+      pnlPercent: 0,
+      txSignature: "DRYRUN-x",
+    },
+  ]);
+  const position = getActivePositions()[0];
+  await assert.doesNotReject(() => evaluatePositionAtPrice(position, 0.00005));
+  assert.equal(getActivePositions().length, 1, "no sell is triggered");
+  assert.equal(Number.isNaN(getActivePositions()[0].pnlPercent), false, "PnL is not NaN");
+});
+
+test("DRY_RUN: a corrupted PnL below -100% cannot drive the paper balance negative", async () => {
+  setActivePositions([]);
+  await executeBuy(makeSignal());
+  const position = getActivePositions()[0];
+  // Simulate a corrupted/rehydrated PnL: worse than a total loss.
+  position.pnlPercent = -250;
+  const before = await getBalance();
+  const result = await executeSell(position, "MANUAL");
+  assert.equal(result.success, true);
+  const after = await getBalance();
+  assert.equal(after, before, "proceeds are floored at 0 (PnL clamped to -100%)");
+  assert.ok(after >= 0, "paper balance never goes negative");
+});
+
+test("a rejecting async trade listener never breaks the trade or the process", async () => {
+  setActivePositions([]);
+  setTradeListener(async () => {
+    throw new Error("listener boom");
+  });
+  const result = await executeBuy(makeSignal());
+  setTradeListener(null);
+  assert.equal(result.success, true, "the buy still succeeds");
+  assert.equal(getActivePositions().length, 1, "the position is still opened");
+  // Let the rejected listener promise settle; an unhandled rejection here
+  // would fail the test process.
+  await new Promise((r) => setImmediate(r));
+});
+
+test("a registered trade listener receives BUY then SELL events for reporting", async () => {
+  setActivePositions([]);
+  const events: TradeEventT[] = [];
+  setTradeListener((e) => events.push(e));
+
+  await executeBuy(makeSignal());
+  const position = getActivePositions()[0];
+  await evaluatePositionAtPrice(position, position.entryPrice * 1.6); // take-profit -> sell
+
+  setTradeListener(null);
+
+  assert.equal(events.length, 2, "one BUY and one SELL emitted");
+  assert.equal(events[0].type, "BUY");
+  assert.equal(events[0].paper, true);
+  assert.equal(events[0].confidence, 88);
+  assert.equal(events[1].type, "SELL");
+  assert.equal(events[1].reason, "TAKE_PROFIT");
+  assert.ok((events[1].pnlPercent ?? 0) > 0, "sell event carries positive PnL");
+  assert.ok(events[1].txSignature.startsWith("DRYRUN-"));
+});
+
+// index.ts runs the scan/analyze/buy cycle and position monitoring (which
+// calls executeSell) on two independent schedules with no guard between
+// them — only a trader-level lock inside executeBuy/executeSell can prevent
+// them from interleaving. executeBuy has a real await point (getBalance())
+// before it mutates state, but executeSell's DRY_RUN path has none — so
+// without the lock, firing both without awaiting the first lets the sell's
+// synchronous body run to completion (and emit its event) *before* the
+// buy's continuation ever resumes, even though the buy was invoked first.
+// That's the exact race: an operation invoked later completes and mutates
+// shared state before an earlier, already-in-flight one does. With the
+// lock, executeBuy claims it before yielding at getBalance(), so the sell
+// queues behind it and both fire in call order.
+test("executeBuy and executeSell fired without awaiting the first are serialized in call order, not interleaved", async () => {
+  setActivePositions([]);
+  await executeBuy(makeSignal());
+  const existingPosition = getActivePositions()[0];
+
+  const events: TradeEventT[] = [];
+  setTradeListener((e) => events.push(e));
+
+  const buyPromise = executeBuy(makeSignal());
+  const sellPromise = executeSell(existingPosition, "MANUAL");
+  const [buyResult, sellResult] = await Promise.all([buyPromise, sellPromise]);
+
+  setTradeListener(null);
+
+  assert.equal(buyResult.success, true);
+  assert.equal(sellResult.success, true);
+  assert.equal(events.length, 2, "one BUY and one SELL emitted");
+  assert.equal(events[0].type, "BUY", "the earlier-invoked buy must complete first, not be pre-empted by the sell");
+  assert.equal(events[1].type, "SELL");
+});
+
+// The trader lock only serializes execution — it doesn't stop two callers
+// from resolving the SAME still-open position (e.g. via a lookup like
+// getActivePositions().find(), the way mcp-server.ts's memebot_paper_sell
+// tool does) before either of them calls executeSell. Without a post-lock
+// membership re-check, the second, stale call would settle the same
+// position a second time — crediting the paper wallet twice for one close.
+test("two concurrent executeSell calls for the same position settle it only once", async () => {
+  setActivePositions([]);
+  await executeBuy(makeSignal());
+  const position = getActivePositions()[0];
+  const balanceBeforeSell = await getBalance();
+
+  // Simulate two callers that both resolved the same position reference
+  // before either reached executeSell (as two overlapping MCP tool calls
+  // for the same token_address would), by calling it twice with the same
+  // object without awaiting the first.
+  const [first, second] = await Promise.all([
+    executeSell(position, "MANUAL"),
+    executeSell(position, "MANUAL"),
+  ]);
+
+  const results = [first, second];
+  const successes = results.filter((r) => r.success);
+  const failures = results.filter((r) => !r.success);
+  assert.equal(successes.length, 1, "exactly one of the two duplicate calls actually settles the position");
+  assert.equal(failures.length, 1, "the other is rejected as a stale/duplicate request");
+  assert.match(failures[0].error ?? "", /already closed/i);
+
+  assert.equal(getActivePositions().length, 0, "the position is removed exactly once");
+  const expectedProceeds = position.amountSol * (1 + position.pnlPercent / 100);
+  const balanceAfterSell = await getBalance();
+  assert.ok(
+    Math.abs(balanceAfterSell - (balanceBeforeSell + expectedProceeds)) < 1e-9,
+    "the paper wallet is credited exactly once, not twice"
+  );
+});
+
+// Callers (index.ts's runCycle, mcp-server.ts's memebot_paper_buy) each
+// check activePositions.length against MAX_CONCURRENT_POSITIONS before ever
+// calling executeBuy, but that check happens outside the trader lock —
+// concurrent callers (overlapping MCP tool calls, in particular) can all
+// pass it before any of them has actually opened a position. Only a
+// re-check made after acquiring the lock is atomic with the buy itself.
+test("concurrent executeBuy calls never open more than MAX_CONCURRENT_POSITIONS positions", async () => {
+  setActivePositions([]);
+
+  // Fire more buys than the limit allows, all "concurrently" (without
+  // awaiting any of them first) — simulating overlapping MCP tool calls
+  // that each independently saw room before any of them actually bought.
+  const attempts = MAX_CONCURRENT_POSITIONS + 2;
+  const results = await Promise.all(Array.from({ length: attempts }, () => executeBuy(makeSignal())));
+
+  const successes = results.filter((r) => r.success);
+  const failures = results.filter((r) => !r.success);
+  assert.equal(successes.length, MAX_CONCURRENT_POSITIONS, "exactly the limit's worth of buys succeed");
+  assert.equal(failures.length, attempts - MAX_CONCURRENT_POSITIONS, "the rest are rejected");
+  for (const failure of failures) {
+    assert.match(failure.error ?? "", /Max concurrent positions/);
   }
+  assert.equal(getActivePositions().length, MAX_CONCURRENT_POSITIONS, "the open-position count never exceeds the limit");
+});
+
+// executeSell's markPriceUsd parameter marks the position to a caller-given
+// exit price INSIDE the lock, atomically with settlement — mcp-server.ts's
+// memebot_paper_sell tool used to mutate position.currentPrice/pnlPercent
+// itself, outside the lock, before calling executeSell. Two concurrent
+// calls for the same position with different prices shared that one
+// mutable object: whichever call's mutation landed last (not necessarily
+// the one that reached the lock first) is what the first call's queued
+// settlement would have used, silently settling it at a price it never
+// reported back to its caller.
+test("a duplicate concurrent sell with a different price cannot change what the first sell actually settles at", async () => {
+  setActivePositions([]);
+  await executeBuy(makeSignal()); // entryPrice = 0.00002 (see makeSignal)
+  const position = getActivePositions()[0];
+
+  const priceUp = position.entryPrice * 1.5; // +50%
+  const priceDown = position.entryPrice * 0.5; // -50%
+
+  const [first, second] = await Promise.all([
+    executeSell(position, "MANUAL", priceUp),
+    executeSell(position, "MANUAL", priceDown),
+  ]);
+
+  const successes = [first, second].filter((r) => r.success);
+  const failures = [first, second].filter((r) => !r.success);
+  assert.equal(successes.length, 1, "only the first-queued call actually settles");
+  assert.equal(failures.length, 1, "the second is rejected as a stale duplicate, its price never applied");
+  assert.match(failures[0].error ?? "", /already closed/i);
+
+  // The one call that settled must have used ITS OWN price (+50%, since it
+  // was invoked — and so queued — first), never the other call's -50%.
+  assert.ok(Math.abs((successes[0].pnlPercent ?? 0) - 50) < 1e-6, "settled PnL matches the first call's own price, not the second's");
+});
+
+// evaluatePositionAtPrice() (used by monitorPositions() and
+// mcp-server.ts's memebot_check_exits) mutates position.currentPrice/
+// pnlPercent itself, same as memebot_paper_sell used to, before ever
+// reaching executeSell. Two concurrent evaluations of the SAME position —
+// e.g. two overlapping memebot_check_exits calls covering the same token —
+// both mutate that shared object; without passing each call's own price
+// through as executeSell's markPriceUsd, the call that actually wins the
+// lock and settles could still use whatever price the OTHER, later
+// call's mutation left behind, mislabeling the exit reason/PnL.
+test("concurrent evaluatePositionAtPrice calls settle at the winning call's own price, not the other's", async () => {
+  setActivePositions([]);
+  await executeBuy(makeSignal()); // entryPrice = 0.00002, stopLoss = *0.85, takeProfit = *1.5
+  const position = getActivePositions()[0];
+
+  const events: TradeEventT[] = [];
+  setTradeListener((e) => events.push(e));
+
+  // Both prices independently trigger an exit — a take-profit and a
+  // stop-loss — so whichever call is rejected as a stale duplicate would,
+  // pre-fix, still have been able to leave its price behind for the
+  // winner to settle at.
+  const takeProfitPrice = position.entryPrice * 1.6; // +60%, past the +50% take-profit level
+  const stopLossPrice = position.entryPrice * 0.5; // -50%, past the -15% stop-loss level
+
+  await Promise.all([
+    evaluatePositionAtPrice(position, takeProfitPrice),
+    evaluatePositionAtPrice(position, stopLossPrice),
+  ]);
+
+  setTradeListener(null);
+
+  assert.equal(events.length, 1, "only the first-invoked (lock-winning) evaluation actually settles");
+  assert.equal(events[0].type, "SELL");
+  assert.equal(events[0].reason, "TAKE_PROFIT", "settled under the first call's own exit reason");
+  assert.ok(Math.abs((events[0].pnlPercent ?? 0) - 60) < 1e-6, "settled PnL matches the first call's own price, not the second's");
+});
+
+// scheduleNextTraderTask() checks sellQueue before buyQueue, so a queued
+// sell always runs before an earlier-queued buy once the lock frees up —
+// exits are safety-critical and shouldn't wait behind a merely-queued buy.
+// The "fired without awaiting the first" test above only exercises the
+// empty-queue case (one buy acquiring a free lock before a sell is even
+// queued); this exercises the actual priority ordering: hold the lock with
+// one buy, queue a second buy first and a sell second behind it, and
+// confirm the sell still executes before that second buy despite being
+// queued later.
+test("a queued sell runs before an earlier-queued buy once the lock frees up", async () => {
+  setActivePositions([]);
+  await executeBuy(makeSignal());
+  const position = getActivePositions()[0];
+
+  const events: TradeEventT[] = [];
+  setTradeListener((e) => events.push(e));
+
+  const buy1 = executeBuy(makeSignal()); // acquires the free lock first
+  const buy2 = executeBuy(makeSignal()); // queued behind buy1, in buyQueue
+  const sell = executeSell(position, "MANUAL"); // queued behind buy1 too, but in sellQueue — invoked AFTER buy2
+
+  const [buy1Result, buy2Result, sellResult] = await Promise.all([buy1, buy2, sell]);
+
+  setTradeListener(null);
+
+  assert.equal(buy1Result.success, true);
+  assert.equal(buy2Result.success, true);
+  assert.equal(sellResult.success, true);
+  assert.equal(events.length, 3, "one BUY, one SELL, one BUY");
+  assert.equal(events[0].type, "BUY", "buy1, already holding the lock, settles first");
+  assert.equal(events[1].type, "SELL", "the queued sell runs before buy2, despite being invoked/queued later");
+  assert.equal(events[2].type, "BUY", "buy2 only runs once the higher-priority sell ahead of it releases the lock");
 });

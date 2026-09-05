@@ -1,6 +1,7 @@
 import { CONFIG } from "./config.js";
 import { httpGet } from "./http.js";
 import { logger } from "./logger.js";
+import { sanitizeDisplayText } from "./text-sanitize.js";
 
 export interface TokenCandidate {
   address: string;
@@ -149,8 +150,16 @@ export function parsePairToCandidate(pair: DexPair, boostAmount?: number): Token
 
     return {
       address: pair.baseToken?.address || "",
-      symbol: pair.baseToken?.symbol || "?",
-      name: pair.baseToken?.name || "Unknown",
+      // The "?"/"Unknown" fallback guards a missing/empty raw value, but a
+      // non-empty raw value made ENTIRELY of control/format characters (or
+      // whitespace) is truthy — so it skips that fallback — and then
+      // sanitization can still collapse it to "". Re-apply the fallback
+      // after sanitizing so that case can't produce an empty tokenSymbol: a
+      // real BUY persisted with one would fail isRestorablePosition's
+      // non-empty-string check after a restart, leaving an actual open
+      // position unrestorable and unmonitored.
+      symbol: sanitizeDisplayText(pair.baseToken?.symbol || "?") || "?",
+      name: sanitizeDisplayText(pair.baseToken?.name || "Unknown") || "Unknown",
       chainId: pair.chainId || "solana",
       pairAddress: pair.pairAddress || "",
       priceUsd,
