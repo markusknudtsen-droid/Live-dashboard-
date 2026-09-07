@@ -375,7 +375,12 @@ export async function analyzeToken(candidate: TokenCandidate): Promise<TradeSign
     // every field the schema requires.
     const parsed = parseAnalysisJson(content, looksLikeAnalysis);
     const analysis = normalizeAiAnalysis(parsed);
-    const positionSizeSol = Math.min(CONFIG.maxPositionSol * (analysis.positionSizePercent / 100), CONFIG.maxPositionSol);
+    // With USE_FIXED_POSITION_SIZE the operator sets the stake, not the model:
+    // every entry is exactly maxPositionSol. Otherwise maxPositionSol stays a
+    // ceiling that the model's positionSizePercent sizes down from.
+    const positionSizeSol = CONFIG.useFixedPositionSize
+      ? CONFIG.maxPositionSol
+      : Math.min(CONFIG.maxPositionSol * (analysis.positionSizePercent / 100), CONFIG.maxPositionSol);
 
     // A schema-valid response can still be unusable: positionSizePercent is
     // only required to be a finite number, so a BUY whose derived position

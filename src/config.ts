@@ -26,6 +26,13 @@ export interface AppConfig {
   dryRun: boolean;
   paperStartingBalanceSol: number;
   requireProfitableFirstTrade: boolean;
+  /**
+   * When true, every entry is sized at exactly maxPositionSol instead of the
+   * model-chosen percentage of it. The operator, not the model, decides how
+   * much capital each trade risks. Off by default — existing behaviour is that
+   * maxPositionSol is a ceiling the model sizes down from.
+   */
+  useFixedPositionSize: boolean;
 }
 
 function parseNumberInRange(
@@ -132,6 +139,7 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     // trading if that first trade's realized PnL was positive. See
     // src/first-trade-gate.ts. Off by default — existing behavior unchanged.
     requireProfitableFirstTrade: parseBoolean(env.REQUIRE_PROFITABLE_FIRST_TRADE, false),
+    useFixedPositionSize: parseBoolean(env.USE_FIXED_POSITION_SIZE, false),
   };
 }
 
@@ -177,5 +185,10 @@ export function validateConfig(config: AppConfig = CONFIG): void {
   );
   if (config.requireProfitableFirstTrade) {
     console.log("   🔒 REQUIRE_PROFITABLE_FIRST_TRADE enabled: only one position until it proves profitable.");
+  }
+  if (config.useFixedPositionSize) {
+    console.log(
+      `   📏 USE_FIXED_POSITION_SIZE enabled: every entry is exactly ${config.maxPositionSol} SOL (model sizing ignored).`
+    );
   }
 }
