@@ -9,6 +9,7 @@ import {
   getActivePositions,
   setActivePositions,
   setTradeListener,
+  getHeldTokens,
   MAX_CONCURRENT_POSITIONS,
 } from "./trader.js";
 import { logger } from "./logger.js";
@@ -22,10 +23,41 @@ import {
 } from "./first-trade-gate.js";
 import type { FirstTradeValidation } from "./first-trade-gate.js";
 import { adjustConfidence, checkRugGates, qualifiesForInstantBuy } from "./entry-score.js";
+import {
+  canReenter,
+  pruneExits,
+  recordExit,
+  reconcilePositions,
+  type RecentExit,
+} from "./position-guard.js";
 import type { TokenCandidate } from "./scanner.js";
 import { checkAnalysisModel, formatModelCheck } from "./model-preflight.js";
 
 const tradeHistory: TradeHistoryItem[] = [];
+
+/** Tokens exited recently, blocking immediate re-entry. Persisted across restarts. */
+let recentExits: RecentExit[] = [];
+
+function reentryConfig() {
+  return {
+    cooldownMinutes: CONFIG.reentryCooldownMinutes,
+    blockLosersForRun: CONFIG.blockLosingReentryForRun,
+  };
+}
+
+/**
+ * Whether a token may be bought, given what has already been exited. Shared by
+ * the instant-buy and analysed paths so neither can bypass the cooldown.
+ */
+function reentryBlocked(tokenAddress: string, symbol: string): boolean {
+  if (CONFIG.reentryCooldownMinutes <= 0 && !CONFIG.blockLosingReentryForRun) return false;
+  const verdict = canReenter(tokenAddress, recentExits, Date.now(), reentryConfig());
+  if (!verdict.allowed) {
+    logger.info(`⏳ Skipping ${symbol}: ${verdict.reason}`);
+    return true;
+  }
+  return false;
+}
 
 /**
  * Build the TradeSignal an instant buy needs, without a model round-trip.
@@ -73,6 +105,7 @@ async function persistRuntimeState(): Promise<void> {
     activePositions: getActivePositions(),
     tradeHistory,
     firstTradeValidated,
+    recentExits,
   });
 }
 
@@ -157,6 +190,7 @@ async function runCycle(): Promise<void> {
     for (const candidate of candidates) {
       if (getActivePositions().length >= MAX_CONCURRENT_POSITIONS) break;
       if (getActivePositions().some((p) => p.tokenAddress === candidate.address)) continue;
+      if (reentryBlocked(candidate.address, candidate.symbol)) continue;
 
       const verdict = qualifiesForInstantBuy(
         {
@@ -267,6 +301,8 @@ async function runCycle(): Promise<void> {
       logger.info(`Already in position for ${signal.token.symbol}, skipping.`);
       continue;
     }
+
+    if (reentryBlocked(signal.token.address, signal.token.symbol)) continue;
 
     // Hard gates run last, immediately before the buy: they cannot be
     // outvoted by confidence, however high the score.
@@ -403,6 +439,16 @@ async function main(): Promise<void> {
   // and — when enabled — resolve the first-trade validation gate on SELL.
   setTradeListener((event) => {
     void reportTrade(event);
+    // Record every exit so the same coin cannot be re-bought on the next cycle.
+    if (event.type === "SELL") {
+      recentExits = recordExit(recentExits, {
+        tokenAddress: event.tokenAddress,
+        tokenSymbol: event.symbol,
+        exitedAt: Date.now(),
+        wasLoss: (event.pnlPercent ?? 0) <= 0,
+      });
+      recentExits = pruneExits(recentExits, Date.now(), reentryConfig());
+    }
     if (CONFIG.requireProfitableFirstTrade) {
       const next = resolveFirstTradeValidation(event, firstTradeValidated);
       if (next !== firstTradeValidated) {
@@ -431,10 +477,36 @@ async function main(): Promise<void> {
         : `Skipping ${skipped} paper (DRYRUN-) position(s) from persisted state — they were never bought on-chain.`
     );
   }
-  setActivePositions(restorable);
+  // The wallet is the authority on what is held, not the state file. Anything
+  // the wallet does not back is a phantom: the bot would price it, hit the
+  // stop, fail to sell, and retry forever. A failed holdings lookup must NOT be
+  // treated as "holds nothing" — on error we keep every position and say so.
+  let reconciled = restorable;
+  recentExits = pruneExits(loadedState.recentExits ?? [], Date.now(), reentryConfig());
+  if (CONFIG.reconcileOnStartup && !CONFIG.dryRun && restorable.length > 0) {
+    try {
+      const held = await getHeldTokens();
+      const { keep, drop } = reconcilePositions(restorable, held);
+      if (drop.length > 0) {
+        logger.warn(
+          `🧹 Dropping ${drop.length} position(s) the wallet does not hold: ` +
+            `${drop.map((p) => p.tokenSymbol).join(", ")}. Sold elsewhere, or never settled.`
+        );
+      }
+      reconciled = keep;
+    } catch (error) {
+      logger.warn(
+        `Could not read wallet holdings for reconciliation (${
+          error instanceof Error ? error.message : String(error)
+        }); keeping all persisted positions.`
+      );
+    }
+  }
+
+  setActivePositions(reconciled);
   tradeHistory.push(...loadedState.tradeHistory);
   logger.info(
-    `Recovered state: ${restorable.length} active positions, ${loadedState.tradeHistory.length} history entries`
+    `Recovered state: ${reconciled.length} active positions, ${loadedState.tradeHistory.length} history entries`
   );
 
   // Protect restored positions IMMEDIATELY, before anything that can block.

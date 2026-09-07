@@ -50,6 +50,14 @@ export interface AppConfig {
   instantBuyOnBoostEnabled: boolean;
   /** Boost amount at or above which the instant buy fires. */
   instantBuyBoostThreshold: number;
+  /** Reconcile persisted positions against actual wallet holdings at startup. */
+  reconcileOnStartup: boolean;
+  /** Minutes a token is blocked from re-entry after any exit. 0 disables. */
+  reentryCooldownMinutes: number;
+  /** Block a token that exited at a loss for the remainder of the run. */
+  blockLosingReentryForRun: boolean;
+  /** Consecutive failed sells before a position is abandoned. */
+  maxSellAttempts: number;
 }
 
 function parseNumberInRange(
@@ -193,6 +201,19 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       1,
       1_000_000
     ),
+    // On by default: the failure it prevents (pricing and repeatedly trying to
+    // sell a coin the wallet no longer holds) is silent, and the check costs
+    // one RPC call per start.
+    reconcileOnStartup: parseBoolean(env.RECONCILE_ON_STARTUP, true),
+    reentryCooldownMinutes: parseNumberInRange(
+      "REENTRY_COOLDOWN_MINUTES",
+      env.REENTRY_COOLDOWN_MINUTES,
+      60,
+      0,
+      10_080
+    ),
+    blockLosingReentryForRun: parseBoolean(env.BLOCK_LOSING_REENTRY_FOR_RUN, false),
+    maxSellAttempts: parseNumberInRange("MAX_SELL_ATTEMPTS", env.MAX_SELL_ATTEMPTS, 5, 1, 100),
   };
 }
 

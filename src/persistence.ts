@@ -5,6 +5,7 @@ import { logger } from "./logger.js";
 import { sanitizeDisplayText } from "./text-sanitize.js";
 import type { ActivePosition } from "./trader.js";
 import type { FirstTradeValidation } from "./first-trade-gate.js";
+import type { RecentExit } from "./position-guard.js";
 
 export interface TradeHistoryItem {
   timestamp: number;
@@ -20,6 +21,11 @@ export interface BotState {
   tradeHistory: TradeHistoryItem[];
   /** REQUIRE_PROFITABLE_FIRST_TRADE gate state; persisted so it survives restarts. */
   firstTradeValidated: FirstTradeValidation;
+  /**
+   * Tokens recently exited, used to block immediate re-entry. Optional so state
+   * files written before this existed still load; treated as empty when absent.
+   */
+  recentExits?: RecentExit[];
 }
 
 const DEFAULT_STATE: BotState = {

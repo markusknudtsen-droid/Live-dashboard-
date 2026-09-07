@@ -638,6 +638,55 @@ async function executeSellLocked(position: ActivePosition, reason: string, markP
 }
 
 /**
+ * Every SPL token the wallet actually holds with a non-zero balance.
+ *
+ * Used to reconcile persisted positions against reality at startup. Throws on
+ * failure rather than returning an empty array: an empty result means "the
+ * wallet holds nothing" and would drop every position, so the caller must be
+ * able to tell that apart from "the lookup failed".
+ */
+export async function getHeldTokens(): Promise<{ mint: string; amount: number }[]> {
+  // Hard-coded rather than importing @solana/spl-token purely for a constant:
+  // this is the canonical SPL Token program id and it does not change.
+  const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+  const res = await connection.getParsedTokenAccountsByOwner(wallet.publicKey, {
+    programId: TOKEN_PROGRAM_ID,
+  });
+  return res.value
+    .map((a) => {
+      const info = (a.account.data as unknown as { parsed?: { info?: Record<string, unknown> } }).parsed?.info;
+      const tokenAmount = info?.tokenAmount as { uiAmount?: number } | undefined;
+      return { mint: String(info?.mint ?? ""), amount: Number(tokenAmount?.uiAmount ?? 0) };
+    })
+    .filter((t) => t.mint && Number.isFinite(t.amount) && t.amount > 0);
+}
+
+/**
+ * Consecutive failed sell attempts per position, keyed by token address.
+ *
+ * A position whose token has left the wallet can never be sold, and the exit
+ * path retries every monitoring tick — 306 attempts were observed on a single
+ * phantom position. After a bounded number of failures the position is dropped
+ * so the loop terminates and the operator sees one loud message, not a flood.
+ */
+const failedSellCounts = new Map<string, number>();
+
+export function getFailedSellCount(tokenAddress: string): number {
+  return failedSellCounts.get(tokenAddress) ?? 0;
+}
+
+export function resetFailedSellCount(tokenAddress: string): void {
+  failedSellCounts.delete(tokenAddress);
+}
+
+/** Record a failed sell. Returns true when the position should be abandoned. */
+export function noteFailedSell(tokenAddress: string, maxAttempts: number): boolean {
+  const next = (failedSellCounts.get(tokenAddress) ?? 0) + 1;
+  failedSellCounts.set(tokenAddress, next);
+  return next >= maxAttempts;
+}
+
+/**
  * Monitor active positions and trigger stop-loss / take-profit
  */
 export async function monitorPositions(): Promise<void> {
@@ -721,12 +770,37 @@ export async function evaluatePositionAtPrice(position: ActivePosition, currentP
     }
   }
 
-  if (currentPrice <= position.stopLoss) {
-    logger.warn(`🛑 STOP LOSS triggered for ${position.tokenSymbol}`);
-    await executeSell(position, "STOP_LOSS", currentPrice);
-  } else if (currentPrice >= position.takeProfit) {
-    logger.info(`🎯 TAKE PROFIT triggered for ${position.tokenSymbol}`);
-    await executeSell(position, "TAKE_PROFIT", currentPrice);
+  const exitReason: "STOP_LOSS" | "TAKE_PROFIT" | null =
+    currentPrice <= position.stopLoss ? "STOP_LOSS" : currentPrice >= position.takeProfit ? "TAKE_PROFIT" : null;
+
+  if (!exitReason) return;
+
+  if (exitReason === "STOP_LOSS") logger.warn(`🛑 STOP LOSS triggered for ${position.tokenSymbol}`);
+  else logger.info(`🎯 TAKE PROFIT triggered for ${position.tokenSymbol}`);
+
+  const result = await executeSell(position, exitReason, currentPrice);
+
+  if (result.success) {
+    resetFailedSellCount(position.tokenAddress);
+    return;
+  }
+
+  // A position whose token is no longer in the wallet can never be sold, and
+  // this path runs every monitoring tick. Give up after a bounded number of
+  // attempts rather than retrying forever (306 attempts were observed on one
+  // phantom position) and say so once, loudly.
+  if (noteFailedSell(position.tokenAddress, CONFIG.maxSellAttempts)) {
+    logger.error(
+      `🚨 Abandoning ${position.tokenSymbol}: ${CONFIG.maxSellAttempts} consecutive sell attempts failed ` +
+        `(last error: ${result.error ?? "unknown"}). Removing it from active positions — verify the wallet manually.`
+    );
+    removePosition(position);
+    resetFailedSellCount(position.tokenAddress);
+  } else {
+    logger.warn(
+      `Sell attempt ${getFailedSellCount(position.tokenAddress)}/${CONFIG.maxSellAttempts} failed for ` +
+        `${position.tokenSymbol}: ${result.error ?? "unknown"}`
+    );
   }
 }
 
