@@ -33,6 +33,19 @@ export interface AppConfig {
    * maxPositionSol is a ceiling the model sizes down from.
    */
   useFixedPositionSize: boolean;
+  /** Trailing stop: off by default so existing runs are unchanged. */
+  trailingStopEnabled: boolean;
+  /** Gain (%) a position must reach before the trail arms. */
+  trailingStopActivatePercent: number;
+  /** How far (%) below the peak the trailed stop sits. */
+  trailingStopDistancePercent: number;
+  /** Hard entry gates: off by default. */
+  rugGatesEnabled: boolean;
+  minLiquidityUsd: number;
+  holderCheckMinMarketCapUsd: number;
+  maxTopHolderPercent: number;
+  /** Confidence modifiers from age/socials/boost: off by default. */
+  entryScoringEnabled: boolean;
 }
 
 function parseNumberInRange(
@@ -140,6 +153,34 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     // src/first-trade-gate.ts. Off by default — existing behavior unchanged.
     requireProfitableFirstTrade: parseBoolean(env.REQUIRE_PROFITABLE_FIRST_TRADE, false),
     useFixedPositionSize: parseBoolean(env.USE_FIXED_POSITION_SIZE, false),
+    trailingStopEnabled: parseBoolean(env.TRAILING_STOP_ENABLED, false),
+    trailingStopActivatePercent: parseNumberInRange(
+      "TRAILING_STOP_ACTIVATE_PERCENT",
+      env.TRAILING_STOP_ACTIVATE_PERCENT,
+      15,
+      0,
+      1000
+    ),
+    // Kept below the activation gain on purpose: a trail as wide as the
+    // activation threshold arms with its stop still under entry.
+    trailingStopDistancePercent: parseNumberInRange(
+      "TRAILING_STOP_DISTANCE_PERCENT",
+      env.TRAILING_STOP_DISTANCE_PERCENT,
+      10,
+      1,
+      99
+    ),
+    rugGatesEnabled: parseBoolean(env.RUG_GATES_ENABLED, false),
+    minLiquidityUsd: parseNumberInRange("MIN_LIQUIDITY_USD", env.MIN_LIQUIDITY_USD, 5000, 0, 100_000_000),
+    holderCheckMinMarketCapUsd: parseNumberInRange(
+      "HOLDER_CHECK_MIN_MARKET_CAP_USD",
+      env.HOLDER_CHECK_MIN_MARKET_CAP_USD,
+      60000,
+      0,
+      100_000_000
+    ),
+    maxTopHolderPercent: parseNumberInRange("MAX_TOP_HOLDER_PERCENT", env.MAX_TOP_HOLDER_PERCENT, 30, 1, 100),
+    entryScoringEnabled: parseBoolean(env.ENTRY_SCORING_ENABLED, false),
   };
 }
 
@@ -185,6 +226,21 @@ export function validateConfig(config: AppConfig = CONFIG): void {
   );
   if (config.requireProfitableFirstTrade) {
     console.log("   🔒 REQUIRE_PROFITABLE_FIRST_TRADE enabled: only one position until it proves profitable.");
+  }
+  if (config.trailingStopEnabled) {
+    console.log(
+      `   🔒 TRAILING_STOP enabled: arms at +${config.trailingStopActivatePercent}%, trails ` +
+        `${config.trailingStopDistancePercent}% below peak, never below entry once armed.`
+    );
+  }
+  if (config.rugGatesEnabled) {
+    console.log(
+      `   🛡️  RUG_GATES enabled: min liquidity $${config.minLiquidityUsd}, max top-holder ` +
+        `${config.maxTopHolderPercent}% above $${config.holderCheckMinMarketCapUsd} MC.`
+    );
+  }
+  if (config.entryScoringEnabled) {
+    console.log("   ⚖️  ENTRY_SCORING enabled: age/boost/social modifiers, bonuses capped at +15.");
   }
   if (config.useFixedPositionSize) {
     console.log(

@@ -8,6 +8,7 @@ import {
 import bs58 from "bs58";
 import { randomBytes } from "node:crypto";
 import { CONFIG } from "./config.js";
+import { updateTrailingStop } from "./trailing-stop.js";
 import { TradeSignal } from "./analyze.js";
 import { logger } from "./logger.js";
 import { httpGet } from "./http.js";
@@ -38,6 +39,12 @@ export interface ActivePosition {
   entryTime: number;
   pnlPercent: number;
   txSignature: string;
+  /**
+   * Highest price seen since entry, used by the trailing stop. Optional so
+   * positions persisted before trailing stops existed still rehydrate; it is
+   * seeded from entryPrice on first evaluation.
+   */
+  peakPrice?: number;
 }
 
 interface DexPairPrice {
@@ -692,6 +699,28 @@ export async function evaluatePositionAtPrice(position: ActivePosition, currentP
   // local, per-call price explicitly guarantees THIS call's settlement
   // uses THIS call's own price no matter what a second, concurrent
   // evaluation does to the shared position afterward.
+  // Raise the stop before testing it, so a price that both sets a new peak and
+  // then has to be judged against the stop is judged against the CURRENT one.
+  if (CONFIG.trailingStopEnabled) {
+    const trail = updateTrailingStop({
+      entryPrice: position.entryPrice,
+      currentPrice,
+      peakPrice: position.peakPrice,
+      currentStopLoss: position.stopLoss,
+      activateAtPercent: CONFIG.trailingStopActivatePercent,
+      distancePercent: CONFIG.trailingStopDistancePercent,
+    });
+    position.peakPrice = trail.peakPrice;
+    if (trail.raised) {
+      const lockedPercent = ((trail.stopLoss - position.entryPrice) / position.entryPrice) * 100;
+      logger.info(
+        `🔒 Trailing stop raised for ${position.tokenSymbol}: $${trail.stopLoss.toFixed(10)} ` +
+          `(locks ${lockedPercent >= 0 ? "+" : ""}${lockedPercent.toFixed(2)}%)`
+      );
+      position.stopLoss = trail.stopLoss;
+    }
+  }
+
   if (currentPrice <= position.stopLoss) {
     logger.warn(`🛑 STOP LOSS triggered for ${position.tokenSymbol}`);
     await executeSell(position, "STOP_LOSS", currentPrice);

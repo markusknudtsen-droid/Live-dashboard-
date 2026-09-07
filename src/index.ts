@@ -21,6 +21,7 @@ import {
   shouldSkipNewEntries,
 } from "./first-trade-gate.js";
 import type { FirstTradeValidation } from "./first-trade-gate.js";
+import { adjustConfidence, checkRugGates } from "./entry-score.js";
 import { checkAnalysisModel, formatModelCheck } from "./model-preflight.js";
 
 const tradeHistory: TradeHistoryItem[] = [];
@@ -113,6 +114,29 @@ async function runCycle(): Promise<void> {
   const topCandidates = candidates.slice(0, 5);
   const signals = await batchAnalyze(topCandidates);
 
+  // Modifiers adjust the model's confidence using cheap-to-fake marketing
+  // signals (boost, socials) and hard-to-fake ones (age). The bonus cap in
+  // entry-score.ts keeps marketing alone from carrying a coin over the line.
+  if (CONFIG.entryScoringEnabled) {
+    for (const s of signals) {
+      const adj = adjustConfidence(s.confidence, {
+        ageHours: s.token.ageHours,
+        boostAmount: s.token.boostAmount ?? 0,
+        // Socials are not yet surfaced by the scanner; wiring them is the next
+        // step. Passing false keeps those modifiers inert rather than guessing.
+        hasXSocial: false,
+        hasOtherSocial: false,
+        hasPaidDexInfo: false,
+      });
+      if (adj.adjustedConfidence !== s.confidence) {
+        logger.info(
+          `⚖️  ${s.token.symbol}: ${s.confidence}% → ${adj.adjustedConfidence}% (${adj.reasons.join(", ")})`
+        );
+        s.confidence = adj.adjustedConfidence;
+      }
+    }
+  }
+
   const buySignals = signals.filter((s) => s.action === "BUY" && s.confidence >= CONFIG.minConfidence);
   logger.info(`📊 Results: ${buySignals.length} BUY signals (>=${CONFIG.minConfidence}% confidence)`);
 
@@ -154,6 +178,32 @@ async function runCycle(): Promise<void> {
     if (activePositions.find((p) => p.tokenAddress === signal.token.address)) {
       logger.info(`Already in position for ${signal.token.symbol}, skipping.`);
       continue;
+    }
+
+    // Hard gates run last, immediately before the buy: they cannot be
+    // outvoted by confidence, however high the score.
+    if (CONFIG.rugGatesEnabled) {
+      const gate = checkRugGates(
+        {
+          liquidityUsd: signal.token.liquidityUsd,
+          marketCapUsd: signal.token.marketCap,
+          // Holder concentration needs an RPC lookup that is not wired yet;
+          // undefined means "unknown", which fails closed only when the market
+          // cap puts the coin above the concentration threshold.
+          topHolderPercent: undefined,
+        },
+        {
+          minLiquidityUsd: CONFIG.minLiquidityUsd,
+          holderCheckMinMarketCapUsd: CONFIG.holderCheckMinMarketCapUsd,
+          maxTopHolderPercent: CONFIG.maxTopHolderPercent,
+          // Not yet wired, so an unknown reading must not veto every trade.
+          requireHolderData: false,
+        }
+      );
+      if (!gate.pass) {
+        logger.warn(`⛔ ${signal.token.symbol} rejected by rug gate: ${gate.reason}`);
+        continue;
+      }
     }
 
     logger.info(`🎯 TRADE SIGNAL: ${signal.token.symbol}`);
