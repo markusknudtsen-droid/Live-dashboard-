@@ -9,6 +9,7 @@ import {
   getActivePositions,
   setActivePositions,
   setTradeListener,
+  setAbandonListener,
   getHeldTokens,
   MAX_CONCURRENT_POSITIONS,
 } from "./trader.js";
@@ -58,6 +59,23 @@ function reentryConfig() {
     cooldownMinutes: CONFIG.reentryCooldownMinutes,
     blockLosersForRun: CONFIG.blockLosingReentryForRun,
   };
+}
+
+/**
+ * Record an exit for a position that left the wallet without the bot selling
+ * it — abandoned after failed sells, or found missing during reconciliation.
+ * Outcome is unknown, so it counts as a loss: that is the conservative side
+ * under BLOCK_LOSING_REENTRY_FOR_RUN, and re-buying something that vanished
+ * unexplained is the behaviour worth suppressing.
+ */
+function recordNonSaleExit(tokenAddress: string, tokenSymbol: string): void {
+  recentExits = recordExit(recentExits, {
+    tokenAddress,
+    tokenSymbol,
+    exitedAt: Date.now(),
+    wasLoss: true,
+  });
+  recentExits = pruneExits(recentExits, Date.now(), reentryConfig());
 }
 
 /**
@@ -139,11 +157,53 @@ async function persistRuntimeState(): Promise<void> {
  * position; it's a separate flag because the two loops are now independent
  * and neither should be able to block the other.
  */
+/**
+ * Reconciliation only ran at startup, so a position sold by hand mid-run stayed
+ * in the bot's book: it kept pricing a coin it no longer owned, and the exit was
+ * never recorded, leaving the token free to be bought straight back. Running it
+ * periodically closes that window to one interval instead of one restart.
+ */
+let monitoringTicks = 0;
+
+async function reconcileDuringRun(): Promise<void> {
+  const positions = getActivePositions();
+  if (positions.length === 0) return;
+
+  let held: { mint: string; amount: number }[];
+  try {
+    held = await getHeldTokens();
+  } catch (error) {
+    logger.debug(`Mid-run reconciliation skipped: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+
+  // Same guard as startup: an empty answer alongside open positions is the
+  // signature of an incomplete query, not proof the wallet is empty.
+  if (held.length === 0) return;
+
+  const { drop } = reconcilePositions(positions, held);
+  if (drop.length === 0) return;
+
+  logger.warn(
+    `🧹 Mid-run: ${drop.length} position(s) no longer held (${drop
+      .map((p) => p.tokenSymbol)
+      .join(", ")}) — removing and recording as exits.`
+  );
+  const dropped = new Set(drop.map((p) => p.tokenAddress));
+  setActivePositions(positions.filter((p) => !dropped.has(p.tokenAddress)));
+  for (const p of drop) recordNonSaleExit(p.tokenAddress, p.tokenSymbol);
+  await persistRuntimeState();
+}
+
 async function runMonitoringTick(): Promise<void> {
   if (monitoringInProgress) return;
   monitoringInProgress = true;
   try {
     await monitorPositions();
+    monitoringTicks += 1;
+    if (CONFIG.reconcileOnStartup && !CONFIG.dryRun && monitoringTicks % CONFIG.reconcileEveryTicks === 0) {
+      await reconcileDuringRun();
+    }
     await persistRuntimeState();
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
@@ -504,6 +564,12 @@ async function main(): Promise<void> {
         wasLoss: (event.pnlPercent ?? 0) <= 0,
       });
       recentExits = pruneExits(recentExits, Date.now(), reentryConfig());
+      // Persist immediately rather than waiting for cycle end. An exit record
+      // held only in memory is lost if the process dies first, and the cooldown
+      // then has no memory of the coin at all — which is how a token exited at a
+      // loss was re-bought after a restart despite BLOCK_LOSING_REENTRY_FOR_RUN.
+      // The first-trade gate persists eagerly for exactly this reason.
+      persistRuntimeState().catch((error) => logger.error("Failed to persist exit record", error));
     }
     if (CONFIG.requireProfitableFirstTrade) {
       const next = resolveFirstTradeValidation(event, firstTradeValidated);
@@ -517,6 +583,14 @@ async function main(): Promise<void> {
       }
     }
   });
+  // An abandoned position has left the bot's control; treat it as an exit so
+  // the cooldown applies, and persist at once so a restart cannot lose it.
+  setAbandonListener((position) => {
+    recordNonSaleExit(position.tokenAddress, position.tokenSymbol);
+    logger.warn(`⏳ ${position.tokenSymbol} abandoned — recorded as an exit so it is not immediately re-bought.`);
+    persistRuntimeState().catch((error) => logger.error("Failed to persist abandon record", error));
+  });
+
   if (isDashboardReportingEnabled()) {
     logger.info(`📡 Dashboard trade reporting enabled → ${CONFIG.dashboardApiUrl}/trades/ingest`);
   }
@@ -570,17 +644,7 @@ async function main(): Promise<void> {
         // an exit. Without recording it, a coin sold by hand is eligible for
         // instant re-purchase on the very next cycle — which is how TRONK was
         // bought back seconds after being sold manually.
-        const droppedAt = Date.now();
-        for (const p of drop) {
-          recentExits = recordExit(recentExits, {
-            tokenAddress: p.tokenAddress,
-            tokenSymbol: p.tokenSymbol,
-            exitedAt: droppedAt,
-            // Unknown outcome; treat as a loss so the stricter
-            // block-losers-for-run setting also covers it.
-            wasLoss: true,
-          });
-        }
+        for (const p of drop) recordNonSaleExit(p.tokenAddress, p.tokenSymbol);
       }
       reconciled = keep;
     } catch (error) {

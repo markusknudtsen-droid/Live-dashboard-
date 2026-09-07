@@ -58,6 +58,12 @@ export interface AppConfig {
   blockLosingReentryForRun: boolean;
   /** Consecutive failed sells before a position is abandoned. */
   maxSellAttempts: number;
+  /**
+   * Re-check wallet holdings every N monitoring ticks, not just at startup, so a
+   * position sold outside the bot is noticed within one interval rather than
+   * surviving until the next restart.
+   */
+  reconcileEveryTicks: number;
   /** Skip coins valued above this market cap. 0 disables. */
   maxMarketCapUsd: number;
   /**
@@ -227,6 +233,7 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     ),
     blockLosingReentryForRun: parseBoolean(env.BLOCK_LOSING_REENTRY_FOR_RUN, false),
     maxSellAttempts: parseNumberInRange("MAX_SELL_ATTEMPTS", env.MAX_SELL_ATTEMPTS, 5, 1, 100),
+    reconcileEveryTicks: parseNumberInRange("RECONCILE_EVERY_TICKS", env.RECONCILE_EVERY_TICKS, 20, 1, 10_000),
     maxMarketCapUsd: parseNumberInRange("MAX_MARKET_CAP_USD", env.MAX_MARKET_CAP_USD, 0, 0, 1_000_000_000),
     boostFreshWindowSeconds: parseNumberInRange(
       "BOOST_FRESH_WINDOW_SECONDS",

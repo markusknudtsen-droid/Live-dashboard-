@@ -714,6 +714,22 @@ export function resetFailedSellCount(tokenAddress: string): void {
   failedSellCounts.delete(tokenAddress);
 }
 
+/**
+ * Notified when a position is abandoned after repeated sell failures.
+ *
+ * Abandoning removes the position from the active list, which silently makes
+ * the token eligible to be bought again on the very next cycle — the re-entry
+ * cooldown only knows about exits it is told about. Without this hook an
+ * abandoned coin can be re-bought immediately, which is how the same token got
+ * bought twice within half an hour.
+ */
+type AbandonListener = (position: ActivePosition) => void;
+let abandonListener: AbandonListener | null = null;
+
+export function setAbandonListener(listener: AbandonListener | null): void {
+  abandonListener = listener;
+}
+
 /** Record a failed sell. Returns true when the position should be abandoned. */
 export function noteFailedSell(tokenAddress: string, maxAttempts: number): boolean {
   const next = (failedSellCounts.get(tokenAddress) ?? 0) + 1;
@@ -855,6 +871,13 @@ export async function evaluatePositionAtPrice(position: ActivePosition, currentP
     );
     removePosition(position);
     resetFailedSellCount(position.tokenAddress);
+    // Tell the cooldown this token has left, or abandoning it quietly makes it
+    // buyable again on the next cycle.
+    try {
+      abandonListener?.(position);
+    } catch (error) {
+      logger.warn(`Abandon listener failed for ${position.tokenSymbol}: ${String(error)}`);
+    }
   } else {
     logger.warn(
       `Sell attempt ${getFailedSellCount(position.tokenAddress)}/${CONFIG.maxSellAttempts} failed for ` +
