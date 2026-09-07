@@ -660,17 +660,38 @@ async function executeSellLocked(position: ActivePosition, reason: string, markP
  * able to tell that apart from "the lookup failed".
  */
 export async function getHeldTokens(): Promise<{ mint: string; amount: number }[]> {
-  // Hard-coded rather than importing @solana/spl-token purely for a constant:
-  // this is the canonical SPL Token program id and it does not change.
-  const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
-  const res = await connection.getParsedTokenAccountsByOwner(wallet.publicKey, {
-    programId: TOKEN_PROGRAM_ID,
-  });
-  return res.value
+  // BOTH token programs must be queried. Tokens live under the classic SPL
+  // Token program OR Token-2022, and which one is not knowable from the mint
+  // address. Querying only the classic program returns an empty list for a
+  // wallet holding Token-2022 tokens — a result indistinguishable from "holds
+  // nothing", which reconciliation then acts on by deleting live positions.
+  // That happened: a Token-2022 position was dropped, left unmanaged with no
+  // trailing stop, and gave back a +77% gain.
+  //
+  // Both ids are hard-coded rather than pulling in @solana/spl-token for two
+  // constants; neither changes.
+  const TOKEN_PROGRAMS = [
+    new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"), // SPL Token
+    new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"), // Token-2022
+  ];
+
+  // Deliberately NOT Promise.allSettled: a partial answer is the dangerous
+  // case. If either program cannot be queried the caller must see a throw and
+  // keep every position, rather than receive a short list that looks complete.
+  const responses = await Promise.all(
+    TOKEN_PROGRAMS.map((programId) => connection.getParsedTokenAccountsByOwner(wallet.publicKey, { programId }))
+  );
+
+  return responses
+    .flatMap((res) => res.value)
     .map((a) => {
       const info = (a.account.data as unknown as { parsed?: { info?: Record<string, unknown> } }).parsed?.info;
-      const tokenAmount = info?.tokenAmount as { uiAmount?: number } | undefined;
-      return { mint: String(info?.mint ?? ""), amount: Number(tokenAmount?.uiAmount ?? 0) };
+      const tokenAmount = info?.tokenAmount as { uiAmount?: number | null; amount?: string } | undefined;
+      // uiAmount can be null; the raw string is always present, so fall back to
+      // it rather than reading null as a zero balance.
+      const ui = Number(tokenAmount?.uiAmount ?? Number.NaN);
+      const amount = Number.isFinite(ui) ? ui : Number(tokenAmount?.amount ?? 0);
+      return { mint: String(info?.mint ?? ""), amount };
     })
     .filter((t) => t.mint && Number.isFinite(t.amount) && t.amount > 0);
 }

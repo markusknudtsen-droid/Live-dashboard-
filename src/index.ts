@@ -542,6 +542,24 @@ async function main(): Promise<void> {
   if (CONFIG.reconcileOnStartup && !CONFIG.dryRun && restorable.length > 0) {
     try {
       const held = await getHeldTokens();
+
+      // "The wallet holds nothing" while positions exist is the exact signature
+      // of an incomplete holdings query — which is how a live Token-2022
+      // position was deleted and left unmanaged. A successful-but-wrong answer
+      // is indistinguishable from a true empty wallet, so treat the ambiguous
+      // case conservatively and keep the positions. Genuinely-gone positions are
+      // still retired, just by the bounded sell-retry path instead. Keeping a
+      // stale position costs a few failed sells; deleting a live one costs the
+      // whole position.
+      if (held.length === 0 && restorable.length > 0) {
+        logger.warn(
+          `⚠️  Wallet reports zero token holdings while ${restorable.length} position(s) are persisted. ` +
+            `Keeping them rather than risk deleting live positions — if they really are gone, the sell path ` +
+            `will retire them after ${CONFIG.maxSellAttempts} failed attempts.`
+        );
+        throw new Error("empty holdings with open positions — not trusted for reconciliation");
+      }
+
       const { keep, drop } = reconcilePositions(restorable, held);
       if (drop.length > 0) {
         logger.warn(
