@@ -64,6 +64,14 @@ export interface AppConfig {
    * surviving until the next restart.
    */
   reconcileEveryTicks: number;
+  /**
+   * How many positions may be open at once. Was a hardcoded constant (3);
+   * raising it does not by itself change how much SOL is needed — that is
+   * maxConcurrentPositions * maxPositionSol plus the 0.05 trading floor. See
+   * the startup check in index.ts, which warns rather than silently
+   * overriding this when the wallet cannot fund every slot.
+   */
+  maxConcurrentPositions: number;
   /** Skip coins valued above this market cap. 0 disables. */
   maxMarketCapUsd: number;
   /**
@@ -234,6 +242,7 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     blockLosingReentryForRun: parseBoolean(env.BLOCK_LOSING_REENTRY_FOR_RUN, false),
     maxSellAttempts: parseNumberInRange("MAX_SELL_ATTEMPTS", env.MAX_SELL_ATTEMPTS, 5, 1, 100),
     reconcileEveryTicks: parseNumberInRange("RECONCILE_EVERY_TICKS", env.RECONCILE_EVERY_TICKS, 20, 1, 10_000),
+    maxConcurrentPositions: parseNumberInRange("MAX_CONCURRENT_POSITIONS", env.MAX_CONCURRENT_POSITIONS, 3, 1, 20),
     maxMarketCapUsd: parseNumberInRange("MAX_MARKET_CAP_USD", env.MAX_MARKET_CAP_USD, 0, 0, 1_000_000_000),
     boostFreshWindowSeconds: parseNumberInRange(
       "BOOST_FRESH_WINDOW_SECONDS",

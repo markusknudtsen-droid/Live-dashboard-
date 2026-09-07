@@ -398,6 +398,11 @@ stop_loss_price, take_profit_price, paper_balance_after } or an error message.`,
           txns24hSells: 0,
           buyToSellRatio: 0.5,
           pairCreatedAt: Date.now(),
+          // A manual paper trade from an MCP caller carries no DexScreener
+          // listing data to derive these from.
+          hasXSocial: false,
+          hasOtherSocial: false,
+          hasPaidDexInfo: false,
           ageHours: 0,
           url: `https://dexscreener.com/solana/${token_address}`,
         },

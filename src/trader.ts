@@ -116,7 +116,10 @@ let paperBalanceSol = 0;
  * check, made after acquiring the lock, is authoritative: two callers can
  * both pass an outside check before either has actually opened a position.
  */
-export const MAX_CONCURRENT_POSITIONS = 3;
+// Was a literal 3. Reads from config so this repo's ~8 call sites (index.ts,
+// mcp-server.ts, this file) don't each need a config lookup — CONFIG is fully
+// initialized before this module body runs, since this file imports it above.
+export const MAX_CONCURRENT_POSITIONS = CONFIG.maxConcurrentPositions;
 
 /**
  * Serializes executeBuy()/executeSell() against each other. index.ts runs

@@ -25,6 +25,12 @@ export interface TokenCandidate {
   ageHours: number;
   boostAmount?: number;
   url: string;
+  /** True when the token has an X/Twitter link in DexScreener's paid info. */
+  hasXSocial: boolean;
+  /** True when it has a non-X social or website, but no X link. */
+  hasOtherSocial: boolean;
+  /** True when any paid DexScreener info (site or social) is present. */
+  hasPaidDexInfo: boolean;
 }
 
 interface DexTokenBoost {
@@ -67,6 +73,17 @@ export interface DexPair {
   fdv?: number;
   pairCreatedAt?: number;
   url?: string;
+  /**
+   * Present only once a project has paid for DexScreener's "Update Token
+   * Info" listing — imageUrl/header can be pulled from on-chain Metaplex
+   * metadata for free, but websites/socials cannot: a mint has no on-chain
+   * concept of a Twitter link, so their presence is real evidence someone
+   * paid for the listing, not an artifact of any free/default token data.
+   */
+  info?: {
+    websites?: { url?: string; label?: string }[];
+    socials?: { url?: string; type?: string }[];
+  };
 }
 
 interface DexSearchResponse {
@@ -174,6 +191,11 @@ export function parsePairToCandidate(pair: DexPair, boostAmount?: number): Token
     const ageMs = pairCreatedAt ? Date.now() - pairCreatedAt : Infinity;
     const ageHours = ageMs / (1000 * 60 * 60);
 
+    const socials = pair.info?.socials ?? [];
+    const websites = pair.info?.websites ?? [];
+    const hasXSocial = socials.some((s) => /twitter|^x$/i.test(s.type ?? ""));
+    const hasAnyInfo = socials.length > 0 || websites.length > 0;
+
     return {
       address: pair.baseToken?.address || "",
       // The "?"/"Unknown" fallback guards a missing/empty raw value, but a
@@ -204,6 +226,9 @@ export function parsePairToCandidate(pair: DexPair, boostAmount?: number): Token
       ageHours,
       boostAmount,
       url: pair.url || `https://dexscreener.com/${pair.chainId}/${pair.pairAddress}`,
+      hasXSocial,
+      hasOtherSocial: hasAnyInfo && !hasXSocial,
+      hasPaidDexInfo: hasAnyInfo,
     };
   } catch {
     return null;

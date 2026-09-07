@@ -110,3 +110,8 @@ test("buildConfig strips trailing slashes from JUPITER_API_BASE_URL to avoid dou
   const manySlashes = buildConfig({ OPENROUTER_API_KEY: "x", JUPITER_API_BASE_URL: "https://api.example.test/swap/v2///" });
   assert.equal(manySlashes.jupiterApiBaseUrl, "https://api.example.test/swap/v2");
 });
+
+test("MAX_CONCURRENT_POSITIONS defaults to 3 (the previous hardcoded value) and is configurable", () => {
+  assert.equal(buildConfig({}).maxConcurrentPositions, 3);
+  assert.equal(buildConfig({ MAX_CONCURRENT_POSITIONS: "5" }).maxConcurrentPositions, 5);
+});

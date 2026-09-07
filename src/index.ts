@@ -359,11 +359,9 @@ async function runCycle(): Promise<void> {
       const adj = adjustConfidence(s.confidence, {
         ageHours: s.token.ageHours,
         boostAmount: s.token.boostAmount ?? 0,
-        // Socials are not yet surfaced by the scanner; wiring them is the next
-        // step. Passing false keeps those modifiers inert rather than guessing.
-        hasXSocial: false,
-        hasOtherSocial: false,
-        hasPaidDexInfo: false,
+        hasXSocial: s.token.hasXSocial,
+        hasOtherSocial: s.token.hasOtherSocial,
+        hasPaidDexInfo: s.token.hasPaidDexInfo,
       });
       if (adj.adjustedConfidence !== s.confidence) {
         logger.info(
@@ -687,6 +685,22 @@ async function main(): Promise<void> {
   const balance = await getBalance();
   logger.info(`💰 Starting Balance: ${balance.toFixed(4)} SOL`);
   logger.info(`📍 Wallet: ${publicKey}`);
+
+  // Raising MAX_CONCURRENT_POSITIONS does not by itself fund the extra slots.
+  // A wallet that can only ever half-fill its own slot count silently runs
+  // under-configured; surfacing the arithmetic once at startup makes that
+  // visible instead of a mystery the operator has to reverse-engineer later.
+  const TRADING_FLOOR_SOL = 0.05;
+  const neededForAllSlots = MAX_CONCURRENT_POSITIONS * CONFIG.maxPositionSol + TRADING_FLOOR_SOL;
+  if (balance < neededForAllSlots) {
+    const affordableSlots = Math.max(0, Math.floor((balance - TRADING_FLOOR_SOL) / CONFIG.maxPositionSol));
+    logger.warn(
+      `⚠️  MAX_CONCURRENT_POSITIONS=${MAX_CONCURRENT_POSITIONS} at ${CONFIG.maxPositionSol} SOL/slot needs ` +
+        `${neededForAllSlots.toFixed(3)} SOL to fill every slot; current balance only supports ` +
+        `~${affordableSlots} slot(s) at once. Fund the wallet, lower MAX_CONCURRENT_POSITIONS, or lower ` +
+        `MAX_POSITION_SOL to use the configured slot count.`
+    );
+  }
   logger.info(`Bot starting with ${CONFIG.scanIntervalSeconds}s scan interval`);
   logger.info(`Min confidence for trade: ${CONFIG.minConfidence}%`);
   logger.info(`Max position size: ${CONFIG.maxPositionSol} SOL`);
