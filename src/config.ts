@@ -58,6 +58,13 @@ export interface AppConfig {
   blockLosingReentryForRun: boolean;
   /** Consecutive failed sells before a position is abandoned. */
   maxSellAttempts: number;
+  /** Skip coins valued above this market cap. 0 disables. */
+  maxMarketCapUsd: number;
+  /**
+   * Seconds after a boost is FIRST observed during which an instant buy may
+   * still fire. Beyond it the boost is stale and the move is likely over.
+   */
+  boostFreshWindowSeconds: number;
 }
 
 function parseNumberInRange(
@@ -214,6 +221,14 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     ),
     blockLosingReentryForRun: parseBoolean(env.BLOCK_LOSING_REENTRY_FOR_RUN, false),
     maxSellAttempts: parseNumberInRange("MAX_SELL_ATTEMPTS", env.MAX_SELL_ATTEMPTS, 5, 1, 100),
+    maxMarketCapUsd: parseNumberInRange("MAX_MARKET_CAP_USD", env.MAX_MARKET_CAP_USD, 0, 0, 1_000_000_000),
+    boostFreshWindowSeconds: parseNumberInRange(
+      "BOOST_FRESH_WINDOW_SECONDS",
+      env.BOOST_FRESH_WINDOW_SECONDS,
+      120,
+      5,
+      3600
+    ),
   };
 }
 
@@ -270,6 +285,15 @@ export function validateConfig(config: AppConfig = CONFIG): void {
     console.log(
       `   🛡️  RUG_GATES enabled: min liquidity $${config.minLiquidityUsd}, max top-holder ` +
         `${config.maxTopHolderPercent}% above $${config.holderCheckMinMarketCapUsd} MC.`
+    );
+  }
+  if (config.maxMarketCapUsd > 0) {
+    console.log(`   📉 MAX_MARKET_CAP_USD: skipping coins above $${config.maxMarketCapUsd.toLocaleString("en-US")}.`);
+  }
+  if (config.instantBuyOnBoostEnabled) {
+    console.log(
+      `   ⚡ INSTANT_BUY on boost >= ${config.instantBuyBoostThreshold}, only within ` +
+        `${config.boostFreshWindowSeconds}s of the boost first being seen.`
     );
   }
   if (config.entryScoringEnabled) {

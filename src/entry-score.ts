@@ -183,6 +183,13 @@ export interface RugGateInputs {
 
 export interface RugGateConfig {
   minLiquidityUsd: number;
+  /**
+   * Market cap above which a coin is skipped. A small wallet moving 0.03 SOL
+   * cannot influence — and gains little from — a coin already valued in the
+   * millions: the upside that justifies this strategy's risk lives well below
+   * it. 0 disables the ceiling.
+   */
+  maxMarketCapUsd: number;
   /** Concentration check applies at or above this market cap. */
   holderCheckMinMarketCapUsd: number;
   maxTopHolderPercent: number;
@@ -191,6 +198,7 @@ export interface RugGateConfig {
 
 export const DEFAULT_RUG_GATES: RugGateConfig = {
   minLiquidityUsd: 5000,
+  maxMarketCapUsd: 0,
   holderCheckMinMarketCapUsd: 60000,
   maxTopHolderPercent: 30,
   requireHolderData: true,
@@ -210,6 +218,17 @@ export function checkRugGates(input: RugGateInputs, config: RugGateConfig = DEFA
     return {
       pass: false,
       reason: `liquidity $${Math.round(input.liquidityUsd || 0)} below $${config.minLiquidityUsd} floor`,
+    };
+  }
+
+  if (
+    config.maxMarketCapUsd > 0 &&
+    Number.isFinite(input.marketCapUsd) &&
+    input.marketCapUsd > config.maxMarketCapUsd
+  ) {
+    return {
+      pass: false,
+      reason: `market cap $${Math.round(input.marketCapUsd).toLocaleString("en-US")} above the $${config.maxMarketCapUsd.toLocaleString("en-US")} ceiling`,
     };
   }
 

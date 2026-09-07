@@ -30,6 +30,12 @@ import {
   reconcilePositions,
   type RecentExit,
 } from "./position-guard.js";
+import {
+  observeBoosts,
+  isBoostFresh,
+  pruneSightings,
+  type BoostSightings,
+} from "./boost-tracker.js";
 import type { TokenCandidate } from "./scanner.js";
 import { checkAnalysisModel, formatModelCheck } from "./model-preflight.js";
 
@@ -37,6 +43,15 @@ const tradeHistory: TradeHistoryItem[] = [];
 
 /** Tokens exited recently, blocking immediate re-entry. Persisted across restarts. */
 let recentExits: RecentExit[] = [];
+
+/**
+ * When each boosted token was first seen. Deliberately NOT persisted: after a
+ * restart the bot has no way to know whether a boost it finds is seconds or
+ * hours old, so every boost present at startup is baselined as already-seen and
+ * never instant-bought. Persisting would fake a freshness it cannot verify.
+ */
+let boostSightings: BoostSightings = new Map();
+let boostBaselineTaken = false;
 
 function reentryConfig() {
   return {
@@ -164,6 +179,30 @@ async function runCycle(): Promise<void> {
   logger.info("📡 Scanning for candidates...");
   const candidates = await scanForCandidates();
 
+  // Fold this poll into the boost sighting record BEFORE any buy decision, so
+  // freshness is judged against when the bot actually first saw each boost.
+  const now = Date.now();
+  const observed = observeBoosts(
+    candidates
+      .filter((c) => (c.boostAmount ?? 0) > 0)
+      .map((c) => ({ chainId: c.chainId, tokenAddress: c.address, boostAmount: c.boostAmount ?? 0 })),
+    boostSightings,
+    now,
+    !boostBaselineTaken
+  );
+  boostSightings = pruneSightings(observed.sightings, now, {
+    freshWindowSeconds: CONFIG.boostFreshWindowSeconds,
+  });
+  if (!boostBaselineTaken) {
+    boostBaselineTaken = true;
+    logger.info(
+      `⚡ Boost baseline taken: ${boostSightings.size} already-boosted token(s) recorded and will NOT be ` +
+        `instant-bought. Only boosts observed arriving from now on qualify.`
+    );
+  } else if (observed.newlyBoosted.length > 0) {
+    logger.info(`⚡ Newly boosted this cycle: ${observed.newlyBoosted.map((o) => o.tokenAddress.slice(0, 6)).join(", ")}`);
+  }
+
   if (candidates.length === 0) {
     logger.info("No candidates found this cycle.");
     await persistRuntimeState();
@@ -182,6 +221,7 @@ async function runCycle(): Promise<void> {
     };
     const gateConfig = {
       minLiquidityUsd: CONFIG.minLiquidityUsd,
+      maxMarketCapUsd: CONFIG.maxMarketCapUsd,
       holderCheckMinMarketCapUsd: CONFIG.holderCheckMinMarketCapUsd,
       maxTopHolderPercent: CONFIG.maxTopHolderPercent,
       requireHolderData: false,
@@ -191,6 +231,21 @@ async function runCycle(): Promise<void> {
       if (getActivePositions().length >= MAX_CONCURRENT_POSITIONS) break;
       if (getActivePositions().some((p) => p.tokenAddress === candidate.address)) continue;
       if (reentryBlocked(candidate.address, candidate.symbol)) continue;
+
+      // The boost must be one this run actually watched arrive. Without this
+      // the bot buys whatever happens to be sitting in the rolling boosts feed,
+      // which may be hours stale and already rolling over.
+      if (!isBoostFresh(candidate.chainId, candidate.address, boostSightings, Date.now(), {
+        freshWindowSeconds: CONFIG.boostFreshWindowSeconds,
+      })) {
+        if ((candidate.boostAmount ?? 0) >= CONFIG.instantBuyBoostThreshold) {
+          logger.info(
+            `⏱️  ${candidate.symbol}: boost ${candidate.boostAmount} met the threshold but is not fresh ` +
+              `(not first seen within ${CONFIG.boostFreshWindowSeconds}s) — skipping.`
+          );
+        }
+        continue;
+      }
 
       const verdict = qualifiesForInstantBuy(
         {
@@ -318,6 +373,7 @@ async function runCycle(): Promise<void> {
         },
         {
           minLiquidityUsd: CONFIG.minLiquidityUsd,
+          maxMarketCapUsd: CONFIG.maxMarketCapUsd,
           holderCheckMinMarketCapUsd: CONFIG.holderCheckMinMarketCapUsd,
           maxTopHolderPercent: CONFIG.maxTopHolderPercent,
           // Not yet wired, so an unknown reading must not veto every trade.
@@ -492,6 +548,21 @@ async function main(): Promise<void> {
           `🧹 Dropping ${drop.length} position(s) the wallet does not hold: ` +
             `${drop.map((p) => p.tokenSymbol).join(", ")}. Sold elsewhere, or never settled.`
         );
+        // A position that left the wallet without the bot selling it is still
+        // an exit. Without recording it, a coin sold by hand is eligible for
+        // instant re-purchase on the very next cycle — which is how TRONK was
+        // bought back seconds after being sold manually.
+        const droppedAt = Date.now();
+        for (const p of drop) {
+          recentExits = recordExit(recentExits, {
+            tokenAddress: p.tokenAddress,
+            tokenSymbol: p.tokenSymbol,
+            exitedAt: droppedAt,
+            // Unknown outcome; treat as a loss so the stricter
+            // block-losers-for-run setting also covers it.
+            wasLoss: true,
+          });
+        }
       }
       reconciled = keep;
     } catch (error) {
