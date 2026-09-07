@@ -45,6 +45,8 @@ export interface ActivePosition {
    * seeded from entryPrice on first evaluation.
    */
   peakPrice?: number;
+  /** Set once the deferral message has been logged, to keep it to one line. */
+  takeProfitDeferredLogged?: boolean;
 }
 
 interface DexPairPrice {
@@ -184,6 +186,18 @@ function findPositionIndex(position: ActivePosition): number {
   const byIdentity = activePositions.indexOf(position);
   if (byIdentity !== -1) return byIdentity;
   return activePositions.findIndex((p) => p.txSignature === position.txSignature);
+}
+
+/**
+ * Whether the trailing stop has armed for this position — i.e. its peak has
+ * reached the activation gain, so the stop is now trailing rather than sitting
+ * at the original level.
+ */
+function trailIsArmed(position: ActivePosition): boolean {
+  if (!Number.isFinite(position.entryPrice) || position.entryPrice <= 0) return false;
+  const peak = position.peakPrice ?? position.entryPrice;
+  const peakGainPercent = ((peak - position.entryPrice) / position.entryPrice) * 100;
+  return peakGainPercent >= CONFIG.trailingStopActivatePercent;
 }
 
 /** Remove a closed position from the active list. */
@@ -770,8 +784,32 @@ export async function evaluatePositionAtPrice(position: ActivePosition, currentP
     }
   }
 
+  // A fixed take-profit and a trailing stop are two different exit theories, and
+  // running both means the fixed one always wins: it fires at a price the trail
+  // has, by definition, already climbed past. Observed on OTC — the trail had
+  // ratcheted to +37.61% and was still rising when the +50% take-profit closed
+  // the position at +52.90%, ending a move that was still going. When the trail
+  // is armed it is already protecting a real gain, so let it own the exit and
+  // stand the fixed target down. The stop-loss always takes precedence: capping
+  // downside is never deferred.
+  const trailArmed = CONFIG.trailingStopEnabled && trailIsArmed(position);
+  const deferTakeProfit = CONFIG.letWinnersRun && trailArmed;
+
   const exitReason: "STOP_LOSS" | "TAKE_PROFIT" | null =
-    currentPrice <= position.stopLoss ? "STOP_LOSS" : currentPrice >= position.takeProfit ? "TAKE_PROFIT" : null;
+    currentPrice <= position.stopLoss
+      ? "STOP_LOSS"
+      : !deferTakeProfit && currentPrice >= position.takeProfit
+        ? "TAKE_PROFIT"
+        : null;
+
+  if (deferTakeProfit && currentPrice >= position.takeProfit && !position.takeProfitDeferredLogged) {
+    position.takeProfitDeferredLogged = true;
+    const lockedPercent = ((position.stopLoss - position.entryPrice) / position.entryPrice) * 100;
+    logger.info(
+      `🏃 ${position.tokenSymbol} passed the +${CONFIG.takeProfitPercent}% target and is still running — ` +
+        `letting the trailing stop manage it (currently locking +${lockedPercent.toFixed(2)}%).`
+    );
+  }
 
   if (!exitReason) return;
 

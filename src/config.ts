@@ -65,6 +65,12 @@ export interface AppConfig {
    * still fire. Beyond it the boost is stale and the move is likely over.
    */
   boostFreshWindowSeconds: number;
+  /**
+   * When the trailing stop is armed, ignore the fixed take-profit and let the
+   * trail decide the exit. Without this a still-climbing position is closed the
+   * instant it touches takeProfitPercent, however strong the momentum.
+   */
+  letWinnersRun: boolean;
 }
 
 function parseNumberInRange(
@@ -229,6 +235,7 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       5,
       3600
     ),
+    letWinnersRun: parseBoolean(env.LET_WINNERS_RUN, false),
   };
 }
 
@@ -294,6 +301,12 @@ export function validateConfig(config: AppConfig = CONFIG): void {
     console.log(
       `   ⚡ INSTANT_BUY on boost >= ${config.instantBuyBoostThreshold}, only within ` +
         `${config.boostFreshWindowSeconds}s of the boost first being seen.`
+    );
+  }
+  if (config.letWinnersRun) {
+    console.log(
+      "   🏃 LET_WINNERS_RUN enabled: once the trailing stop is armed it owns the exit; " +
+        "the fixed take-profit stands down."
     );
   }
   if (config.entryScoringEnabled) {
