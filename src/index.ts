@@ -24,6 +24,7 @@ import {
 } from "./first-trade-gate.js";
 import type { FirstTradeValidation } from "./first-trade-gate.js";
 import { adjustConfidence, checkRugGates, qualifiesForInstantBuy } from "./entry-score.js";
+import { fetchCreatorWallet, fetchDevReputation, devReputationBonus } from "./dev-reputation.js";
 import {
   canReenter,
   pruneExits,
@@ -368,6 +369,40 @@ async function runCycle(): Promise<void> {
           `⚖️  ${s.token.symbol}: ${s.confidence}% → ${adj.adjustedConfidence}% (${adj.reasons.join(", ")})`
         );
         s.confidence = adj.adjustedConfidence;
+      }
+    }
+  }
+
+  // Creator reputation, from pump.fun's unofficial API. Runs after the other
+  // modifiers and before the threshold filter, so a proven dev can lift a coin
+  // over the line — the operator's stated intent. Bounded by a 30-minute cache
+  // keyed on creator wallet, so repeat sightings cost nothing.
+  //
+  // Every failure path here yields no bonus rather than a guess: a dead
+  // endpoint costs this signal and leaves the rest of the bot untouched.
+  if (CONFIG.devReputationEnabled) {
+    const repConfig = {
+      minFollowers: CONFIG.devMinFollowers,
+      minMigratedTokens: CONFIG.devMinMigratedTokens,
+      bonus: CONFIG.devReputationBonus,
+    };
+    for (const s of signals) {
+      try {
+        const creator = await fetchCreatorWallet(s.token.address);
+        if (!creator) continue;
+        const rep = await fetchDevReputation(creator);
+        const { bonus, reason } = devReputationBonus(rep, repConfig);
+        if (bonus > 0) {
+          const before = s.confidence;
+          s.confidence = Math.min(100, s.confidence + bonus);
+          logger.info(`👤 ${s.token.symbol}: ${before}% → ${s.confidence}% (${reason})`);
+        }
+      } catch (error) {
+        logger.debug(
+          `Dev reputation lookup skipped for ${s.token.symbol}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
       }
     }
   }

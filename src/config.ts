@@ -72,6 +72,16 @@ export interface AppConfig {
    * overriding this when the wallet cannot fund every slot.
    */
   maxConcurrentPositions: number;
+  /**
+   * Score creators via pump.fun's UNOFFICIAL frontend API. Off by default: it
+   * is an undocumented endpoint that can break without notice. Every failure
+   * withholds the bonus rather than guessing, so a breakage costs the signal
+   * and nothing else.
+   */
+  devReputationEnabled: boolean;
+  devMinFollowers: number;
+  devMinMigratedTokens: number;
+  devReputationBonus: number;
   /** Skip coins valued above this market cap. 0 disables. */
   maxMarketCapUsd: number;
   /**
@@ -243,6 +253,10 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     maxSellAttempts: parseNumberInRange("MAX_SELL_ATTEMPTS", env.MAX_SELL_ATTEMPTS, 5, 1, 100),
     reconcileEveryTicks: parseNumberInRange("RECONCILE_EVERY_TICKS", env.RECONCILE_EVERY_TICKS, 20, 1, 10_000),
     maxConcurrentPositions: parseNumberInRange("MAX_CONCURRENT_POSITIONS", env.MAX_CONCURRENT_POSITIONS, 3, 1, 20),
+    devReputationEnabled: parseBoolean(env.DEV_REPUTATION_ENABLED, false),
+    devMinFollowers: parseNumberInRange("DEV_MIN_FOLLOWERS", env.DEV_MIN_FOLLOWERS, 2000, 0, 10_000_000),
+    devMinMigratedTokens: parseNumberInRange("DEV_MIN_MIGRATED_TOKENS", env.DEV_MIN_MIGRATED_TOKENS, 3, 0, 10_000),
+    devReputationBonus: parseNumberInRange("DEV_REPUTATION_BONUS", env.DEV_REPUTATION_BONUS, 15, 0, 100),
     maxMarketCapUsd: parseNumberInRange("MAX_MARKET_CAP_USD", env.MAX_MARKET_CAP_USD, 0, 0, 1_000_000_000),
     boostFreshWindowSeconds: parseNumberInRange(
       "BOOST_FRESH_WINDOW_SECONDS",
@@ -323,6 +337,13 @@ export function validateConfig(config: AppConfig = CONFIG): void {
     console.log(
       "   🏃 LET_WINNERS_RUN enabled: once the trailing stop is armed it owns the exit; " +
         "the fixed take-profit stands down."
+    );
+  }
+  if (config.devReputationEnabled) {
+    console.log(
+      `   👤 DEV_REPUTATION enabled: +${config.devReputationBonus} when the pump.fun creator has ` +
+        `>=${config.devMinFollowers} followers AND >=${config.devMinMigratedTokens} migrated tokens ` +
+        `(unofficial API — any failure simply withholds the bonus).`
     );
   }
   if (config.entryScoringEnabled) {
