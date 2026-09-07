@@ -86,9 +86,35 @@ export async function scanForCandidates(): Promise<TokenCandidate[]> {
   const candidates: TokenCandidate[] = [];
 
   try {
-    const boostedTokens = await httpGet<DexTokenBoost[]>(`${CONFIG.dexScreenerApiUrl}/token-boosts/top/v1`);
+    // Two boost feeds, deliberately. `top` is the leaderboard — a coin only
+    // appears once it has already climbed it, which is late by definition and
+    // is why entries have been landing after 400-800% moves. `latest` carries
+    // boosts as they are purchased, and is the only feed that can see a coin at
+    // the moment it gets boosted. Failures are independent: one feed being down
+    // must not blind the scanner to the other.
+    const [topBoosts, latestBoosts] = await Promise.all([
+      httpGet<DexTokenBoost[]>(`${CONFIG.dexScreenerApiUrl}/token-boosts/top/v1`).catch(() => {
+        logger.debug("Top boosts feed unavailable.");
+        return [] as DexTokenBoost[];
+      }),
+      httpGet<DexTokenBoost[]>(`${CONFIG.dexScreenerApiUrl}/token-boosts/latest/v1`).catch(() => {
+        logger.debug("Latest boosts feed unavailable.");
+        return [] as DexTokenBoost[];
+      }),
+    ]);
 
-    const relevantBoosted = (boostedTokens || []).filter((t) => CONFIG.scanChains.includes(String(t.chainId || "").toLowerCase()));
+    // Latest first so a freshly boosted coin wins de-duplication and keeps its
+    // own (newer) boost amount.
+    const seenBoosted = new Set<string>();
+    const boostedTokens: DexTokenBoost[] = [];
+    for (const t of [...(latestBoosts || []), ...(topBoosts || [])]) {
+      const key = `${t.chainId}:${t.tokenAddress}`;
+      if (!t.tokenAddress || seenBoosted.has(key)) continue;
+      seenBoosted.add(key);
+      boostedTokens.push(t);
+    }
+
+    const relevantBoosted = boostedTokens.filter((t) => CONFIG.scanChains.includes(String(t.chainId || "").toLowerCase()));
 
     for (const token of relevantBoosted.slice(0, 20)) {
       try {

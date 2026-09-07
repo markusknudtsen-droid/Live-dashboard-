@@ -21,10 +21,37 @@ import {
   shouldSkipNewEntries,
 } from "./first-trade-gate.js";
 import type { FirstTradeValidation } from "./first-trade-gate.js";
-import { adjustConfidence, checkRugGates } from "./entry-score.js";
+import { adjustConfidence, checkRugGates, qualifiesForInstantBuy } from "./entry-score.js";
+import type { TokenCandidate } from "./scanner.js";
 import { checkAnalysisModel, formatModelCheck } from "./model-preflight.js";
 
 const tradeHistory: TradeHistoryItem[] = [];
+
+/**
+ * Build the TradeSignal an instant buy needs, without a model round-trip.
+ *
+ * Exit levels come from the operator's configured percentages, exactly as they
+ * would for an analysed trade — the boost decides WHETHER to buy, never how
+ * much risk to take. Confidence is recorded as 100 only to denote "did not go
+ * through the model"; it is never compared against minConfidence on this path.
+ */
+function buildInstantBuySignal(token: TokenCandidate): TradeSignal {
+  return {
+    token,
+    confidence: 100,
+    action: "BUY",
+    reasoning: `Instant buy: DexScreener boost ${token.boostAmount ?? 0} >= ${CONFIG.instantBuyBoostThreshold}. No model analysis.`,
+    entryPrice: token.priceUsd,
+    stopLoss: token.priceUsd * (1 - CONFIG.stopLossPercent / 100),
+    takeProfit: token.priceUsd * (1 + CONFIG.takeProfitPercent / 100),
+    positionSizeSol: CONFIG.maxPositionSol,
+    riskRewardRatio: CONFIG.takeProfitPercent / CONFIG.stopLossPercent,
+    trendStrength: "unknown",
+    momentum: "unknown",
+    riskLevel: "high",
+    narrative: "boost-triggered",
+  };
+}
 let cycleInProgress = false;
 let monitoringInProgress = false;
 let firstTradeValidated: FirstTradeValidation = null;
@@ -108,6 +135,67 @@ async function runCycle(): Promise<void> {
     logger.info("No candidates found this cycle.");
     await persistRuntimeState();
     return;
+  }
+
+  // Instant buy runs BEFORE analysis — skipping the model round-trip is the
+  // whole point, since a heavily boosted coin moves inside the ~30s the
+  // analysis takes. The rug gates still apply: a large boost is someone
+  // spending money on promotion, which says nothing about whether the position
+  // can be sold again.
+  if (CONFIG.instantBuyOnBoostEnabled) {
+    const instantConfig = {
+      enabled: true,
+      boostThreshold: CONFIG.instantBuyBoostThreshold,
+    };
+    const gateConfig = {
+      minLiquidityUsd: CONFIG.minLiquidityUsd,
+      holderCheckMinMarketCapUsd: CONFIG.holderCheckMinMarketCapUsd,
+      maxTopHolderPercent: CONFIG.maxTopHolderPercent,
+      requireHolderData: false,
+    };
+
+    for (const candidate of candidates) {
+      if (getActivePositions().length >= MAX_CONCURRENT_POSITIONS) break;
+      if (getActivePositions().some((p) => p.tokenAddress === candidate.address)) continue;
+
+      const verdict = qualifiesForInstantBuy(
+        {
+          boostAmount: candidate.boostAmount ?? 0,
+          liquidityUsd: candidate.liquidityUsd,
+          marketCapUsd: candidate.marketCap,
+          topHolderPercent: undefined,
+        },
+        instantConfig,
+        gateConfig
+      );
+
+      if (!verdict.buy) {
+        // Only worth a line when the boost cleared the bar but a gate stopped
+        // it; every other candidate failing the threshold is just noise.
+        if ((candidate.boostAmount ?? 0) >= CONFIG.instantBuyBoostThreshold) {
+          logger.warn(`⛔ ${candidate.symbol}: ${verdict.reason}`);
+        }
+        continue;
+      }
+
+      logger.info(`⚡ INSTANT BUY: ${candidate.symbol} — ${verdict.reason}`);
+      const instantSignal = buildInstantBuySignal(candidate);
+      const result = await executeBuy(instantSignal);
+      tradeHistory.push({
+        timestamp: Date.now(),
+        symbol: candidate.symbol,
+        action: "BUY",
+        confidence: 100,
+        result: result.success ? "SUCCESS" : `FAILED: ${result.error}`,
+        txSignature: result.txSignature,
+      });
+      if (result.success) {
+        logger.info("✅ Instant buy executed");
+      } else {
+        logger.warn(`❌ Instant buy failed: ${result.error}`);
+      }
+      await persistRuntimeState();
+    }
   }
 
   logger.info(`🧠 Analyzing top ${Math.min(candidates.length, 5)} candidates...`);

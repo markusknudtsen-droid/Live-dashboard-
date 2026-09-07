@@ -46,6 +46,10 @@ export interface AppConfig {
   maxTopHolderPercent: number;
   /** Confidence modifiers from age/socials/boost: off by default. */
   entryScoringEnabled: boolean;
+  /** Buy a heavily boosted coin without waiting for model analysis. */
+  instantBuyOnBoostEnabled: boolean;
+  /** Boost amount at or above which the instant buy fires. */
+  instantBuyBoostThreshold: number;
 }
 
 function parseNumberInRange(
@@ -181,6 +185,14 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     ),
     maxTopHolderPercent: parseNumberInRange("MAX_TOP_HOLDER_PERCENT", env.MAX_TOP_HOLDER_PERCENT, 30, 1, 100),
     entryScoringEnabled: parseBoolean(env.ENTRY_SCORING_ENABLED, false),
+    instantBuyOnBoostEnabled: parseBoolean(env.INSTANT_BUY_ON_BOOST_ENABLED, false),
+    instantBuyBoostThreshold: parseNumberInRange(
+      "INSTANT_BUY_BOOST_THRESHOLD",
+      env.INSTANT_BUY_BOOST_THRESHOLD,
+      500,
+      1,
+      1_000_000
+    ),
   };
 }
 

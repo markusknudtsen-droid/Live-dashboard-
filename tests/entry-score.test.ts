@@ -4,6 +4,7 @@ import { updateTrailingStop } from "../src/trailing-stop.js";
 import {
   adjustConfidence,
   checkRugGates,
+  qualifiesForInstantBuy,
   DEFAULT_SCORE_WEIGHTS,
   DEFAULT_RUG_GATES,
 } from "../src/entry-score.js";
@@ -213,6 +214,48 @@ test("unknown holder data fails closed by default, and can be opted out of", () 
     { ...DEFAULT_RUG_GATES, requireHolderData: false }
   );
   assert.equal(lenient.pass, true);
+});
+
+/* ------------------------------- instant buy ------------------------------- */
+
+const instantOn = { enabled: true, boostThreshold: 500 };
+const healthy = { liquidityUsd: 9000, marketCapUsd: 20000, topHolderPercent: 5 };
+
+test("a 500 boost on a healthy pair triggers the instant buy", () => {
+  const r = qualifiesForInstantBuy({ ...healthy, boostAmount: 500 }, instantOn);
+  assert.equal(r.buy, true);
+  assert.match(r.reason, /rug gates passed/);
+});
+
+test("a boost below the threshold does not trigger it", () => {
+  assert.equal(qualifiesForInstantBuy({ ...healthy, boostAmount: 499 }, instantOn).buy, false);
+  assert.equal(qualifiesForInstantBuy({ ...healthy, boostAmount: 0 }, instantOn).buy, false);
+});
+
+test("instant buy is off unless explicitly enabled", () => {
+  const r = qualifiesForInstantBuy({ ...healthy, boostAmount: 5000 });
+  assert.equal(r.buy, false);
+  assert.match(r.reason, /disabled/);
+});
+
+test("a huge boost still cannot buy through a failing rug gate", () => {
+  const thin = qualifiesForInstantBuy(
+    { liquidityUsd: 900, marketCapUsd: 20000, topHolderPercent: 5, boostAmount: 5000 },
+    instantOn
+  );
+  assert.equal(thin.buy, false, "thin liquidity must veto even a 5000 boost");
+  assert.match(thin.reason, /rug gate blocked it/);
+
+  const concentrated = qualifiesForInstantBuy(
+    { liquidityUsd: 9000, marketCapUsd: 90000, topHolderPercent: 71, boostAmount: 5000 },
+    instantOn
+  );
+  assert.equal(concentrated.buy, false, "a whale-held coin must veto even a 5000 boost");
+});
+
+test("the threshold is configurable", () => {
+  const at100 = qualifiesForInstantBuy({ ...healthy, boostAmount: 120 }, { enabled: true, boostThreshold: 100 });
+  assert.equal(at100.buy, true);
 });
 
 test("exactly at the boundaries: liquidity floor and holder ceiling", () => {

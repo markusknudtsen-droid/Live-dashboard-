@@ -120,6 +120,56 @@ export function adjustConfidence(
   return { adjustedConfidence: adjusted, bonusApplied: cappedBonus, penaltyApplied: penalty, reasons };
 }
 
+export interface InstantBuyConfig {
+  enabled: boolean;
+  /** Boost amount at or above which the AI analysis step is skipped. */
+  boostThreshold: number;
+}
+
+export const DEFAULT_INSTANT_BUY: InstantBuyConfig = {
+  enabled: false,
+  boostThreshold: 500,
+};
+
+export interface InstantBuyResult {
+  buy: boolean;
+  /** Why it did or did not qualify, for the log. */
+  reason: string;
+}
+
+/**
+ * Whether a boosted candidate should be bought without waiting for model
+ * analysis.
+ *
+ * The rug gates still apply. A large boost means someone spent real money on
+ * promotion, which is a spending signal rather than a quality one — a
+ * well-funded rug buys boosts too. Skipping the model is a speed decision, not
+ * a licence to skip the checks that test whether the coin can actually be sold
+ * again, so liquidity and holder concentration are enforced exactly as they are
+ * on an analysed buy.
+ */
+export function qualifiesForInstantBuy(
+  input: RugGateInputs & { boostAmount: number },
+  instant: InstantBuyConfig = DEFAULT_INSTANT_BUY,
+  gates: RugGateConfig = DEFAULT_RUG_GATES
+): InstantBuyResult {
+  if (!instant.enabled) return { buy: false, reason: "instant buy disabled" };
+
+  if (!Number.isFinite(input.boostAmount) || input.boostAmount < instant.boostThreshold) {
+    return {
+      buy: false,
+      reason: `boost ${input.boostAmount || 0} below the ${instant.boostThreshold} instant-buy threshold`,
+    };
+  }
+
+  const gate = checkRugGates(input, gates);
+  if (!gate.pass) {
+    return { buy: false, reason: `boost ${input.boostAmount} qualified but rug gate blocked it: ${gate.reason}` };
+  }
+
+  return { buy: true, reason: `boost ${input.boostAmount} >= ${instant.boostThreshold} and rug gates passed` };
+}
+
 export interface RugGateInputs {
   liquidityUsd: number;
   marketCapUsd: number;
