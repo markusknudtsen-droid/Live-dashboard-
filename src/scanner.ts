@@ -116,6 +116,27 @@ function isWorthAnalysing(c: TokenCandidate): boolean {
   );
 }
 
+/**
+ * Resolve a set of mint addresses (e.g. from Telegram) into candidates via the
+ * same DexScreener pair lookup already used for boosted tokens, and route them
+ * through isWorthAnalysing() — a Telegram mention must clear the same
+ * liquidity/volume/age bars as anything else, never bypass them.
+ */
+export async function resolveMintsToCandidates(mints: string[]): Promise<TokenCandidate[]> {
+  const out: TokenCandidate[] = [];
+  for (const mint of mints.slice(0, 10)) {
+    try {
+      const pairs = await httpGet<DexPair[]>(`${CONFIG.dexScreenerApiUrl}/tokens/v1/solana/${mint}`);
+      if (!pairs?.length) continue;
+      const candidate = parsePairToCandidate(pairs[0]);
+      if (candidate && isWorthAnalysing(candidate)) out.push(candidate);
+    } catch {
+      logger.debug(`Could not resolve Telegram-mentioned mint ${mint}`);
+    }
+  }
+  return out;
+}
+
 export async function scanForCandidates(): Promise<TokenCandidate[]> {
   const candidates: TokenCandidate[] = [];
 

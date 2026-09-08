@@ -105,6 +105,11 @@ export interface AppConfig {
   telegramChannels: string[];
   telegramMentionBonus: number;
   telegramSignalTtlMinutes: number;
+  /** Public channels read with no login via t.me/s/{channel}. Separate list:
+   *  these do not require a session and can run even if MTProto login is
+   *  never done. */
+  telegramScrapeChannels: string[];
+  telegramScrapeIntervalSeconds: number;
   devReputationEnabled: boolean;
   devMinFollowers: number;
   devMinMigratedTokens: number;
@@ -295,6 +300,11 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       .filter((c) => c.length > 0),
     telegramMentionBonus: parseNumberInRange("TELEGRAM_MENTION_BONUS", env.TELEGRAM_MENTION_BONUS, 6, 0, 100),
     telegramSignalTtlMinutes: parseNumberInRange("TELEGRAM_SIGNAL_TTL_MINUTES", env.TELEGRAM_SIGNAL_TTL_MINUTES, 30, 0, 1440),
+    telegramScrapeChannels: (env.TELEGRAM_SCRAPE_CHANNELS || "")
+      .split(",")
+      .map((c) => c.trim())
+      .filter((c) => c.length > 0),
+    telegramScrapeIntervalSeconds: parseNumberInRange("TELEGRAM_SCRAPE_INTERVAL_SECONDS", env.TELEGRAM_SCRAPE_INTERVAL_SECONDS, 45, 10, 3600),
     devReputationEnabled: parseBoolean(env.DEV_REPUTATION_ENABLED, false),
     devMinFollowers: parseNumberInRange("DEV_MIN_FOLLOWERS", env.DEV_MIN_FOLLOWERS, 2000, 0, 10_000_000),
     devMinMigratedTokens: parseNumberInRange("DEV_MIN_MIGRATED_TOKENS", env.DEV_MIN_MIGRATED_TOKENS, 3, 0, 10_000),
@@ -385,6 +395,12 @@ export function validateConfig(config: AppConfig = CONFIG): void {
     console.log(
       `   🌱 WATCH_NEW_COINS enabled: coins under ${config.newCoinMaxAgeHours}h qualify on liquidity ` +
         `+ >=${config.newCoinMinMomentumPercent}% short-window momentum instead of 24h volume.`
+    );
+  }
+  if (config.telegramScrapeChannels.length > 0) {
+    console.log(
+      `   📡 TELEGRAM scrape (no login): ${config.telegramScrapeChannels.length} public channel(s), ` +
+        `polled every ${config.telegramScrapeIntervalSeconds}s.`
     );
   }
   if (config.telegramEnabled) {

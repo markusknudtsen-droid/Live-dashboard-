@@ -1,5 +1,5 @@
 import { CONFIG, validateConfig } from "./config.js";
-import { scanForCandidates } from "./scanner.js";
+import { scanForCandidates, resolveMintsToCandidates } from "./scanner.js";
 import { batchAnalyze, TradeSignal } from "./analyze.js";
 import {
   initTrader,
@@ -40,6 +40,8 @@ import {
 } from "./boost-tracker.js";
 import type { TokenCandidate } from "./scanner.js";
 import { checkAnalysisModel, formatModelCheck } from "./model-preflight.js";
+import { startTelegramWatcher, getTelegramSignal, recentMentionedMints } from "./telegram-signals.js";
+import { pollPublicChannel } from "./telegram-scrape.js";
 
 const tradeHistory: TradeHistoryItem[] = [];
 
@@ -245,7 +247,20 @@ async function runCycle(): Promise<void> {
   }
 
   logger.info("📡 Scanning for candidates...");
-  const candidates = await scanForCandidates();
+  let candidates = await scanForCandidates();
+
+  // Telegram is a candidate source: it surfaces coins the DexScreener feeds
+  // never show. Resolved candidates still pass isWorthAnalysing() inside
+  // resolveMintsToCandidates(), so a mention cannot bypass the liquidity/age
+  // bars that gate everything else.
+  if (CONFIG.telegramEnabled || CONFIG.telegramScrapeChannels.length > 0) {
+    const mentioned = recentMentionedMints(Date.now(), CONFIG.telegramSignalTtlMinutes)
+      .filter((m) => !candidates.some((c) => c.address === m));
+    if (mentioned.length > 0) {
+      const resolved = await resolveMintsToCandidates(mentioned);
+      candidates = [...candidates, ...resolved];
+    }
+  }
 
   // Fold this poll into the boost sighting record BEFORE any buy decision, so
   // freshness is judged against when the bot actually first saw each boost.
@@ -434,6 +449,22 @@ async function runCycle(): Promise<void> {
           `Dev reputation lookup skipped for ${s.token.symbol}: ${
             error instanceof Error ? error.message : String(error)
           }`
+        );
+      }
+    }
+  }
+
+  // A Telegram mention is a marketing signal in the same category as a paid
+  // boost — cheap to manufacture, so the bonus is small and not compounded
+  // with everything else beyond what the individual modifiers already allow.
+  if (CONFIG.telegramEnabled || CONFIG.telegramScrapeChannels.length > 0) {
+    for (const s of signals) {
+      const sig = getTelegramSignal(s.token.address, Date.now(), CONFIG.telegramSignalTtlMinutes);
+      if (sig) {
+        const before = s.confidence;
+        s.confidence = Math.min(100, s.confidence + CONFIG.telegramMentionBonus);
+        logger.info(
+          `📡 ${s.token.symbol}: ${before}% → ${s.confidence}% (+${CONFIG.telegramMentionBonus} mentioned in ${sig.channel})`
         );
       }
     }
@@ -775,6 +806,33 @@ async function main(): Promise<void> {
   logger.info(`Take profit: +${CONFIG.takeProfitPercent}%`);
   if (CONFIG.requireProfitableFirstTrade) {
     logger.info(`🔒 First-trade validation gate: ${describeGateState(firstTradeValidated)}`);
+  }
+
+  // Telegram is optional and must never block startup. Both paths degrade to
+  // "no signal" on any failure — see telegram-signals.ts / telegram-scrape.ts.
+  if (CONFIG.telegramEnabled) {
+    void startTelegramWatcher({
+      apiId: CONFIG.telegramApiId,
+      apiHash: CONFIG.telegramApiHash,
+      session: CONFIG.telegramSession,
+      channels: CONFIG.telegramChannels,
+      ttlMinutes: CONFIG.telegramSignalTtlMinutes,
+    });
+  }
+  if (CONFIG.telegramScrapeChannels.length > 0) {
+    const pollScrapeChannels = async (): Promise<void> => {
+      for (const channel of CONFIG.telegramScrapeChannels) {
+        try {
+          await pollPublicChannel(channel);
+        } catch (error) {
+          logger.debug(`Telegram scrape failed for ${channel}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    };
+    void pollScrapeChannels();
+    setInterval(() => {
+      void pollScrapeChannels();
+    }, CONFIG.telegramScrapeIntervalSeconds * 1000);
   }
 
   // Position monitoring runs on its own independent interval, decoupled from
