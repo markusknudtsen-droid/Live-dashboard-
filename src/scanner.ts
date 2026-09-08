@@ -99,6 +99,23 @@ function asNumber(value: string | number | undefined, fallback = 0): number {
  * Scan DexScreener for high-potential memecoin candidates
  * Filters: volume > $10k, liquidity > $5k, age < 72h, buy ratio > 55%
  */
+/**
+ * A candidate is worth analysing if it clears the established-coin bar OR the
+ * new-coin bar. Keeping them as two separate tests (rather than loosening the
+ * one filter) means an established coin still has to prove real trailing
+ * volume, while a fresh one is judged on depth and live momentum instead.
+ */
+function isWorthAnalysing(c: TokenCandidate): boolean {
+  if (passesInitialFilter(c)) return true;
+  if (!CONFIG.watchNewCoins) return false;
+  return passesNewCoinFilter(
+    c,
+    CONFIG.newCoinMaxAgeHours,
+    CONFIG.minLiquidityUsd,
+    CONFIG.newCoinMinMomentumPercent
+  );
+}
+
 export async function scanForCandidates(): Promise<TokenCandidate[]> {
   const candidates: TokenCandidate[] = [];
 
@@ -141,7 +158,7 @@ export async function scanForCandidates(): Promise<TokenCandidate[]> {
         if (pairs.length > 0) {
           const pair = pairs[0];
           const candidate = parsePairToCandidate(pair, token.totalAmount || token.amount);
-          if (candidate && passesInitialFilter(candidate)) {
+          if (candidate && isWorthAnalysing(candidate)) {
             candidates.push(candidate);
           }
         }
@@ -161,7 +178,7 @@ export async function scanForCandidates(): Promise<TokenCandidate[]> {
         const memePairs = memeSearch.pairs || [];
         for (const pair of memePairs.slice(0, 15)) {
           const candidate = parsePairToCandidate(pair);
-          if (candidate && passesInitialFilter(candidate) && !candidates.find((c) => c.address === candidate.address)) {
+          if (candidate && isWorthAnalysing(candidate) && !candidates.find((c) => c.address === candidate.address)) {
             candidates.push(candidate);
           }
         }
@@ -238,6 +255,37 @@ export function parsePairToCandidate(pair: DexPair, boostAmount?: number): Token
 /**
  * Initial filter to remove obvious bad candidates before AI analysis
  */
+/**
+ * A young coin cannot satisfy the standard filter, and that is not a tuning
+ * problem — it is arithmetic. volume24h is a TRAILING 24-hour figure, so a coin
+ * minutes old has almost none of it no matter how hard it is trading right now.
+ * Requiring $10k of it makes freshly-launched tokens structurally invisible,
+ * which is why the candidate pool kept returning the same established coins
+ * (11 unique tokens across an entire run, several analysed 70+ times) and why
+ * entries kept landing on coins already up hundreds of percent.
+ *
+ * New coins are therefore judged on what they CAN evidence at their age:
+ * real depth to trade against, and current momentum — not trailing volume.
+ */
+export function passesNewCoinFilter(
+  candidate: TokenCandidate,
+  maxAgeHours: number,
+  minLiquidityUsd: number,
+  minMomentumPercent: number
+): boolean {
+  if (!Number.isFinite(candidate.ageHours) || candidate.ageHours > maxAgeHours) return false;
+  // Liquidity is the one hard requirement that does not relax with age: it is
+  // what decides whether a position can be exited at all.
+  if (candidate.liquidityUsd < minLiquidityUsd) return false;
+  if (!candidate.address || candidate.address.length < 10) return false;
+  if (!Number.isFinite(candidate.priceUsd) || candidate.priceUsd <= 0) return false;
+
+  // Momentum over the shortest windows available, since longer ones are as
+  // meaningless as volume24h at this age.
+  const momentum = Math.max(candidate.priceChange5m, candidate.priceChange1h);
+  return Number.isFinite(momentum) && momentum >= minMomentumPercent;
+}
+
 export function passesInitialFilter(candidate: TokenCandidate): boolean {
   if (candidate.volume24h < 10000) return false;
   if (candidate.liquidityUsd < 5000) return false;

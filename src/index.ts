@@ -43,6 +43,13 @@ import { checkAnalysisModel, formatModelCheck } from "./model-preflight.js";
 
 const tradeHistory: TradeHistoryItem[] = [];
 
+/**
+ * Recent model verdicts, keyed by token address. The scan sources return a
+ * stable set, so without this the bot pays to re-analyse unchanged tokens every
+ * cycle instead of spending that budget on ones it has not seen.
+ */
+const analysisCache = new Map<string, { at: number; signal: TradeSignal }>();
+
 /** Tokens exited recently, blocking immediate re-entry. Persisted across restarts. */
 let recentExits: RecentExit[] = [];
 
@@ -348,9 +355,34 @@ async function runCycle(): Promise<void> {
     }
   }
 
-  logger.info(`🧠 Analyzing top ${Math.min(candidates.length, 5)} candidates...`);
-  const topCandidates = candidates.slice(0, 5);
-  const signals = await batchAnalyze(topCandidates);
+  // Skip anything whose verdict is still fresh. The same coins resurface every
+  // cycle because the scan sources are stable, and re-asking the model about an
+  // unchanged token is pure spend: one run sent Magatard for analysis 76 times.
+  // Reusing recent verdicts frees that budget for tokens not yet seen.
+  const nowMs = Date.now();
+  const analysisTtlMs = CONFIG.analysisCacheMinutes * 60_000;
+  const fresh: typeof candidates = [];
+  const reused: TradeSignal[] = [];
+  for (const c of candidates) {
+    const hit = analysisCache.get(c.address);
+    if (analysisTtlMs > 0 && hit && nowMs - hit.at < analysisTtlMs) {
+      // Re-point the cached verdict at the current candidate so price-derived
+      // fields downstream are current, even though the model's judgement is not.
+      reused.push({ ...hit.signal, token: c });
+    } else {
+      fresh.push(c);
+    }
+  }
+
+  const toAnalyse = fresh.slice(0, CONFIG.maxCandidatesPerCycle);
+  logger.info(
+    `🧠 Analyzing ${toAnalyse.length} candidate(s)` +
+      (reused.length > 0 ? ` (${reused.length} reused from cache)` : "") +
+      ` of ${candidates.length} found...`
+  );
+  const analysed = await batchAnalyze(toAnalyse);
+  for (const sig of analysed) analysisCache.set(sig.token.address, { at: nowMs, signal: sig });
+  const signals = [...analysed, ...reused];
 
   // Modifiers adjust the model's confidence using cheap-to-fake marketing
   // signals (boost, socials) and hard-to-fake ones (age). The bonus cap in

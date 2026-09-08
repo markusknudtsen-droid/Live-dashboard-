@@ -78,6 +78,19 @@ export interface AppConfig {
    * withholds the bonus rather than guessing, so a breakage costs the signal
    * and nothing else.
    */
+  /**
+   * Let freshly-launched coins into the candidate pool. They cannot satisfy the
+   * standard volume24h bar (a trailing figure they have not existed long enough
+   * to accumulate), so without this the pool only ever contains established
+   * coins already well into their move.
+   */
+  watchNewCoins: boolean;
+  newCoinMaxAgeHours: number;
+  newCoinMinMomentumPercent: number;
+  /** Candidates sent to the model per cycle. Was hardcoded at 5. */
+  maxCandidatesPerCycle: number;
+  /** Minutes an AI verdict is reused before re-analysing the same token. */
+  analysisCacheMinutes: number;
   devReputationEnabled: boolean;
   devMinFollowers: number;
   devMinMigratedTokens: number;
@@ -253,6 +266,11 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     maxSellAttempts: parseNumberInRange("MAX_SELL_ATTEMPTS", env.MAX_SELL_ATTEMPTS, 5, 1, 100),
     reconcileEveryTicks: parseNumberInRange("RECONCILE_EVERY_TICKS", env.RECONCILE_EVERY_TICKS, 20, 1, 10_000),
     maxConcurrentPositions: parseNumberInRange("MAX_CONCURRENT_POSITIONS", env.MAX_CONCURRENT_POSITIONS, 3, 1, 20),
+    watchNewCoins: parseBoolean(env.WATCH_NEW_COINS, false),
+    newCoinMaxAgeHours: parseNumberInRange("NEW_COIN_MAX_AGE_HOURS", env.NEW_COIN_MAX_AGE_HOURS, 6, 0.05, 168),
+    newCoinMinMomentumPercent: parseNumberInRange("NEW_COIN_MIN_MOMENTUM_PERCENT", env.NEW_COIN_MIN_MOMENTUM_PERCENT, 15, -100, 10_000),
+    maxCandidatesPerCycle: parseNumberInRange("MAX_CANDIDATES_PER_CYCLE", env.MAX_CANDIDATES_PER_CYCLE, 5, 1, 25),
+    analysisCacheMinutes: parseNumberInRange("ANALYSIS_CACHE_MINUTES", env.ANALYSIS_CACHE_MINUTES, 10, 0, 1440),
     devReputationEnabled: parseBoolean(env.DEV_REPUTATION_ENABLED, false),
     devMinFollowers: parseNumberInRange("DEV_MIN_FOLLOWERS", env.DEV_MIN_FOLLOWERS, 2000, 0, 10_000_000),
     devMinMigratedTokens: parseNumberInRange("DEV_MIN_MIGRATED_TOKENS", env.DEV_MIN_MIGRATED_TOKENS, 3, 0, 10_000),
@@ -337,6 +355,12 @@ export function validateConfig(config: AppConfig = CONFIG): void {
     console.log(
       "   🏃 LET_WINNERS_RUN enabled: once the trailing stop is armed it owns the exit; " +
         "the fixed take-profit stands down."
+    );
+  }
+  if (config.watchNewCoins) {
+    console.log(
+      `   🌱 WATCH_NEW_COINS enabled: coins under ${config.newCoinMaxAgeHours}h qualify on liquidity ` +
+        `+ >=${config.newCoinMinMomentumPercent}% short-window momentum instead of 24h volume.`
     );
   }
   if (config.devReputationEnabled) {
