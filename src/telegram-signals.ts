@@ -110,14 +110,42 @@ export function clearMentions(): void {
   mentions.clear();
 }
 
-/** `https://t.me/foo`, `@foo` and `foo` all name the same channel. */
+/**
+ * Telegram links come in two shapes that identify channels completely
+ * differently, and conflating them silently breaks private-channel matching:
+ *
+ *   https://t.me/solearlytrending      public  -> matched by username
+ *   https://t.me/c/3494506298/102060   PRIVATE -> matched by numeric channel id
+ *
+ * The `/c/` form carries an internal channel id (and a message id, which is not
+ * part of the channel's identity and is discarded). A private channel has no
+ * username at all, so a username-only matcher would never match it.
+ *
+ * Numeric ids are returned prefixed with `id:` so the two namespaces cannot
+ * collide — a channel literally named "3494506298" is a different thing.
+ */
 export function normaliseChannel(raw: string): string {
-  return raw
-    .trim()
-    .replace(/^https?:\/\/t\.me\//i, "")
-    .replace(/^@/, "")
-    .replace(/\/$/, "")
-    .toLowerCase();
+  const trimmed = raw.trim().replace(/^https?:\/\/t\.me\//i, "").replace(/^@/, "");
+
+  const privateMatch = trimmed.match(/^c\/(\d+)/i);
+  if (privateMatch) return `id:${privateMatch[1]}`;
+
+  // A bare numeric id, or one already in id: form.
+  const bareId = trimmed.match(/^(?:id:)?(-?\d{6,})$/);
+  if (bareId) return `id:${bareId[1].replace(/^-100/, "")}`;
+
+  return trimmed.replace(/\/$/, "").toLowerCase();
+}
+
+/**
+ * MTProto reports private channels with a -100 prefix on the internal id, which
+ * the t.me/c/ link omits. Normalising both to the bare digits is what lets a
+ * link the operator pasted match a message the client actually delivers.
+ */
+export function channelIdToRef(chatId: unknown): string | undefined {
+  if (chatId === undefined || chatId === null) return undefined;
+  const digits = String(chatId).replace(/^-100/, "").replace(/^-/, "");
+  return /^\d{6,}$/.test(digits) ? `id:${digits}` : undefined;
 }
 
 export interface TelegramWatcherConfig {
@@ -169,13 +197,25 @@ export async function startTelegramWatcher(config: TelegramWatcherConfig): Promi
         const text = ev.message?.message;
         if (!text) return;
 
+        // A channel may be identified by username (public) or numeric id
+        // (private); accept a match on either, since the operator's links can
+        // be of either kind.
         let channel = "unknown";
+        const refs: string[] = [];
         if (typeof ev.getChat === "function") {
-          const chat = (await ev.getChat()) as { username?: string } | undefined;
-          if (chat?.username) channel = normaliseChannel(chat.username);
+          const chat = (await ev.getChat()) as { username?: string; id?: unknown } | undefined;
+          if (chat?.username) {
+            channel = normaliseChannel(chat.username);
+            refs.push(channel);
+          }
+          const idRef = channelIdToRef(chat?.id);
+          if (idRef) {
+            refs.push(idRef);
+            if (channel === "unknown") channel = idRef;
+          }
         }
         // Only act on the channels the operator listed.
-        if (wanted.size > 0 && channel !== "unknown" && !wanted.has(channel)) return;
+        if (wanted.size > 0 && refs.length > 0 && !refs.some((r) => wanted.has(r))) return;
 
         const now = Date.now();
         for (const mint of extractSolanaMints(text)) {

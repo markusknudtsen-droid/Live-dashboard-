@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   extractSolanaMints,
   normaliseChannel,
+  channelIdToRef,
   recordMention,
   getTelegramSignal,
   recentMentionedMints,
@@ -60,6 +61,36 @@ test("a link, an @handle and a bare name all name the same channel", () => {
   assert.equal(normaliseChannel("https://t.me/SolCalls"), "solcalls");
   assert.equal(normaliseChannel("@SolCalls"), "solcalls");
   assert.equal(normaliseChannel("  SolCalls/ "), "solcalls");
+});
+
+test("the operator's real public link resolves to its username", () => {
+  assert.equal(normaliseChannel("https://t.me/solearlytrending"), "solearlytrending");
+});
+
+test("a PRIVATE /c/ link resolves to its channel id, discarding the message id", () => {
+  // Without this, the link normalises to the nonsense "c/3494506298/102060"
+  // and the private channel could never match an incoming message.
+  assert.equal(normaliseChannel("https://t.me/c/3494506298/102060"), "id:3494506298");
+  assert.equal(normaliseChannel("https://t.me/c/3494506298"), "id:3494506298");
+});
+
+test("MTProto's -100-prefixed id matches the bare id from the link", () => {
+  // The client reports -1003494506298 for the channel the link calls
+  // 3494506298; both must resolve to the same ref or nothing ever matches.
+  assert.equal(channelIdToRef(-1003494506298n as unknown as bigint), "id:3494506298");
+  assert.equal(channelIdToRef("-1003494506298"), "id:3494506298");
+  assert.equal(channelIdToRef(3494506298), "id:3494506298");
+  assert.equal(normaliseChannel("-1003494506298"), "id:3494506298");
+});
+
+test("a non-channel id yields no ref rather than a bogus match", () => {
+  assert.equal(channelIdToRef(undefined), undefined);
+  assert.equal(channelIdToRef("not-an-id"), undefined);
+  assert.equal(channelIdToRef(42), undefined, "too short to be a channel id");
+});
+
+test("username and id namespaces cannot collide", () => {
+  assert.notEqual(normaliseChannel("solearlytrending"), normaliseChannel("https://t.me/c/3494506298/1"));
 });
 
 /* ------------------------------- freshness ------------------------------- */
