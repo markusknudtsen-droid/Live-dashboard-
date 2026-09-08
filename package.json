@@ -26,7 +26,8 @@
     "web:dev": "npm --prefix web run dev",
     "web:build": "npm --prefix web run build",
     "web:install": "npm --prefix web install",
-    "hash-password": "tsx server/hash-password.ts"
+    "hash-password": "tsx server/hash-password.ts",
+    "telegram-login": "tsx scripts/telegram-login.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
