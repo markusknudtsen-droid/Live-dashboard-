@@ -110,6 +110,18 @@ export interface AppConfig {
    *  never done. */
   telegramScrapeChannels: string[];
   telegramScrapeIntervalSeconds: number;
+  /** Global dead-coin floor, applied to every candidate regardless of size. */
+  minMarketCapUsd: number;
+  /** Below this market cap, checkSmallCapGate() applies instead of the normal rug gate. */
+  smallCapMaxMarketCapUsd: number;
+  smallCapMinHolders: number;
+  smallCapMaxDevHoldingPct: number;
+  smallCapMaxInsiderHoldingPct: number;
+  smallCapMaxBundlerHoldingPct: number;
+  smallCapMinVolume24h: number;
+  smallCapMaxRugCheckScore: number;
+  /** Coins younger than newCoinMaxAgeHours skip the re-entry cooldown entirely. */
+  newCoinCooldownExempt: boolean;
   devReputationEnabled: boolean;
   devMinFollowers: number;
   devMinMigratedTokens: number;
@@ -305,6 +317,15 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       .map((c) => c.trim())
       .filter((c) => c.length > 0),
     telegramScrapeIntervalSeconds: parseNumberInRange("TELEGRAM_SCRAPE_INTERVAL_SECONDS", env.TELEGRAM_SCRAPE_INTERVAL_SECONDS, 45, 10, 3600),
+    minMarketCapUsd: parseNumberInRange("MIN_MARKET_CAP_USD", env.MIN_MARKET_CAP_USD, 7000, 0, 100_000_000),
+    smallCapMaxMarketCapUsd: parseNumberInRange("SMALL_CAP_MAX_MARKET_CAP_USD", env.SMALL_CAP_MAX_MARKET_CAP_USD, 40_000, 0, 100_000_000),
+    smallCapMinHolders: parseNumberInRange("SMALL_CAP_MIN_HOLDERS", env.SMALL_CAP_MIN_HOLDERS, 60, 0, 1_000_000),
+    smallCapMaxDevHoldingPct: parseNumberInRange("SMALL_CAP_MAX_DEV_HOLDING_PCT", env.SMALL_CAP_MAX_DEV_HOLDING_PCT, 8, 0, 100),
+    smallCapMaxInsiderHoldingPct: parseNumberInRange("SMALL_CAP_MAX_INSIDER_HOLDING_PCT", env.SMALL_CAP_MAX_INSIDER_HOLDING_PCT, 22, 0, 100),
+    smallCapMaxBundlerHoldingPct: parseNumberInRange("SMALL_CAP_MAX_BUNDLER_HOLDING_PCT", env.SMALL_CAP_MAX_BUNDLER_HOLDING_PCT, 22, 0, 100),
+    smallCapMinVolume24h: parseNumberInRange("SMALL_CAP_MIN_VOLUME_24H", env.SMALL_CAP_MIN_VOLUME_24H, 1000, 0, 100_000_000),
+    smallCapMaxRugCheckScore: parseNumberInRange("SMALL_CAP_MAX_RUGCHECK_SCORE", env.SMALL_CAP_MAX_RUGCHECK_SCORE, 50, 0, 100),
+    newCoinCooldownExempt: parseBoolean(env.NEW_COIN_COOLDOWN_EXEMPT, false),
     devReputationEnabled: parseBoolean(env.DEV_REPUTATION_ENABLED, false),
     devMinFollowers: parseNumberInRange("DEV_MIN_FOLLOWERS", env.DEV_MIN_FOLLOWERS, 2000, 0, 10_000_000),
     devMinMigratedTokens: parseNumberInRange("DEV_MIN_MIGRATED_TOKENS", env.DEV_MIN_MIGRATED_TOKENS, 3, 0, 10_000),
@@ -390,6 +411,17 @@ export function validateConfig(config: AppConfig = CONFIG): void {
       "   🏃 LET_WINNERS_RUN enabled: once the trailing stop is armed it owns the exit; " +
         "the fixed take-profit stands down."
     );
+  }
+  if (config.minMarketCapUsd > 0) {
+    console.log(`   📉 MIN_MARKET_CAP_USD: skipping coins below $${config.minMarketCapUsd.toLocaleString("en-US")}.`);
+  }
+  console.log(
+    `   🔬 SMALL_CAP_GATE: coins under $${config.smallCapMaxMarketCapUsd.toLocaleString("en-US")} need RugCheck ` +
+      `Good (score<=${config.smallCapMaxRugCheckScore}), ${config.smallCapMinHolders}+ holders, dev<=${config.smallCapMaxDevHoldingPct}%, ` +
+      `insiders<=${config.smallCapMaxInsiderHoldingPct}%, bundlers<=${config.smallCapMaxBundlerHoldingPct}%, mint/freeze auth disabled.`
+  );
+  if (config.newCoinCooldownExempt) {
+    console.log(`   ⏳ NEW_COIN_COOLDOWN_EXEMPT: coins under ${config.newCoinMaxAgeHours}h skip the re-entry cooldown.`);
   }
   if (config.watchNewCoins) {
     console.log(

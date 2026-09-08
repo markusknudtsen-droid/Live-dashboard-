@@ -24,6 +24,8 @@ import {
 } from "./first-trade-gate.js";
 import type { FirstTradeValidation } from "./first-trade-gate.js";
 import { adjustConfidence, checkRugGates, qualifiesForInstantBuy } from "./entry-score.js";
+import { fetchRugCheckReport } from "./rugcheck.js";
+import { checkSmallCapGate, isSmallCap, DEFAULT_SMALL_CAP_GATE } from "./small-cap-gate.js";
 import { fetchCreatorWallet, fetchDevReputation, devReputationBonus } from "./dev-reputation.js";
 import {
   canReenter,
@@ -330,6 +332,41 @@ async function runCycle(): Promise<void> {
         continue;
       }
 
+      if (CONFIG.minMarketCapUsd > 0 && candidate.marketCap < CONFIG.minMarketCapUsd) continue;
+
+      // A boosted small-cap coin must clear the same stricter checklist as an
+      // analysed one — the boost decides speed, never a bypass of the checks
+      // that decide whether the coin can be trusted at all.
+      if (isSmallCap(candidate.marketCap, { ...DEFAULT_SMALL_CAP_GATE, maxMarketCapUsd: CONFIG.smallCapMaxMarketCapUsd })) {
+        const rc = await fetchRugCheckReport(candidate.address);
+        const smallCapVerdict = checkSmallCapGate(
+          {
+            marketCapUsd: candidate.marketCap,
+            liquidityUsd: candidate.liquidityUsd,
+            volume24h: candidate.volume24h,
+            hasAnySocial: candidate.hasXSocial || candidate.hasOtherSocial,
+            rugCheck: rc,
+          },
+          {
+            maxMarketCapUsd: CONFIG.smallCapMaxMarketCapUsd,
+            minLiquidityUsd: CONFIG.minLiquidityUsd,
+            minHolders: CONFIG.smallCapMinHolders,
+            maxDevHoldingPct: CONFIG.smallCapMaxDevHoldingPct,
+            maxInsiderHoldingPct: CONFIG.smallCapMaxInsiderHoldingPct,
+            maxBundlerHoldingPct: CONFIG.smallCapMaxBundlerHoldingPct,
+            minVolume24h: CONFIG.smallCapMinVolume24h,
+            maxRugCheckScore: CONFIG.smallCapMaxRugCheckScore,
+            requireRugCheckData: true,
+          }
+        );
+        if (!smallCapVerdict.pass) {
+          if ((candidate.boostAmount ?? 0) >= CONFIG.instantBuyBoostThreshold) {
+            logger.warn(`⛔ ${candidate.symbol}: ${smallCapVerdict.reason}`);
+          }
+          continue;
+        }
+      }
+
       const verdict = qualifiesForInstantBuy(
         {
           boostAmount: candidate.boostAmount ?? 0,
@@ -513,32 +550,79 @@ async function runCycle(): Promise<void> {
       continue;
     }
 
-    if (reentryBlocked(signal.token.address, signal.token.symbol)) continue;
+    // A coin younger than the new-coin window skips the re-entry cooldown
+    // entirely, at the operator's explicit request — fast-moving coins can
+    // legitimately be worth re-entering after a wick, and the small-cap gate
+    // below is what does the safety work for this segment instead.
+    const isNewCoin = signal.token.ageHours < CONFIG.newCoinMaxAgeHours;
+    if (!(CONFIG.newCoinCooldownExempt && isNewCoin) && reentryBlocked(signal.token.address, signal.token.symbol)) {
+      continue;
+    }
+
+    // Dead-coin floor, applied before any other check, to every candidate.
+    if (CONFIG.minMarketCapUsd > 0 && signal.token.marketCap < CONFIG.minMarketCapUsd) {
+      logger.warn(
+        `⛔ ${signal.token.symbol} rejected: market cap $${Math.round(signal.token.marketCap)} below the ` +
+          `$${CONFIG.minMarketCapUsd} dead-coin floor.`
+      );
+      continue;
+    }
 
     // Hard gates run last, immediately before the buy: they cannot be
-    // outvoted by confidence, however high the score.
+    // outvoted by confidence, however high the score. Below the small-cap
+    // threshold the operator's stricter RugCheck-backed checklist applies
+    // instead of the normal rug gate — a harder bar for the segment that is
+    // cheapest to fake.
     if (CONFIG.rugGatesEnabled) {
-      const gate = checkRugGates(
-        {
-          liquidityUsd: signal.token.liquidityUsd,
-          marketCapUsd: signal.token.marketCap,
-          // Holder concentration needs an RPC lookup that is not wired yet;
-          // undefined means "unknown", which fails closed only when the market
-          // cap puts the coin above the concentration threshold.
-          topHolderPercent: undefined,
-        },
-        {
-          minLiquidityUsd: CONFIG.minLiquidityUsd,
-          maxMarketCapUsd: CONFIG.maxMarketCapUsd,
-          holderCheckMinMarketCapUsd: CONFIG.holderCheckMinMarketCapUsd,
-          maxTopHolderPercent: CONFIG.maxTopHolderPercent,
-          // Not yet wired, so an unknown reading must not veto every trade.
-          requireHolderData: false,
+      if (isSmallCap(signal.token.marketCap, { ...DEFAULT_SMALL_CAP_GATE, maxMarketCapUsd: CONFIG.smallCapMaxMarketCapUsd })) {
+        const rc = await fetchRugCheckReport(signal.token.address);
+        const gate = checkSmallCapGate(
+          {
+            marketCapUsd: signal.token.marketCap,
+            liquidityUsd: signal.token.liquidityUsd,
+            volume24h: signal.token.volume24h,
+            hasAnySocial: signal.token.hasXSocial || signal.token.hasOtherSocial,
+            rugCheck: rc,
+          },
+          {
+            maxMarketCapUsd: CONFIG.smallCapMaxMarketCapUsd,
+            minLiquidityUsd: CONFIG.minLiquidityUsd,
+            minHolders: CONFIG.smallCapMinHolders,
+            maxDevHoldingPct: CONFIG.smallCapMaxDevHoldingPct,
+            maxInsiderHoldingPct: CONFIG.smallCapMaxInsiderHoldingPct,
+            maxBundlerHoldingPct: CONFIG.smallCapMaxBundlerHoldingPct,
+            minVolume24h: CONFIG.smallCapMinVolume24h,
+            maxRugCheckScore: CONFIG.smallCapMaxRugCheckScore,
+            requireRugCheckData: true,
+          }
+        );
+        if (!gate.pass) {
+          logger.warn(`⛔ ${signal.token.symbol} rejected by small-cap gate: ${gate.reason}`);
+          continue;
         }
-      );
-      if (!gate.pass) {
-        logger.warn(`⛔ ${signal.token.symbol} rejected by rug gate: ${gate.reason}`);
-        continue;
+      } else {
+        const gate = checkRugGates(
+          {
+            liquidityUsd: signal.token.liquidityUsd,
+            marketCapUsd: signal.token.marketCap,
+            // Holder concentration needs an RPC lookup that is not wired yet;
+            // undefined means "unknown", which fails closed only when the market
+            // cap puts the coin above the concentration threshold.
+            topHolderPercent: undefined,
+          },
+          {
+            minLiquidityUsd: CONFIG.minLiquidityUsd,
+            maxMarketCapUsd: CONFIG.maxMarketCapUsd,
+            holderCheckMinMarketCapUsd: CONFIG.holderCheckMinMarketCapUsd,
+            maxTopHolderPercent: CONFIG.maxTopHolderPercent,
+            // Not yet wired, so an unknown reading must not veto every trade.
+            requireHolderData: false,
+          }
+        );
+        if (!gate.pass) {
+          logger.warn(`⛔ ${signal.token.symbol} rejected by rug gate: ${gate.reason}`);
+          continue;
+        }
       }
     }
 
