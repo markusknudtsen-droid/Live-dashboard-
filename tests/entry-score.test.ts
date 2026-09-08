@@ -263,3 +263,33 @@ test("exactly at the boundaries: liquidity floor and holder ceiling", () => {
   assert.equal(checkRugGates({ liquidityUsd: 9000, marketCapUsd: 60000, topHolderPercent: 30 }).pass, true);
   assert.equal(checkRugGates({ liquidityUsd: 9000, marketCapUsd: 60000, topHolderPercent: 30.1 }).pass, false);
 });
+
+/* ------------------------------ boost tiers ------------------------------- */
+
+test("a strong boost (>=100) earns the strong bonus, not the moderate one", () => {
+  const r = adjustConfidence(70, { ...neutral, boostAmount: 500 });
+  assert.equal(r.adjustedConfidence, 80, "+10 strong tier");
+  assert.ok(r.reasons.some((x) => /boost >= 100/.test(x)));
+});
+
+test("a moderate boost (30-99) earns +6 — the weaker version of the same signal", () => {
+  const r = adjustConfidence(70, { ...neutral, boostAmount: 50 });
+  assert.equal(r.adjustedConfidence, 76);
+  assert.ok(r.reasons.some((x) => /boost >= 30/.test(x)));
+});
+
+test("the tiers are mutually exclusive — a boost is never counted twice", () => {
+  const strong = adjustConfidence(70, { ...neutral, boostAmount: 250 });
+  assert.equal(strong.bonusApplied, 10, "10, not 16");
+});
+
+test("a boost below the moderate threshold earns nothing", () => {
+  assert.equal(adjustConfidence(70, { ...neutral, boostAmount: 29 }).adjustedConfidence, 70);
+  assert.equal(adjustConfidence(70, { ...neutral, boostAmount: 0 }).adjustedConfidence, 70);
+});
+
+test("tier boundaries are inclusive at 30 and 100", () => {
+  assert.equal(adjustConfidence(70, { ...neutral, boostAmount: 30 }).adjustedConfidence, 76);
+  assert.equal(adjustConfidence(70, { ...neutral, boostAmount: 99 }).adjustedConfidence, 76);
+  assert.equal(adjustConfidence(70, { ...neutral, boostAmount: 100 }).adjustedConfidence, 80);
+});

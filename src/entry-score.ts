@@ -41,6 +41,13 @@ export interface ScoreWeights {
   paidDexInfoBonus: number;
   strongBoostBonus: number;
   strongBoostThreshold: number;
+  /**
+   * A smaller boost is a weaker version of the same signal, not a different
+   * one: someone paid for visibility, just less. It earns a smaller score
+   * nudge rather than the instant-buy treatment reserved for a large boost.
+   */
+  moderateBoostBonus: number;
+  moderateBoostThreshold: number;
   /** Ceiling on the SUM of all bonuses. Penalties are not capped. */
   maxTotalBonus: number;
 }
@@ -55,6 +62,8 @@ export const DEFAULT_SCORE_WEIGHTS: ScoreWeights = {
   paidDexInfoBonus: 10,
   strongBoostBonus: 10,
   strongBoostThreshold: 100,
+  moderateBoostBonus: 6,
+  moderateBoostThreshold: 30,
   maxTotalBonus: 15,
 };
 
@@ -106,9 +115,16 @@ export function adjustConfidence(
     reasons.push(`+${weights.paidDexInfoBonus} paid DexScreener info/ads`);
   }
 
+  // Tiered, and mutually exclusive: a boost counts once, at its own level. The
+  // strong tier still matters even though a boost that large normally triggers
+  // an instant buy — that path can be declined by the freshness window or a rug
+  // gate, and the coin then arrives here for ordinary analysis.
   if (Number.isFinite(candidate.boostAmount) && candidate.boostAmount >= weights.strongBoostThreshold) {
     bonus += weights.strongBoostBonus;
     reasons.push(`+${weights.strongBoostBonus} boost >= ${weights.strongBoostThreshold}`);
+  } else if (Number.isFinite(candidate.boostAmount) && candidate.boostAmount >= weights.moderateBoostThreshold) {
+    bonus += weights.moderateBoostBonus;
+    reasons.push(`+${weights.moderateBoostBonus} boost >= ${weights.moderateBoostThreshold}`);
   }
 
   const cappedBonus = Math.min(bonus, weights.maxTotalBonus);
