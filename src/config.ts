@@ -91,6 +91,20 @@ export interface AppConfig {
   maxCandidatesPerCycle: number;
   /** Minutes an AI verdict is reused before re-analysing the same token. */
   analysisCacheMinutes: number;
+  /**
+   * Read Solana contract addresses from Telegram signal channels. Off by
+   * default. A mention is primarily a CANDIDATE SOURCE (coins the
+   * volume-biased DexScreener feeds never surface); the score bonus is
+   * secondary and capped, because a channel call is a marketing signal in the
+   * same category as a paid boost.
+   */
+  telegramEnabled: boolean;
+  telegramApiId: number;
+  telegramApiHash: string;
+  telegramSession: string;
+  telegramChannels: string[];
+  telegramMentionBonus: number;
+  telegramSignalTtlMinutes: number;
   devReputationEnabled: boolean;
   devMinFollowers: number;
   devMinMigratedTokens: number;
@@ -271,6 +285,16 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     newCoinMinMomentumPercent: parseNumberInRange("NEW_COIN_MIN_MOMENTUM_PERCENT", env.NEW_COIN_MIN_MOMENTUM_PERCENT, 15, -100, 10_000),
     maxCandidatesPerCycle: parseNumberInRange("MAX_CANDIDATES_PER_CYCLE", env.MAX_CANDIDATES_PER_CYCLE, 5, 1, 25),
     analysisCacheMinutes: parseNumberInRange("ANALYSIS_CACHE_MINUTES", env.ANALYSIS_CACHE_MINUTES, 10, 0, 1440),
+    telegramEnabled: parseBoolean(env.TELEGRAM_ENABLED, false),
+    telegramApiId: parseNumberInRange("TELEGRAM_API_ID", env.TELEGRAM_API_ID, 0, 0, 1_000_000_000),
+    telegramApiHash: (env.TELEGRAM_API_HASH || "").trim(),
+    telegramSession: (env.TELEGRAM_SESSION || "").trim(),
+    telegramChannels: (env.TELEGRAM_CHANNELS || "")
+      .split(",")
+      .map((c) => c.trim())
+      .filter((c) => c.length > 0),
+    telegramMentionBonus: parseNumberInRange("TELEGRAM_MENTION_BONUS", env.TELEGRAM_MENTION_BONUS, 6, 0, 100),
+    telegramSignalTtlMinutes: parseNumberInRange("TELEGRAM_SIGNAL_TTL_MINUTES", env.TELEGRAM_SIGNAL_TTL_MINUTES, 30, 0, 1440),
     devReputationEnabled: parseBoolean(env.DEV_REPUTATION_ENABLED, false),
     devMinFollowers: parseNumberInRange("DEV_MIN_FOLLOWERS", env.DEV_MIN_FOLLOWERS, 2000, 0, 10_000_000),
     devMinMigratedTokens: parseNumberInRange("DEV_MIN_MIGRATED_TOKENS", env.DEV_MIN_MIGRATED_TOKENS, 3, 0, 10_000),
@@ -361,6 +385,12 @@ export function validateConfig(config: AppConfig = CONFIG): void {
     console.log(
       `   🌱 WATCH_NEW_COINS enabled: coins under ${config.newCoinMaxAgeHours}h qualify on liquidity ` +
         `+ >=${config.newCoinMinMomentumPercent}% short-window momentum instead of 24h volume.`
+    );
+  }
+  if (config.telegramEnabled) {
+    console.log(
+      `   📡 TELEGRAM signals enabled: ${config.telegramChannels.length} channel(s), ` +
+        `+${config.telegramMentionBonus} for a mention within ${config.telegramSignalTtlMinutes} minutes.`
     );
   }
   if (config.devReputationEnabled) {
