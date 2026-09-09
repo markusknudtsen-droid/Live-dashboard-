@@ -56,6 +56,13 @@ export interface ActivePosition {
    * before this existed still rehydrate (treated as not-new).
    */
   enteredAsNewCoin?: boolean;
+  /**
+   * Set once PARTIAL_TAKE_PROFIT has banked its slice, so it fires exactly
+   * once per position rather than on every monitoring tick above the
+   * threshold. Optional so positions persisted before this existed rehydrate
+   * as "not yet taken".
+   */
+  partialTakeProfitTaken?: boolean;
 }
 
 interface DexPairPrice {
@@ -488,6 +495,168 @@ async function executeBuyLocked(signal: TradeSignal): Promise<TradeResult> {
  * settlement ever runs — settling the first request at a price it never
  * reported.
  */
+/**
+ * Sell a FRACTION of a position and leave the rest open.
+ *
+ * Exists because LET_WINNERS_RUN hands the entire exit to the trailing stop:
+ * on a large spike the bot banks nothing on the way up and gives back the
+ * whole trail distance on the way down. Taking a slice at a big gain locks
+ * real profit while the remainder still rides the trailing stop and the
+ * bearish exit.
+ *
+ * entryPrice is deliberately NOT changed — cost basis per token is unchanged
+ * by selling some of them, so the remainder's PnL stays measured against the
+ * original entry. amountSol IS reduced, since it tracks the SOL still at risk.
+ *
+ * Returns the same TradeResult shape as executeSell, with amountSol set to
+ * the slice that was sold.
+ */
+export async function executeSellPartial(
+  position: ActivePosition,
+  fraction: number,
+  reason: string,
+  markPriceUsd?: number
+): Promise<TradeResult> {
+  return withTraderLock(sellQueue, () => executeSellPartialLocked(position, fraction, reason, markPriceUsd));
+}
+
+async function executeSellPartialLocked(
+  position: ActivePosition,
+  fraction: number,
+  reason: string,
+  markPriceUsd?: number
+): Promise<TradeResult> {
+  const failure = (error: string): TradeResult => ({
+    success: false,
+    entryPrice: position.entryPrice,
+    amountSol: position.amountSol,
+    tokenAddress: position.tokenAddress,
+    tokenSymbol: position.tokenSymbol,
+    timestamp: Date.now(),
+    error,
+  });
+
+  if (!(fraction > 0 && fraction < 1)) return failure(`Partial sell fraction must be between 0 and 1, got ${fraction}`);
+  // A position closed while this was queued must not be partially sold.
+  if (findPositionIndex(position) === -1) return failure("Position already closed");
+
+  if (Number.isFinite(markPriceUsd) && (markPriceUsd as number) > 0) {
+    position.currentPrice = markPriceUsd as number;
+    position.pnlPercent = ((markPriceUsd as number) - position.entryPrice) / position.entryPrice * 100;
+  }
+  const pnlPercent = Math.max(Number.isFinite(position.pnlPercent) ? position.pnlPercent : 0, -100);
+  const soldSol = position.amountSol * fraction;
+
+  logger.info(
+    `💰 Banking ${Math.round(fraction * 100)}% of ${position.tokenSymbol} at ${pnlPercent >= 0 ? "+" : ""}${pnlPercent.toFixed(2)}% (${reason})`
+  );
+
+  try {
+    if (CONFIG.dryRun) {
+      const txSignature = generateDryRunTxSignature();
+      paperBalanceSol += soldSol * (1 + pnlPercent / 100);
+      position.amountSol -= soldSol;
+      position.partialTakeProfitTaken = true;
+
+      logger.info(
+        `🧪 [DRY RUN] Partial sell executed. Remaining ${position.amountSol.toFixed(4)} SOL in ${position.tokenSymbol}. ` +
+          `Paper balance: ${paperBalanceSol.toFixed(4)} SOL`
+      );
+      emitTrade({
+        type: "SELL",
+        symbol: position.tokenSymbol,
+        tokenAddress: position.tokenAddress,
+        chainId: position.chainId,
+        amountSol: soldSol,
+        price: position.currentPrice,
+        paper: true,
+        txSignature,
+        timestamp: Date.now(),
+        pnlPercent,
+        reason,
+      });
+      return {
+        success: true,
+        txSignature,
+        entryPrice: position.entryPrice,
+        amountSol: soldSol,
+        tokenAddress: position.tokenAddress,
+        tokenSymbol: position.tokenSymbol,
+        timestamp: Date.now(),
+        pnlPercent,
+      };
+    }
+
+    if (!isValidSolanaMint(position.tokenAddress)) {
+      throw new Error(`Invalid position token mint: ${position.tokenAddress}`);
+    }
+
+    const tokenMint = new PublicKey(position.tokenAddress);
+    const tokenAccounts = await connection.getParsedTokenAccountsByOwner(wallet.publicKey, { mint: tokenMint });
+    if (tokenAccounts.value.length === 0) return failure("No token balance found");
+
+    // Raw base units. Floor rather than round, so the quote can never ask for
+    // more than the wallet actually holds.
+    const rawBalance = BigInt(tokenAccounts.value[0].account.data.parsed.info.tokenAmount.amount);
+    const rawToSell = (rawBalance * BigInt(Math.round(fraction * 10_000))) / 10_000n;
+    if (rawToSell <= 0n) return failure("Partial sell amount rounds to zero");
+
+    const order = await getJupiterQuote(
+      position.tokenAddress,
+      SOL_MINT,
+      rawToSell.toString(),
+      wallet.publicKey.toBase58()
+    );
+    if (!order?.transaction || !order.requestId) return failure("No valid Jupiter Swap V2 partial sell order found");
+
+    const transaction = VersionedTransaction.deserialize(Buffer.from(order.transaction, "base64"));
+    transaction.sign([wallet]);
+    const signedTransaction = Buffer.from(transaction.serialize()).toString("base64");
+    const execution = await executeJupiterSwap(order, signedTransaction);
+    if (!execution || execution.status !== "Success" || !execution.signature) {
+      throw new Error(`Jupiter partial sell failed${execution?.error ? `: ${execution.error}` : ""}`);
+    }
+
+    // Only mutate the position after the swap has actually settled, so a
+    // failed swap leaves the position exactly as it was and the trigger can
+    // fire again on a later tick.
+    position.amountSol -= soldSol;
+    position.partialTakeProfitTaken = true;
+
+    logger.info(`✅ Banked ${soldSol.toFixed(4)} SOL of ${position.tokenSymbol}! TX: ${execution.signature}`);
+    logger.info(`   ${position.amountSol.toFixed(4)} SOL still running in ${position.tokenSymbol}.`);
+
+    emitTrade({
+      type: "SELL",
+      symbol: position.tokenSymbol,
+      tokenAddress: position.tokenAddress,
+      chainId: position.chainId,
+      amountSol: soldSol,
+      price: position.currentPrice,
+      paper: false,
+      txSignature: execution.signature,
+      timestamp: Date.now(),
+      pnlPercent,
+      reason,
+    });
+
+    return {
+      success: true,
+      txSignature: execution.signature,
+      entryPrice: position.entryPrice,
+      amountSol: soldSol,
+      tokenAddress: position.tokenAddress,
+      tokenSymbol: position.tokenSymbol,
+      timestamp: Date.now(),
+      pnlPercent,
+    };
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error(`Partial sell failed: ${message}`);
+    return failure(message);
+  }
+}
+
 export async function executeSell(
   position: ActivePosition,
   reason: string,
@@ -860,6 +1029,26 @@ export async function evaluatePositionAtPrice(position: ActivePosition, currentP
       `🏃 ${position.tokenSymbol} passed the +${CONFIG.takeProfitPercent}% target and is still running — ` +
         `letting the trailing stop manage it (currently locking +${lockedPercent.toFixed(2)}%).`
     );
+  }
+
+  // Bank a slice on a large gain before the trailing stop hands it back.
+  // Only when no full exit is due — a stop-loss or take-profit closing the
+  // whole position makes a partial sale pointless. Computed from currentPrice
+  // rather than position.pnlPercent so it cannot act on a stale value.
+  const gainPercent = ((currentPrice - position.entryPrice) / position.entryPrice) * 100;
+  if (
+    !exitReason &&
+    CONFIG.partialTakeProfitPercent > 0 &&
+    !position.partialTakeProfitTaken &&
+    Number.isFinite(gainPercent) &&
+    gainPercent >= CONFIG.partialTakeProfitPercent
+  ) {
+    logger.info(
+      `💰 PARTIAL TAKE PROFIT for ${position.tokenSymbol} at +${gainPercent.toFixed(2)}% ` +
+        `(threshold +${CONFIG.partialTakeProfitPercent}%)`
+    );
+    await executeSellPartial(position, CONFIG.partialTakeProfitFraction, "PARTIAL_TAKE_PROFIT", currentPrice);
+    return;
   }
 
   if (!exitReason) return;

@@ -132,6 +132,10 @@ export interface AppConfig {
   maxBuysPerToken: number;
   /** Slots held open for new/small coins so established ones cannot take every slot. 0 disables. */
   reservedNewCoinSlots: number;
+  /** Gain at which a slice of the position is banked. 0 disables partial take-profit. */
+  partialTakeProfitPercent: number;
+  /** Fraction of the position sold when that gain is reached, 0..1. */
+  partialTakeProfitFraction: number;
   /** A candidate at or below this market cap qualifies for a reserved slot. */
   newCoinSlotMaxMarketCapUsd: number;
   devReputationEnabled: boolean;
@@ -343,6 +347,8 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     newCoinReentryCooldownMinutes: parseNumberInRange("NEW_COIN_REENTRY_COOLDOWN_MINUTES", env.NEW_COIN_REENTRY_COOLDOWN_MINUTES, 2, 0, 1440),
     maxBuysPerToken: parseNumberInRange("MAX_BUYS_PER_TOKEN", env.MAX_BUYS_PER_TOKEN, 3, 0, 1000),
     reservedNewCoinSlots: parseNumberInRange("RESERVED_NEW_COIN_SLOTS", env.RESERVED_NEW_COIN_SLOTS, 1, 0, 100),
+    partialTakeProfitPercent: parseNumberInRange("PARTIAL_TAKE_PROFIT_PERCENT", env.PARTIAL_TAKE_PROFIT_PERCENT, 100, 0, 100_000),
+    partialTakeProfitFraction: parseNumberInRange("PARTIAL_TAKE_PROFIT_FRACTION", env.PARTIAL_TAKE_PROFIT_FRACTION, 0.5, 0.01, 0.99),
     newCoinSlotMaxMarketCapUsd: parseNumberInRange("NEW_COIN_SLOT_MAX_MARKET_CAP_USD", env.NEW_COIN_SLOT_MAX_MARKET_CAP_USD, 60_000, 0, 100_000_000),
     devReputationEnabled: parseBoolean(env.DEV_REPUTATION_ENABLED, false),
     devMinFollowers: parseNumberInRange("DEV_MIN_FOLLOWERS", env.DEV_MIN_FOLLOWERS, 2000, 0, 10_000_000),
@@ -445,6 +451,12 @@ export function validateConfig(config: AppConfig = CONFIG): void {
     `   🔁 NEW_COIN_REENTRY_COOLDOWN: ${config.newCoinReentryCooldownMinutes}min cooldown on a new coin re-entry ` +
       `(instead of full exemption).`
   );
+  if (config.partialTakeProfitPercent > 0) {
+    console.log(
+      `   💰 PARTIAL_TAKE_PROFIT: at +${config.partialTakeProfitPercent}%, ` +
+        `${Math.round(config.partialTakeProfitFraction * 100)}% of the position is banked; the rest runs on.`
+    );
+  }
   if (config.reservedNewCoinSlots > 0) {
     console.log(
       `   🪺 RESERVED_NEW_COIN_SLOTS: ${config.reservedNewCoinSlots} of ${config.maxConcurrentPositions} slot(s) held ` +
