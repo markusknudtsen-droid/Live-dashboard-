@@ -122,6 +122,10 @@ export interface AppConfig {
   smallCapMaxRugCheckScore: number;
   /** Coins younger than newCoinMaxAgeHours skip the re-entry cooldown entirely. */
   newCoinCooldownExempt: boolean;
+  /** Blocks a BUY (fresh or cooldown-exempt re-entry) when the model's own trendStrength/momentum reads bearish. */
+  bearishBuyGuardEnabled: boolean;
+  /** Re-checks held positions on this cadence and exits on a bearish read. 0 disables the sell side. */
+  bearishExitRecheckMinutes: number;
   devReputationEnabled: boolean;
   devMinFollowers: number;
   devMinMigratedTokens: number;
@@ -326,6 +330,8 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     smallCapMinVolume24h: parseNumberInRange("SMALL_CAP_MIN_VOLUME_24H", env.SMALL_CAP_MIN_VOLUME_24H, 1000, 0, 100_000_000),
     smallCapMaxRugCheckScore: parseNumberInRange("SMALL_CAP_MAX_RUGCHECK_SCORE", env.SMALL_CAP_MAX_RUGCHECK_SCORE, 50, 0, 100),
     newCoinCooldownExempt: parseBoolean(env.NEW_COIN_COOLDOWN_EXEMPT, false),
+    bearishBuyGuardEnabled: parseBoolean(env.BEARISH_BUY_GUARD_ENABLED, true),
+    bearishExitRecheckMinutes: parseNumberInRange("BEARISH_EXIT_RECHECK_MINUTES", env.BEARISH_EXIT_RECHECK_MINUTES, 3, 0, 1440),
     devReputationEnabled: parseBoolean(env.DEV_REPUTATION_ENABLED, false),
     devMinFollowers: parseNumberInRange("DEV_MIN_FOLLOWERS", env.DEV_MIN_FOLLOWERS, 2000, 0, 10_000_000),
     devMinMigratedTokens: parseNumberInRange("DEV_MIN_MIGRATED_TOKENS", env.DEV_MIN_MIGRATED_TOKENS, 3, 0, 10_000),
@@ -420,6 +426,14 @@ export function validateConfig(config: AppConfig = CONFIG): void {
       `Good (score<=${config.smallCapMaxRugCheckScore}), ${config.smallCapMinHolders}+ holders, dev<=${config.smallCapMaxDevHoldingPct}%, ` +
       `insiders<=${config.smallCapMaxInsiderHoldingPct}%, bundlers<=${config.smallCapMaxBundlerHoldingPct}%, mint/freeze auth disabled.`
   );
+  if (config.bearishBuyGuardEnabled) {
+    console.log("   📉 BEARISH_BUY_GUARD: a BUY is skipped when the model's own trend/momentum reads bearish.");
+  }
+  if (config.bearishExitRecheckMinutes > 0) {
+    console.log(
+      `   🐻 BEARISH_EXIT: held positions are re-analysed every ${config.bearishExitRecheckMinutes}min and closed on a bearish read.`
+    );
+  }
   if (config.newCoinCooldownExempt) {
     console.log(`   ⏳ NEW_COIN_COOLDOWN_EXEMPT: coins under ${config.newCoinMaxAgeHours}h skip the re-entry cooldown.`);
   }

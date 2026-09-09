@@ -116,6 +116,17 @@ function isWorthAnalysing(c: TokenCandidate): boolean {
   );
 }
 
+async function fetchCandidateForMint(mint: string): Promise<TokenCandidate | null> {
+  try {
+    const pairs = await httpGet<DexPair[]>(`${CONFIG.dexScreenerApiUrl}/tokens/v1/solana/${mint}`);
+    if (!pairs?.length) return null;
+    return parsePairToCandidate(pairs[0]);
+  } catch {
+    logger.debug(`Could not resolve mint ${mint} to a candidate`);
+    return null;
+  }
+}
+
 /**
  * Resolve a set of mint addresses (e.g. from Telegram) into candidates via the
  * same DexScreener pair lookup already used for boosted tokens, and route them
@@ -125,14 +136,24 @@ function isWorthAnalysing(c: TokenCandidate): boolean {
 export async function resolveMintsToCandidates(mints: string[]): Promise<TokenCandidate[]> {
   const out: TokenCandidate[] = [];
   for (const mint of mints.slice(0, 10)) {
-    try {
-      const pairs = await httpGet<DexPair[]>(`${CONFIG.dexScreenerApiUrl}/tokens/v1/solana/${mint}`);
-      if (!pairs?.length) continue;
-      const candidate = parsePairToCandidate(pairs[0]);
-      if (candidate && isWorthAnalysing(candidate)) out.push(candidate);
-    } catch {
-      logger.debug(`Could not resolve Telegram-mentioned mint ${mint}`);
-    }
+    const candidate = await fetchCandidateForMint(mint);
+    if (candidate && isWorthAnalysing(candidate)) out.push(candidate);
+  }
+  return out;
+}
+
+/**
+ * Same lookup as resolveMintsToCandidates, but WITHOUT the isWorthAnalysing
+ * filter — for re-checking tokens the bot already holds. A held position must
+ * stay checkable however far it degrades; filtering it out the moment it stops
+ * looking like a fresh buy candidate would silently stop watching it right
+ * when watching it matters most.
+ */
+export async function resolveMintsUnfiltered(mints: string[]): Promise<TokenCandidate[]> {
+  const out: TokenCandidate[] = [];
+  for (const mint of mints.slice(0, 10)) {
+    const candidate = await fetchCandidateForMint(mint);
+    if (candidate) out.push(candidate);
   }
   return out;
 }

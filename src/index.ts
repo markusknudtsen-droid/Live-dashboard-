@@ -1,9 +1,10 @@
 import { CONFIG, validateConfig } from "./config.js";
-import { scanForCandidates, resolveMintsToCandidates } from "./scanner.js";
+import { scanForCandidates, resolveMintsToCandidates, resolveMintsUnfiltered } from "./scanner.js";
 import { batchAnalyze, TradeSignal } from "./analyze.js";
 import {
   initTrader,
   executeBuy,
+  executeSell,
   monitorPositions,
   getBalance,
   getActivePositions,
@@ -13,6 +14,7 @@ import {
   getHeldTokens,
   MAX_CONCURRENT_POSITIONS,
 } from "./trader.js";
+import { isBearishSignal } from "./momentum-guard.js";
 import { logger } from "./logger.js";
 import { filterRestorablePositions, loadState, saveState, TradeHistoryItem } from "./persistence.js";
 import { isDashboardReportingEnabled, reportTrade } from "./dashboard-reporter.js";
@@ -53,6 +55,14 @@ const tradeHistory: TradeHistoryItem[] = [];
  * cycle instead of spending that budget on ones it has not seen.
  */
 const analysisCache = new Map<string, { at: number; signal: TradeSignal }>();
+
+/**
+ * When each held position was last re-analysed for a bearish exit. Separate
+ * from analysisCache: a held position needs its own cadence independent of
+ * how the candidate cache happens to be warmed, and a position just bought
+ * should not be re-analysed again within the same cycle.
+ */
+const positionRecheckAt = new Map<string, number>();
 
 /** Tokens exited recently, blocking immediate re-entry. Persisted across restarts. */
 let recentExits: RecentExit[] = [];
@@ -225,6 +235,64 @@ async function runMonitoringTick(): Promise<void> {
   }
 }
 
+/**
+ * Re-analyse held positions on their own cadence and close any the model now
+ * reads as bearish. Deliberately independent of wallet balance — an exit
+ * frees SOL rather than needing it — but still needs the analysis model, so
+ * the caller skips this alongside scanning when that model is unavailable.
+ *
+ * Uses resolveMintsUnfiltered(), not resolveMintsToCandidates(): a held
+ * position must stay checkable even once it no longer looks like a fresh buy
+ * candidate (thin liquidity, gone quiet) — that is exactly the state a
+ * bearish exit exists to catch.
+ */
+async function checkHeldPositionsForBearishExit(): Promise<void> {
+  if (CONFIG.bearishExitRecheckMinutes <= 0) return;
+
+  const now = Date.now();
+  const due = getActivePositions()
+    .map((p) => p.tokenAddress)
+    .filter((addr) => {
+      const last = positionRecheckAt.get(addr);
+      return last === undefined || now - last >= CONFIG.bearishExitRecheckMinutes * 60_000;
+    });
+  if (due.length === 0) return;
+
+  let refreshed: Awaited<ReturnType<typeof resolveMintsUnfiltered>>;
+  try {
+    refreshed = await resolveMintsUnfiltered(due);
+  } catch (error) {
+    logger.debug(`Bearish-exit recheck skipped: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+  for (const c of refreshed) positionRecheckAt.set(c.address, now);
+  if (refreshed.length === 0) return;
+
+  const signals = await batchAnalyze(refreshed);
+  for (const signal of signals) {
+    // Re-fetch rather than reuse a captured reference: a monitoring tick could
+    // have closed this same position (stop-loss/take-profit) while the model
+    // call above was in flight.
+    const position = getActivePositions().find((p) => p.tokenAddress === signal.token.address);
+    if (!position) continue;
+    if (!isBearishSignal(signal.trendStrength, signal.momentum)) continue;
+
+    logger.warn(
+      `📉 ${position.tokenSymbol}: model now reads trend=${signal.trendStrength} momentum=${signal.momentum} — closing position`
+    );
+    try {
+      const result = await executeSell(position, "AI_BEARISH", signal.token.priceUsd);
+      if (!result.success) {
+        logger.warn(`Bearish exit for ${position.tokenSymbol} failed: ${result.error}`);
+      }
+    } catch (error) {
+      logger.error(
+        `Bearish exit threw for ${position.tokenSymbol}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+}
+
 async function runCycle(): Promise<void> {
   const cycleStart = Date.now();
   logger.info(`🔄 CYCLE START: ${new Date().toISOString()}`);
@@ -232,18 +300,29 @@ async function runCycle(): Promise<void> {
   const balance = await getBalance();
   logger.info(`💰 Wallet Balance: ${balance.toFixed(4)} SOL`);
 
-  if (balance < 0.05) {
-    logger.warn("Low balance! Skipping trading this cycle (positions are still monitored independently).");
-    await persistRuntimeState();
-    return;
-  }
-
   if (analysisModelStatus !== "ok") {
     const reason =
       analysisModelStatus === "pending"
         ? "the analysis model preflight is still checking OpenRouter"
         : "the analysis model preflight failed at startup (see above)";
     logger.warn(`⛔ Skipping scan/analysis this cycle: ${reason}. Existing positions are still being monitored.`);
+    await persistRuntimeState();
+    return;
+  }
+
+  // Runs even on a low-balance cycle: an exit frees SOL rather than needing
+  // it, and a wallet too low to buy is exactly when the existing positions
+  // matter most.
+  try {
+    await checkHeldPositionsForBearishExit();
+  } catch (error) {
+    logger.error(
+      `Bearish-exit recheck failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+
+  if (balance < 0.05) {
+    logger.warn("Low balance! Skipping trading this cycle (positions are still monitored independently).");
     await persistRuntimeState();
     return;
   }
@@ -547,6 +626,20 @@ async function runCycle(): Promise<void> {
   for (const signal of tradesToExecute) {
     if (activePositions.find((p) => p.tokenAddress === signal.token.address)) {
       logger.info(`Already in position for ${signal.token.symbol}, skipping.`);
+      continue;
+    }
+
+    // Real incident, 2026-09-09: with the cooldown exemption below, Laptop was
+    // bought, stopped out, and bought straight back into the same coin three
+    // times in 25 minutes — the last re-entry lasted 6 seconds before a -36%
+    // stop. The model already computes trendStrength/momentum on every call;
+    // this is the first thing that reads them for a decision instead of just
+    // logging them. Runs before the cooldown check so it also protects a
+    // FRESH entry, not only a cooldown-exempt re-entry.
+    if (CONFIG.bearishBuyGuardEnabled && isBearishSignal(signal.trendStrength, signal.momentum)) {
+      logger.warn(
+        `📉 Skipping ${signal.token.symbol}: model itself reads trend=${signal.trendStrength} momentum=${signal.momentum} despite a BUY verdict`
+      );
       continue;
     }
 
