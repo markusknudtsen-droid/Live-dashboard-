@@ -136,6 +136,9 @@ export interface AppConfig {
   partialTakeProfitPercent: number;
   /** Fraction of the position sold when that gain is reached, 0..1. */
   partialTakeProfitFraction: number;
+  /** A second, creation-time-sorted candidate source, alongside DexScreener. */
+  geckoTerminalEnabled: boolean;
+  geckoTerminalNewPoolsLimit: number;
   /** A candidate at or below this market cap qualifies for a reserved slot. */
   newCoinSlotMaxMarketCapUsd: number;
   devReputationEnabled: boolean;
@@ -349,6 +352,8 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     reservedNewCoinSlots: parseNumberInRange("RESERVED_NEW_COIN_SLOTS", env.RESERVED_NEW_COIN_SLOTS, 1, 0, 100),
     partialTakeProfitPercent: parseNumberInRange("PARTIAL_TAKE_PROFIT_PERCENT", env.PARTIAL_TAKE_PROFIT_PERCENT, 100, 0, 100_000),
     partialTakeProfitFraction: parseNumberInRange("PARTIAL_TAKE_PROFIT_FRACTION", env.PARTIAL_TAKE_PROFIT_FRACTION, 0.5, 0.01, 0.99),
+    geckoTerminalEnabled: parseBoolean(env.GECKOTERMINAL_ENABLED, true),
+    geckoTerminalNewPoolsLimit: parseNumberInRange("GECKOTERMINAL_NEW_POOLS_LIMIT", env.GECKOTERMINAL_NEW_POOLS_LIMIT, 20, 1, 100),
     newCoinSlotMaxMarketCapUsd: parseNumberInRange("NEW_COIN_SLOT_MAX_MARKET_CAP_USD", env.NEW_COIN_SLOT_MAX_MARKET_CAP_USD, 60_000, 0, 100_000_000),
     devReputationEnabled: parseBoolean(env.DEV_REPUTATION_ENABLED, false),
     devMinFollowers: parseNumberInRange("DEV_MIN_FOLLOWERS", env.DEV_MIN_FOLLOWERS, 2000, 0, 10_000_000),
@@ -451,6 +456,12 @@ export function validateConfig(config: AppConfig = CONFIG): void {
     `   🔁 NEW_COIN_REENTRY_COOLDOWN: ${config.newCoinReentryCooldownMinutes}min cooldown on a new coin re-entry ` +
       `(instead of full exemption).`
   );
+  if (config.geckoTerminalEnabled) {
+    console.log(
+      `   🦎 GECKOTERMINAL: up to ${config.geckoTerminalNewPoolsLimit} newest Solana pool(s) per cycle, ` +
+        `resolved via DexScreener like every other source.`
+    );
+  }
   if (config.partialTakeProfitPercent > 0) {
     console.log(
       `   💰 PARTIAL_TAKE_PROFIT: at +${config.partialTakeProfitPercent}%, ` +

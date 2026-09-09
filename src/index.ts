@@ -27,6 +27,7 @@ import {
 import type { FirstTradeValidation } from "./first-trade-gate.js";
 import { adjustConfidence, checkRugGates, qualifiesForInstantBuy } from "./entry-score.js";
 import { fetchRugCheckReport } from "./rugcheck.js";
+import { fetchNewPoolMints } from "./geckoterminal.js";
 import { checkSmallCapGate, isSmallCap, DEFAULT_SMALL_CAP_GATE } from "./small-cap-gate.js";
 import { fetchCreatorWallet, fetchDevReputation, devReputationBonus } from "./dev-reputation.js";
 import {
@@ -380,6 +381,27 @@ async function runCycle(): Promise<void> {
       .filter((m) => !candidates.some((c) => c.address === m));
     if (mentioned.length > 0) {
       const resolved = await resolveMintsToCandidates(mentioned);
+      candidates = [...candidates, ...resolved];
+    }
+  }
+
+  // GeckoTerminal is a second discovery source, alongside DexScreener: its
+  // new_pools feed is sorted by actual pool-creation time, which none of
+  // DexScreener's own feeds are (all three are biased toward coins that have
+  // already gained volume, boost spend, or search relevance). It supplies
+  // mint addresses only — everything else is fetched from DexScreener via the
+  // same resolveMintsToCandidates() path used above, so a GeckoTerminal find
+  // gets real social/paid-info data rather than being built on fields
+  // GeckoTerminal never carries, and cannot bypass isWorthAnalysing() either.
+  if (CONFIG.geckoTerminalEnabled) {
+    const gtMints = (await fetchNewPoolMints(undefined, CONFIG.geckoTerminalNewPoolsLimit)).filter(
+      (addr) => !candidates.some((c) => c.address === addr)
+    );
+    if (gtMints.length > 0) {
+      const resolved = await resolveMintsToCandidates(gtMints);
+      if (resolved.length > 0) {
+        logger.info(`🦎 GeckoTerminal: ${resolved.length} new pool(s) resolved to candidates`);
+      }
       candidates = [...candidates, ...resolved];
     }
   }
