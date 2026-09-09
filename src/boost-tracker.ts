@@ -32,6 +32,16 @@ export interface SeenBoost {
   amount: number;
   /** When this boost level was first observed, epoch ms. */
   firstSeenAt: number;
+  /**
+   * True when this sighting came from the startup baseline rather than from
+   * watching the boost arrive. firstSeenAt then records when the BOT started,
+   * not when the boost was bought — the real purchase could be hours old — so
+   * such a sighting must never count as fresh. Without this flag every
+   * baselined token reads as 0 seconds old and therefore stays "fresh" for the
+   * entire freshness window immediately after a restart, which is the exact
+   * outcome the baseline exists to prevent.
+   */
+  baselined: boolean;
 }
 
 /** token key -> sighting. Key is `${chainId}:${tokenAddress}`. */
@@ -87,7 +97,9 @@ export function observeBoosts(
     // Unseen, or boosted harder than when last seen: either way this is a boost
     // purchase the bot has not yet acted on.
     if (!prior || o.boostAmount > prior.amount) {
-      next.set(key, { amount: o.boostAmount, firstSeenAt: now });
+      // A boost TOP-UP seen while running is a genuine new purchase even if the
+      // token was baselined, so it clears the flag and becomes actionable.
+      next.set(key, { amount: o.boostAmount, firstSeenAt: now, baselined: isBaseline });
       if (!isBaseline) newlyBoosted.push(o);
     }
   }
@@ -110,6 +122,9 @@ export function isBoostFresh(
 ): boolean {
   const seen = sightings.get(boostKey(chainId, tokenAddress));
   if (!seen) return false;
+  // Baselined sightings carry the bot's start time, not the boost's purchase
+  // time, so their apparent age is meaningless — never actionable.
+  if (seen.baselined) return false;
   const ageSeconds = (now - seen.firstSeenAt) / 1000;
   return ageSeconds >= 0 && ageSeconds <= config.freshWindowSeconds;
 }

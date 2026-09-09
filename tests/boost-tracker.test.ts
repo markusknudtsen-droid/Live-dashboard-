@@ -18,6 +18,33 @@ test("the first poll baselines everything and buys nothing", () => {
   assert.equal(r.sightings.size, 2, "but they are recorded");
 });
 
+// Regression, from a real incident on 2026-09-09: the baseline logged "4
+// already-boosted token(s) recorded and will NOT be instant-bought" and then
+// instant-bought STONKSZN 2ms later and AICAT 1s later, both on boosts hours
+// old. The baseline stored firstSeenAt = startup time, so isBoostFresh saw an
+// age of ~0s and called every stale boost fresh for the whole 120s window.
+test("a baselined boost is never fresh, not even in the same millisecond", () => {
+  const base = observeBoosts([obs("STONKSZN")], new Map(), NOW, true);
+  assert.equal(isBoostFresh("solana", "STONKSZN", base.sightings, NOW), false, "same instant");
+  assert.equal(isBoostFresh("solana", "STONKSZN", base.sightings, NOW + 2), false, "2ms later");
+  assert.equal(isBoostFresh("solana", "STONKSZN", base.sightings, NOW + 1_000), false, "1s later");
+  assert.equal(isBoostFresh("solana", "STONKSZN", base.sightings, NOW + 60_000), false, "60s later");
+});
+
+test("a boost arriving after startup IS fresh, so the fix does not disable the feature", () => {
+  const base = observeBoosts([obs("OLD")], new Map(), NOW, true);
+  const live = observeBoosts([obs("OLD"), obs("NEW")], base.sightings, NOW + 30_000, false);
+  assert.equal(isBoostFresh("solana", "NEW", live.sightings, NOW + 30_000), true);
+  assert.equal(isBoostFresh("solana", "OLD", live.sightings, NOW + 30_000), false);
+});
+
+test("a top-up on a baselined token becomes actionable, clearing the baseline flag", () => {
+  const base = observeBoosts([obs("A", 100)], new Map(), NOW, true);
+  assert.equal(isBoostFresh("solana", "A", base.sightings, NOW), false);
+  const up = observeBoosts([obs("A", 500)], base.sightings, NOW + 60_000, false);
+  assert.equal(isBoostFresh("solana", "A", up.sightings, NOW + 60_000), true, "a new purchase is actionable");
+});
+
 test("a token appearing after the baseline is newly boosted", () => {
   const base = observeBoosts([obs("A")], new Map(), NOW, true);
   const next = observeBoosts([obs("A"), obs("B")], base.sightings, NOW + 30_000, false);
