@@ -193,3 +193,27 @@ export function exceedsMaxBuys(buyCounts: TokenBuyCount[], tokenAddress: string,
   if (maxBuys <= 0) return false;
   return buyCountFor(buyCounts, tokenAddress) >= maxBuys;
 }
+
+/**
+ * Whether taking this candidate would consume a slot being held for a new
+ * coin.
+ *
+ * The scan sources are ranked by volume and boost, both of which favour coins
+ * that have ALREADY moved — so established coins reliably reach the buy loop
+ * first and can occupy every slot before a small new coin is ever considered.
+ * Reserving a slot is what makes room for the segment the small-cap gate was
+ * built to trade; without it that gate rarely gets anything to judge.
+ *
+ * A qualifying (new) candidate is never blocked by its own reservation.
+ */
+export function blocksReservedNewCoinSlot(
+  nonNewPositionCount: number,
+  maxConcurrentPositions: number,
+  reservedNewCoinSlots: number,
+  candidateIsNewCoin: boolean
+): boolean {
+  if (candidateIsNewCoin) return false;
+  if (reservedNewCoinSlots <= 0) return false;
+  const slotsOpenToAnything = maxConcurrentPositions - reservedNewCoinSlots;
+  return nonNewPositionCount >= slotsOpenToAnything;
+}

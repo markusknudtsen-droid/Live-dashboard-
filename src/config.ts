@@ -130,6 +130,10 @@ export interface AppConfig {
   newCoinReentryCooldownMinutes: number;
   /** Lifetime cap on buys of the same token. 0 disables the check. */
   maxBuysPerToken: number;
+  /** Slots held open for new/small coins so established ones cannot take every slot. 0 disables. */
+  reservedNewCoinSlots: number;
+  /** A candidate at or below this market cap qualifies for a reserved slot. */
+  newCoinSlotMaxMarketCapUsd: number;
   devReputationEnabled: boolean;
   devMinFollowers: number;
   devMinMigratedTokens: number;
@@ -338,6 +342,8 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     bearishExitRecheckMinutes: parseNumberInRange("BEARISH_EXIT_RECHECK_MINUTES", env.BEARISH_EXIT_RECHECK_MINUTES, 3, 0, 1440),
     newCoinReentryCooldownMinutes: parseNumberInRange("NEW_COIN_REENTRY_COOLDOWN_MINUTES", env.NEW_COIN_REENTRY_COOLDOWN_MINUTES, 2, 0, 1440),
     maxBuysPerToken: parseNumberInRange("MAX_BUYS_PER_TOKEN", env.MAX_BUYS_PER_TOKEN, 3, 0, 1000),
+    reservedNewCoinSlots: parseNumberInRange("RESERVED_NEW_COIN_SLOTS", env.RESERVED_NEW_COIN_SLOTS, 1, 0, 100),
+    newCoinSlotMaxMarketCapUsd: parseNumberInRange("NEW_COIN_SLOT_MAX_MARKET_CAP_USD", env.NEW_COIN_SLOT_MAX_MARKET_CAP_USD, 60_000, 0, 100_000_000),
     devReputationEnabled: parseBoolean(env.DEV_REPUTATION_ENABLED, false),
     devMinFollowers: parseNumberInRange("DEV_MIN_FOLLOWERS", env.DEV_MIN_FOLLOWERS, 2000, 0, 10_000_000),
     devMinMigratedTokens: parseNumberInRange("DEV_MIN_MIGRATED_TOKENS", env.DEV_MIN_MIGRATED_TOKENS, 3, 0, 10_000),
@@ -439,6 +445,12 @@ export function validateConfig(config: AppConfig = CONFIG): void {
     `   🔁 NEW_COIN_REENTRY_COOLDOWN: ${config.newCoinReentryCooldownMinutes}min cooldown on a new coin re-entry ` +
       `(instead of full exemption).`
   );
+  if (config.reservedNewCoinSlots > 0) {
+    console.log(
+      `   🪺 RESERVED_NEW_COIN_SLOTS: ${config.reservedNewCoinSlots} of ${config.maxConcurrentPositions} slot(s) held ` +
+        `for coins under $${config.newCoinSlotMaxMarketCapUsd.toLocaleString("en-US")} market cap.`
+    );
+  }
   if (config.maxBuysPerToken > 0) {
     console.log(`   🎯 MAX_BUYS_PER_TOKEN: a token cannot be bought more than ${config.maxBuysPerToken} times in a run.`);
   }

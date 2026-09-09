@@ -37,6 +37,7 @@ import {
   recordBuy,
   buyCountFor,
   exceedsMaxBuys,
+  blocksReservedNewCoinSlot,
   type RecentExit,
   type TokenBuyCount,
 } from "./position-guard.js";
@@ -455,6 +456,19 @@ async function runCycle(): Promise<void> {
 
       if (CONFIG.minMarketCapUsd > 0 && candidate.marketCap < CONFIG.minMarketCapUsd) continue;
 
+      // Same reservation as the analysed path: a boost must not let an
+      // established coin take the slot being held for a new one.
+      if (
+        blocksReservedNewCoinSlot(
+          getActivePositions().filter((p) => !p.enteredAsNewCoin).length,
+          MAX_CONCURRENT_POSITIONS,
+          CONFIG.reservedNewCoinSlots,
+          candidate.marketCap < CONFIG.newCoinSlotMaxMarketCapUsd
+        )
+      ) {
+        continue;
+      }
+
       // A boosted small-cap coin must clear the same stricter checklist as an
       // analysed one — the boost decides speed, never a bypass of the checks
       // that decide whether the coin can be trusted at all.
@@ -693,6 +707,27 @@ async function runCycle(): Promise<void> {
     // see reentryBlocked()'s comment for why that changed.
     const isNewCoin = signal.token.ageHours < CONFIG.newCoinMaxAgeHours;
     if (reentryBlocked(signal.token.address, signal.token.symbol, CONFIG.newCoinCooldownExempt && isNewCoin)) {
+      continue;
+    }
+
+    // Hold a slot open for a small new coin. The scan feeds are ranked by
+    // volume and boost, so established coins arrive first and would otherwise
+    // fill every slot before the small-cap gate ever sees a candidate.
+    const qualifiesForNewCoinSlot = signal.token.marketCap < CONFIG.newCoinSlotMaxMarketCapUsd;
+    const nonNewHeld = getActivePositions().filter((p) => !p.enteredAsNewCoin).length;
+    if (
+      blocksReservedNewCoinSlot(
+        nonNewHeld,
+        MAX_CONCURRENT_POSITIONS,
+        CONFIG.reservedNewCoinSlots,
+        qualifiesForNewCoinSlot
+      )
+    ) {
+      logger.info(
+        `🪺 Skipping ${signal.token.symbol}: $${Math.round(signal.token.marketCap).toLocaleString("en-US")} market cap ` +
+          `is above the $${CONFIG.newCoinSlotMaxMarketCapUsd.toLocaleString("en-US")} bar, and the last ` +
+          `${CONFIG.reservedNewCoinSlots} slot(s) are held for new coins`
+      );
       continue;
     }
 

@@ -47,6 +47,15 @@ export interface ActivePosition {
   peakPrice?: number;
   /** Set once the deferral message has been logged, to keep it to one line. */
   takeProfitDeferredLogged?: boolean;
+  /**
+   * Whether this position was opened as a new/small coin, for
+   * RESERVED_NEW_COIN_SLOTS accounting. Recorded at entry rather than derived
+   * later: it describes which kind of slot was allocated, and a coin's market
+   * cap moves after entry, so a live lookup would silently reclassify a
+   * position and let the reservation drift. Optional so positions persisted
+   * before this existed still rehydrate (treated as not-new).
+   */
+  enteredAsNewCoin?: boolean;
 }
 
 interface DexPairPrice {
@@ -344,6 +353,7 @@ async function executeBuyLocked(signal: TradeSignal): Promise<TradeResult> {
         entryTime: Date.now(),
         pnlPercent: 0,
         txSignature,
+        enteredAsNewCoin: token.marketCap < CONFIG.newCoinSlotMaxMarketCapUsd,
       });
 
       logger.info(`🧪 [DRY RUN] Simulated buy executed. Fake TX: ${txSignature}`);
@@ -419,6 +429,7 @@ async function executeBuyLocked(signal: TradeSignal): Promise<TradeResult> {
       entryTime: Date.now(),
       pnlPercent: 0,
       txSignature,
+      enteredAsNewCoin: token.marketCap < CONFIG.newCoinSlotMaxMarketCapUsd,
     });
 
     logger.info(`✅ Trade executed! TX: ${txSignature}`);

@@ -9,6 +9,7 @@ import {
   recordBuy,
   buyCountFor,
   exceedsMaxBuys,
+  blocksReservedNewCoinSlot,
   type RecentExit,
   type TokenBuyCount,
 } from "../src/position-guard.js";
@@ -181,4 +182,40 @@ test("a maxBuys of 0 disables the check entirely", () => {
 
 test("a token never bought never exceeds any cap", () => {
   assert.equal(exceedsMaxBuys([], "A", 3), false);
+});
+
+/* -------------------------- reserved new-coin slot ------------------------- */
+
+// The operator's setup: 3 slots, 1 held for a coin under $60k market cap.
+const RESERVED = 1;
+const SLOTS = 3;
+
+test("an established coin is allowed while spare slots remain", () => {
+  assert.equal(blocksReservedNewCoinSlot(0, SLOTS, RESERVED, false), false, "nothing held yet");
+  assert.equal(blocksReservedNewCoinSlot(1, SLOTS, RESERVED, false), false, "1 of 2 open slots used");
+});
+
+test("the last slot is refused to an established coin", () => {
+  assert.equal(
+    blocksReservedNewCoinSlot(2, SLOTS, RESERVED, false),
+    true,
+    "2 established positions fill every slot not held for a new coin"
+  );
+});
+
+test("a new coin can always take the reserved slot", () => {
+  assert.equal(blocksReservedNewCoinSlot(2, SLOTS, RESERVED, true), false);
+});
+
+test("a new coin is never blocked by its own reservation, even at capacity", () => {
+  assert.equal(blocksReservedNewCoinSlot(3, SLOTS, RESERVED, true), false);
+});
+
+test("reserving 0 slots disables the check", () => {
+  assert.equal(blocksReservedNewCoinSlot(3, SLOTS, 0, false), false);
+});
+
+test("reserving every slot admits only new coins", () => {
+  assert.equal(blocksReservedNewCoinSlot(0, SLOTS, SLOTS, false), true, "no slot is open to an established coin");
+  assert.equal(blocksReservedNewCoinSlot(0, SLOTS, SLOTS, true), false, "a new coin still gets in");
 });
