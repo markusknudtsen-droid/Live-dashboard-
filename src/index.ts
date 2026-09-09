@@ -34,7 +34,11 @@ import {
   pruneExits,
   recordExit,
   reconcilePositions,
+  recordBuy,
+  buyCountFor,
+  exceedsMaxBuys,
   type RecentExit,
+  type TokenBuyCount,
 } from "./position-guard.js";
 import {
   observeBoosts,
@@ -68,6 +72,15 @@ const positionRecheckAt = new Map<string, number>();
 let recentExits: RecentExit[] = [];
 
 /**
+ * Buy count per token for this run, for MAX_BUYS_PER_TOKEN. Deliberately NOT
+ * persisted: the cap exists to stop a coin being re-bought into the same drop
+ * over and over within a session (CARDCAT, 10 times on 2026-09-09), not to
+ * blacklist it forever. Persisting would ban a coin traded three times last
+ * week from ever being traded again, and grow the state file without bound.
+ */
+let buyCounts: TokenBuyCount[] = [];
+
+/**
  * When each boosted token was first seen. Deliberately NOT persisted: after a
  * restart the bot has no way to know whether a boost it finds is seconds or
  * hours old, so every boost present at startup is baselined as already-seen and
@@ -76,9 +89,16 @@ let recentExits: RecentExit[] = [];
 let boostSightings: BoostSightings = new Map();
 let boostBaselineTaken = false;
 
-function reentryConfig() {
+/**
+ * Retention window for pruneExits(). Must be at least as long as the LONGER
+ * of the two cooldowns below, or an exit record could be pruned before the
+ * cooldown that actually applies to it has finished — which would silently
+ * re-open a normal-coin re-entry early, since canReenter() has nothing left
+ * to check against once the record is gone.
+ */
+function pruneConfig() {
   return {
-    cooldownMinutes: CONFIG.reentryCooldownMinutes,
+    cooldownMinutes: Math.max(CONFIG.reentryCooldownMinutes, CONFIG.newCoinReentryCooldownMinutes),
     blockLosersForRun: CONFIG.blockLosingReentryForRun,
   };
 }
@@ -97,16 +117,36 @@ function recordNonSaleExit(tokenAddress: string, tokenSymbol: string): void {
     exitedAt: Date.now(),
     wasLoss: true,
   });
-  recentExits = pruneExits(recentExits, Date.now(), reentryConfig());
+  recentExits = pruneExits(recentExits, Date.now(), pruneConfig());
 }
 
 /**
- * Whether a token may be bought, given what has already been exited. Shared by
- * the instant-buy and analysed paths so neither can bypass the cooldown.
+ * Whether a token may be bought, given what has already been exited and how
+ * many times it has already been bought this run. Shared by the instant-buy
+ * and analysed paths so neither can bypass either check.
+ *
+ * `useNewCoinCooldown` selects NEW_COIN_REENTRY_COOLDOWN_MINUTES instead of
+ * the full REENTRY_COOLDOWN_MINUTES — a real incident, 2026-09-09: CARDCAT and
+ * Laptop were bought, stopped out, and bought straight back repeatedly under
+ * the FULL exemption this replaced (zero cooldown at all for a new coin). A
+ * short cooldown is not zero, and the buy-count cap below is what actually
+ * bounds the damage a whipsawing coin can do regardless of any cooldown length.
  */
-function reentryBlocked(tokenAddress: string, symbol: string): boolean {
-  if (CONFIG.reentryCooldownMinutes <= 0 && !CONFIG.blockLosingReentryForRun) return false;
-  const verdict = canReenter(tokenAddress, recentExits, Date.now(), reentryConfig());
+function reentryBlocked(tokenAddress: string, symbol: string, useNewCoinCooldown: boolean): boolean {
+  if (exceedsMaxBuys(buyCounts, tokenAddress, CONFIG.maxBuysPerToken)) {
+    logger.info(
+      `⛔ Skipping ${symbol}: already bought ${buyCountFor(buyCounts, tokenAddress)} time(s) this run ` +
+        `(max ${CONFIG.maxBuysPerToken})`
+    );
+    return true;
+  }
+
+  const cooldownMinutes = useNewCoinCooldown ? CONFIG.newCoinReentryCooldownMinutes : CONFIG.reentryCooldownMinutes;
+  if (cooldownMinutes <= 0 && !CONFIG.blockLosingReentryForRun) return false;
+  const verdict = canReenter(tokenAddress, recentExits, Date.now(), {
+    cooldownMinutes,
+    blockLosersForRun: CONFIG.blockLosingReentryForRun,
+  });
   if (!verdict.allowed) {
     logger.info(`⏳ Skipping ${symbol}: ${verdict.reason}`);
     return true;
@@ -394,7 +434,9 @@ async function runCycle(): Promise<void> {
     for (const candidate of candidates) {
       if (getActivePositions().length >= MAX_CONCURRENT_POSITIONS) break;
       if (getActivePositions().some((p) => p.tokenAddress === candidate.address)) continue;
-      if (reentryBlocked(candidate.address, candidate.symbol)) continue;
+      if (reentryBlocked(candidate.address, candidate.symbol, candidate.ageHours < CONFIG.newCoinMaxAgeHours)) {
+        continue;
+      }
 
       // The boost must be one this run actually watched arrive. Without this
       // the bot buys whatever happens to be sitting in the rolling boosts feed,
@@ -479,6 +521,7 @@ async function runCycle(): Promise<void> {
       });
       if (result.success) {
         logger.info("✅ Instant buy executed");
+        buyCounts = recordBuy(buyCounts, candidate.address, candidate.symbol);
       } else {
         logger.warn(`❌ Instant buy failed: ${result.error}`);
       }
@@ -643,12 +686,13 @@ async function runCycle(): Promise<void> {
       continue;
     }
 
-    // A coin younger than the new-coin window skips the re-entry cooldown
-    // entirely, at the operator's explicit request — fast-moving coins can
-    // legitimately be worth re-entering after a wick, and the small-cap gate
-    // below is what does the safety work for this segment instead.
+    // A coin younger than the new-coin window uses the shorter
+    // NEW_COIN_REENTRY_COOLDOWN_MINUTES instead of the full cooldown — fast-
+    // moving coins can legitimately be worth re-entering after a wick sooner
+    // than an established coin would be. It is a shorter cooldown, not zero;
+    // see reentryBlocked()'s comment for why that changed.
     const isNewCoin = signal.token.ageHours < CONFIG.newCoinMaxAgeHours;
-    if (!(CONFIG.newCoinCooldownExempt && isNewCoin) && reentryBlocked(signal.token.address, signal.token.symbol)) {
+    if (reentryBlocked(signal.token.address, signal.token.symbol, CONFIG.newCoinCooldownExempt && isNewCoin)) {
       continue;
     }
 
@@ -738,6 +782,7 @@ async function runCycle(): Promise<void> {
 
     if (result.success) {
       logger.info("✅ Trade executed successfully");
+      buyCounts = recordBuy(buyCounts, signal.token.address, signal.token.symbol);
     } else {
       logger.warn(`❌ Trade failed: ${result.error}`);
     }
@@ -836,7 +881,7 @@ async function main(): Promise<void> {
         exitedAt: Date.now(),
         wasLoss: (event.pnlPercent ?? 0) <= 0,
       });
-      recentExits = pruneExits(recentExits, Date.now(), reentryConfig());
+      recentExits = pruneExits(recentExits, Date.now(), pruneConfig());
       // Persist immediately rather than waiting for cycle end. An exit record
       // held only in memory is lost if the process dies first, and the cooldown
       // then has no memory of the coin at all — which is how a token exited at a
@@ -885,7 +930,7 @@ async function main(): Promise<void> {
   // stop, fail to sell, and retry forever. A failed holdings lookup must NOT be
   // treated as "holds nothing" — on error we keep every position and say so.
   let reconciled = restorable;
-  recentExits = pruneExits(loadedState.recentExits ?? [], Date.now(), reentryConfig());
+  recentExits = pruneExits(loadedState.recentExits ?? [], Date.now(), pruneConfig());
   if (CONFIG.reconcileOnStartup && !CONFIG.dryRun && restorable.length > 0) {
     try {
       const held = await getHeldTokens();

@@ -6,7 +6,11 @@ import {
   recordExit,
   pruneExits,
   DEFAULT_REENTRY,
+  recordBuy,
+  buyCountFor,
+  exceedsMaxBuys,
   type RecentExit,
+  type TokenBuyCount,
 } from "../src/position-guard.js";
 
 const MINUTE = 60_000;
@@ -132,4 +136,49 @@ test("pruneExits keeps losses for the whole run when configured", () => {
   const cfg = { ...DEFAULT_REENTRY, blockLosersForRun: true };
   const exits = [{ ...exitedAt(5000, true), tokenAddress: "loser" }];
   assert.equal(pruneExits(exits, NOW, cfg).length, 1, "an old loss must survive pruning");
+});
+
+/* ------------------------------ max buy count ----------------------------- */
+
+// Real incident, 2026-09-09: CARDCAT was bought 10 times in one session. A
+// cooldown only ever delays a re-entry; nothing previously counted it.
+test("a token never bought has a count of 0", () => {
+  assert.equal(buyCountFor([], "A"), 0);
+});
+
+test("recordBuy starts a new token at 1 and increments an existing one", () => {
+  let counts: TokenBuyCount[] = [];
+  counts = recordBuy(counts, "A", "CARDCAT");
+  assert.equal(buyCountFor(counts, "A"), 1);
+  counts = recordBuy(counts, "A", "CARDCAT");
+  counts = recordBuy(counts, "A", "CARDCAT");
+  assert.equal(buyCountFor(counts, "A"), 3);
+});
+
+test("recordBuy tracks each token independently", () => {
+  let counts: TokenBuyCount[] = [];
+  counts = recordBuy(counts, "A", "CARDCAT");
+  counts = recordBuy(counts, "B", "Laptop");
+  counts = recordBuy(counts, "A", "CARDCAT");
+  assert.equal(buyCountFor(counts, "A"), 2);
+  assert.equal(buyCountFor(counts, "B"), 1);
+});
+
+test("exceedsMaxBuys blocks at the cap, boundary inclusive", () => {
+  let counts: TokenBuyCount[] = [];
+  counts = recordBuy(counts, "A", "CARDCAT");
+  counts = recordBuy(counts, "A", "CARDCAT");
+  assert.equal(exceedsMaxBuys(counts, "A", 3), false, "2 buys so far, cap is 3: still allowed");
+  counts = recordBuy(counts, "A", "CARDCAT");
+  assert.equal(exceedsMaxBuys(counts, "A", 3), true, "3rd buy recorded: the 4th is blocked");
+});
+
+test("a maxBuys of 0 disables the check entirely", () => {
+  let counts: TokenBuyCount[] = [];
+  for (let i = 0; i < 50; i++) counts = recordBuy(counts, "A", "CARDCAT");
+  assert.equal(exceedsMaxBuys(counts, "A", 0), false);
+});
+
+test("a token never bought never exceeds any cap", () => {
+  assert.equal(exceedsMaxBuys([], "A", 3), false);
 });

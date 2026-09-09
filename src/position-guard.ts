@@ -152,3 +152,44 @@ export function pruneExits(
   }
   return recentExits.filter((e) => now - e.exitedAt < config.cooldownMinutes * 60_000);
 }
+
+/**
+ * Per-run buy count per token, for MAX_BUYS_PER_TOKEN. Separate from the
+ * cooldown above on purpose: a cooldown only ever delays a re-entry, so a
+ * token whipsawing between a short cooldown and a fast stop-loss can still be
+ * bought an unbounded number of times as the run goes on. This is the one
+ * check in this file a cooldown of any length cannot satisfy — it counts
+ * rather than times out. Real incident, 2026-09-09: CARDCAT was bought 10
+ * times in one session.
+ *
+ * The caller holds this in memory only and does not persist it — the cap is
+ * meant to stop a coin being re-bought into the same drop repeatedly within a
+ * session, not to blacklist it permanently.
+ */
+export interface TokenBuyCount {
+  tokenAddress: string;
+  tokenSymbol: string;
+  count: number;
+}
+
+/** Current count for a token, 0 if never bought. */
+export function buyCountFor(buyCounts: TokenBuyCount[], tokenAddress: string): number {
+  return buyCounts.find((b) => b.tokenAddress === tokenAddress)?.count ?? 0;
+}
+
+/** Increment (or start at 1) the count for a token, after a successful buy. */
+export function recordBuy(buyCounts: TokenBuyCount[], tokenAddress: string, tokenSymbol: string): TokenBuyCount[] {
+  const existing = buyCounts.find((b) => b.tokenAddress === tokenAddress);
+  if (!existing) return [...buyCounts, { tokenAddress, tokenSymbol, count: 1 }];
+  return buyCounts.map((b) => (b.tokenAddress === tokenAddress ? { ...b, count: b.count + 1 } : b));
+}
+
+/**
+ * Whether a token has already hit its lifetime buy cap. maxBuys <= 0 disables
+ * the check (unlimited), matching this codebase's convention elsewhere for a
+ * zero/negative threshold meaning "off".
+ */
+export function exceedsMaxBuys(buyCounts: TokenBuyCount[], tokenAddress: string, maxBuys: number): boolean {
+  if (maxBuys <= 0) return false;
+  return buyCountFor(buyCounts, tokenAddress) >= maxBuys;
+}
