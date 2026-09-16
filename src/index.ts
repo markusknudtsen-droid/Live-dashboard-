@@ -5,6 +5,7 @@ import {
   initTrader,
   executeBuy,
   executeSell,
+  executeSweep,
   monitorPositions,
   getBalance,
   getActivePositions,
@@ -341,6 +342,32 @@ async function runCycle(): Promise<void> {
 
   const balance = await getBalance();
   logger.info(`💰 Wallet Balance: ${balance.toFixed(4)} SOL`);
+
+  // Runs every cycle regardless of what follows — banking profit out of the
+  // hot wallet is orthogonal to whether trading proceeds this cycle. Never
+  // fatal: a sweep failure must not stop the scan/analyze/buy loop below.
+  if (CONFIG.profitSweepEnabled) {
+    try {
+      const sweep = await executeSweep();
+      if (sweep.success) {
+        logger.info(`🏦 Swept ${sweep.amountSol?.toFixed(4)} SOL to withdrawal address.`);
+        tradeHistory.push({
+          timestamp: Date.now(),
+          symbol: "SOL",
+          action: "WITHDRAW",
+          confidence: 100,
+          result: "SUCCESS",
+          txSignature: sweep.txSignature,
+        });
+      } else if (sweep.error && !sweep.error.includes("below the")) {
+        // "below the ... minimum" is the routine no-op case (nothing to
+        // sweep yet) and would otherwise log every single cycle.
+        logger.debug(`Sweep skipped: ${sweep.error}`);
+      }
+    } catch (error) {
+      logger.error(`Profit sweep threw (non-fatal): ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
 
   if (analysisModelStatus !== "ok") {
     const reason =

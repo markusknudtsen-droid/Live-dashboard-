@@ -2,13 +2,17 @@ import {
   Connection,
   Keypair,
   PublicKey,
+  SystemProgram,
+  Transaction,
   VersionedTransaction,
   LAMPORTS_PER_SOL,
+  sendAndConfirmTransaction,
 } from "@solana/web3.js";
 import bs58 from "bs58";
 import { randomBytes } from "node:crypto";
 import { CONFIG } from "./config.js";
 import { updateTrailingStop } from "./trailing-stop.js";
+import { decideSweep } from "./profit-sweep.js";
 import { TradeSignal } from "./analyze.js";
 import { logger } from "./logger.js";
 import { httpGet } from "./http.js";
@@ -153,14 +157,19 @@ export const MAX_CONCURRENT_POSITIONS = CONFIG.maxConcurrentPositions;
  * priority over buys: a sell already queued always runs before the next
  * buy, though it still can't preempt a buy that's already mid-execution —
  * an in-flight blockchain transaction can't be cancelled, only waited out.
+ *
+ * The profit sweep (executeSweep) shares this same lock at the lowest
+ * priority, behind both queues below: it reads/spends the same SOL balance
+ * a buy or sell can be mid-transaction against, and must never race one.
  */
 let traderLockBusy = false;
 const sellQueue: Array<() => void> = [];
 const buyQueue: Array<() => void> = [];
+const sweepQueue: Array<() => void> = [];
 
 function scheduleNextTraderTask(): void {
   if (traderLockBusy) return;
-  const next = sellQueue.shift() ?? buyQueue.shift();
+  const next = sellQueue.shift() ?? buyQueue.shift() ?? sweepQueue.shift();
   if (!next) return;
   traderLockBusy = true;
   next();
@@ -273,6 +282,68 @@ export async function getBalance(): Promise<number> {
   }
   const balance = await connection.getBalance(wallet.publicKey);
   return balance / LAMPORTS_PER_SOL;
+}
+
+export interface SweepResult {
+  success: boolean;
+  amountSol?: number;
+  txSignature?: string;
+  error?: string;
+}
+
+/**
+ * Automatically send excess SOL to CONFIG.withdrawalAddress once the balance
+ * grows past CONFIG.profitSweepReserveSol. See profit-sweep.ts for the sizing
+ * decision and config.ts for why this path has no confirmation step, unlike
+ * the dashboard's manual withdrawal (server/routes/vault.ts).
+ *
+ * Shares the trader lock with buys/sells (lowest priority — see
+ * scheduleNextTraderTask above) so it can never read or spend a balance a
+ * buy/sell is already mid-transaction against.
+ */
+export async function executeSweep(): Promise<SweepResult> {
+  return withTraderLock(sweepQueue, executeSweepLocked);
+}
+
+async function executeSweepLocked(): Promise<SweepResult> {
+  if (CONFIG.dryRun) {
+    return { success: false, error: "Sweep skipped: DRY_RUN has no real wallet to sweep from." };
+  }
+  if (!isValidSolanaMint(CONFIG.withdrawalAddress)) {
+    return { success: false, error: "WITHDRAWAL_ADDRESS is not set or not a valid Solana address." };
+  }
+
+  const balance = await getBalance();
+  const decision = decideSweep({
+    balanceSol: balance,
+    reserveSol: CONFIG.profitSweepReserveSol,
+    minSweepSol: CONFIG.profitSweepMinSol,
+    maxSweepSol: CONFIG.profitSweepMaxSol,
+  });
+  if (!decision.shouldSweep) {
+    return { success: false, error: decision.reason };
+  }
+
+  try {
+    const destination = new PublicKey(CONFIG.withdrawalAddress);
+    const lamports = Math.floor(decision.amountSol * LAMPORTS_PER_SOL);
+    const transaction = new Transaction().add(
+      SystemProgram.transfer({ fromPubkey: wallet.publicKey, toPubkey: destination, lamports })
+    );
+    const txSignature = await sendAndConfirmTransaction(connection, transaction, [wallet], {
+      commitment: "confirmed",
+      skipPreflight: CONFIG.allowSkipPreflight,
+    });
+
+    logger.info(`🏦 Profit sweep: ${decision.amountSol.toFixed(4)} SOL → ${CONFIG.withdrawalAddress}`);
+    logger.info(`https://solscan.io/tx/${txSignature}`);
+
+    return { success: true, amountSol: decision.amountSol, txSignature };
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error(`Profit sweep failed: ${message}`);
+    return { success: false, error: message };
+  }
 }
 
 /**

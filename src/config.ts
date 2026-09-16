@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { PublicKey } from "@solana/web3.js";
 
 export interface AppConfig {
   openRouterApiKey: string;
@@ -158,6 +159,26 @@ export interface AppConfig {
    * instant it touches takeProfitPercent, however strong the momentum.
    */
   letWinnersRun: boolean;
+  /**
+   * Where an automatic profit sweep (and the dashboard's manual withdrawal,
+   * server/withdrawalPolicy.ts) sends SOL. Empty disables both: the manual
+   * path falls back to accepting any destination, and the automatic sweep
+   * refuses to run at all rather than guess a destination.
+   */
+  withdrawalAddress: string;
+  /**
+   * Automatically send excess SOL to withdrawalAddress once the balance grows
+   * past profitSweepReserveSol. Off by default. Unlike the dashboard's manual
+   * withdrawal, this path has NO confirmation code and no human step — an
+   * explicit operator trade-off in exchange for not touching the dashboard.
+   */
+  profitSweepEnabled: boolean;
+  /** Balance always left behind, so the bot can keep filling its trading slots. */
+  profitSweepReserveSol: number;
+  /** Excess below this is left alone rather than swept, to avoid dust-sized transfers. */
+  profitSweepMinSol: number;
+  /** Caps a single sweep's size. 0 disables the cap (sweep the full excess). */
+  profitSweepMaxSol: number;
 }
 
 function parseNumberInRange(
@@ -368,6 +389,11 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       3600
     ),
     letWinnersRun: parseBoolean(env.LET_WINNERS_RUN, false),
+    withdrawalAddress: (env.WITHDRAWAL_ADDRESS || "").trim(),
+    profitSweepEnabled: parseBoolean(env.PROFIT_SWEEP_ENABLED, false),
+    profitSweepReserveSol: parseNumberInRange("PROFIT_SWEEP_RESERVE_SOL", env.PROFIT_SWEEP_RESERVE_SOL, 0.5, 0, 1000),
+    profitSweepMinSol: parseNumberInRange("PROFIT_SWEEP_MIN_SOL", env.PROFIT_SWEEP_MIN_SOL, 0.1, 0, 1000),
+    profitSweepMaxSol: parseNumberInRange("PROFIT_SWEEP_MAX_SOL", env.PROFIT_SWEEP_MAX_SOL, 0, 0, 1000),
   };
 }
 
@@ -394,6 +420,16 @@ export function validateConfig(config: AppConfig = CONFIG): void {
   }
   if (config.scanChains.length === 0) {
     throw new Error("SCAN_CHAINS must include at least one chain.");
+  }
+  if (config.profitSweepEnabled) {
+    if (!config.withdrawalAddress) {
+      throw new Error("PROFIT_SWEEP_ENABLED requires WITHDRAWAL_ADDRESS to be set.");
+    }
+    try {
+      new PublicKey(config.withdrawalAddress);
+    } catch {
+      throw new Error("WITHDRAWAL_ADDRESS is not a valid Solana address.");
+    }
   }
   console.log("✅ Configuration validated");
   if (config.dryRun) {
@@ -516,6 +552,14 @@ export function validateConfig(config: AppConfig = CONFIG): void {
   if (config.useFixedPositionSize) {
     console.log(
       `   📏 USE_FIXED_POSITION_SIZE enabled: every entry is exactly ${config.maxPositionSol} SOL (model sizing ignored).`
+    );
+  }
+  if (config.profitSweepEnabled) {
+    console.log(
+      `   🏦 PROFIT_SWEEP enabled: balance above ${config.profitSweepReserveSol} SOL is automatically sent to ` +
+        `${config.withdrawalAddress}` +
+        (config.profitSweepMaxSol > 0 ? ` (max ${config.profitSweepMaxSol} SOL/sweep)` : "") +
+        ". No confirmation step — this path is fully autonomous."
     );
   }
 }
