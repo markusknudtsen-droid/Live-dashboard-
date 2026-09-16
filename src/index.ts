@@ -15,7 +15,7 @@ import {
   getHeldTokens,
   MAX_CONCURRENT_POSITIONS,
 } from "./trader.js";
-import { isBearishSignal } from "./momentum-guard.js";
+import { isBearishSignal, shouldCloseHeldPosition } from "./momentum-guard.js";
 import { logger } from "./logger.js";
 import { filterRestorablePositions, loadState, saveState, TradeHistoryItem } from "./persistence.js";
 import { isDashboardReportingEnabled, reportTrade } from "./dashboard-reporter.js";
@@ -332,10 +332,14 @@ async function checkHeldPositionsForBearishExit(): Promise<void> {
     // call above was in flight.
     const position = getActivePositions().find((p) => p.tokenAddress === signal.token.address);
     if (!position) continue;
-    if (!isBearishSignal(signal.trendStrength, signal.momentum)) continue;
+    if (!shouldCloseHeldPosition(signal.trendStrength, signal.momentum, signal.confidence, CONFIG.holdExitConfidenceThreshold)) {
+      continue;
+    }
 
     logger.warn(
-      `📉 ${position.tokenSymbol}: model now reads trend=${signal.trendStrength} momentum=${signal.momentum} — closing position`
+      isBearishSignal(signal.trendStrength, signal.momentum)
+        ? `📉 ${position.tokenSymbol}: model now reads trend=${signal.trendStrength} momentum=${signal.momentum} — closing position`
+        : `📉 ${position.tokenSymbol}: re-analysis confidence fell to ${signal.confidence}% (<= ${CONFIG.holdExitConfidenceThreshold}%) — closing position`
     );
     try {
       const result = await executeSell(position, "AI_BEARISH", signal.token.priceUsd);
