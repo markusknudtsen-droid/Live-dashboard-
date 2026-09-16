@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isBearishSignal } from "../src/momentum-guard.js";
+import { isBearishSignal, shouldCloseHeldPosition } from "../src/momentum-guard.js";
 
 test("a down trend is bearish regardless of momentum label", () => {
   assert.equal(isBearishSignal("moderate_down", "steady"), true);
@@ -28,4 +28,13 @@ test("neutral trend with steady momentum is not bearish", () => {
 // locks in a safe default should that ever change.
 test("the instant-buy placeholder value 'unknown' is never bearish", () => {
   assert.equal(isBearishSignal("unknown", "unknown"), false);
+});
+
+test("shouldCloseHeldPosition: low confidence closes even on a neutral trend read", () => {
+  assert.equal(shouldCloseHeldPosition("neutral", "steady", 55, 55), true);
+  assert.equal(shouldCloseHeldPosition("neutral", "steady", 56, 55), false);
+});
+
+test("shouldCloseHeldPosition: a bearish trend still closes regardless of confidence", () => {
+  assert.equal(shouldCloseHeldPosition("strong_down", "steady", 90, 55), true);
 });

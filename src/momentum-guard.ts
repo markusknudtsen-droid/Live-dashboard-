@@ -27,3 +27,19 @@ export type Momentum = "accelerating" | "steady" | "decelerating" | "reversing" 
 export function isBearishSignal(trendStrength: TrendStrength, momentum: Momentum): boolean {
   return trendStrength === "moderate_down" || trendStrength === "strong_down" || momentum === "reversing";
 }
+
+/**
+ * Whether a held position should be closed on re-analysis: either the
+ * model's own trend/momentum reads bearish, or the model's confidence in the
+ * coin has fallen to (or below) the operator's hold-exit floor. Either is
+ * sufficient alone — a coin can lose conviction without yet reading as
+ * outright bearish.
+ */
+export function shouldCloseHeldPosition(
+  trendStrength: TrendStrength,
+  momentum: Momentum,
+  confidence: number,
+  lowConfidenceThreshold: number
+): boolean {
+  return isBearishSignal(trendStrength, momentum) || confidence <= lowConfidenceThreshold;
+}

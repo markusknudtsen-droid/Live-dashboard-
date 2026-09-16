@@ -127,6 +127,8 @@ export interface AppConfig {
   bearishBuyGuardEnabled: boolean;
   /** Re-checks held positions on this cadence and exits on a bearish read. 0 disables the sell side. */
   bearishExitRecheckMinutes: number;
+  /** A held position's re-analysis confidence at or below this closes it, same as a bearish trend/momentum read. */
+  holdExitConfidenceThreshold: number;
   /** Cooldown applied to a new coin instead of the full REENTRY_COOLDOWN_MINUTES. */
   newCoinReentryCooldownMinutes: number;
   /** Lifetime cap on buys of the same token. 0 disables the check. */
@@ -368,6 +370,7 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     newCoinCooldownExempt: parseBoolean(env.NEW_COIN_COOLDOWN_EXEMPT, false),
     bearishBuyGuardEnabled: parseBoolean(env.BEARISH_BUY_GUARD_ENABLED, true),
     bearishExitRecheckMinutes: parseNumberInRange("BEARISH_EXIT_RECHECK_MINUTES", env.BEARISH_EXIT_RECHECK_MINUTES, 3, 0, 1440),
+    holdExitConfidenceThreshold: parseNumberInRange("HOLD_EXIT_CONFIDENCE_THRESHOLD", env.HOLD_EXIT_CONFIDENCE_THRESHOLD, 55, 0, 100),
     newCoinReentryCooldownMinutes: parseNumberInRange("NEW_COIN_REENTRY_COOLDOWN_MINUTES", env.NEW_COIN_REENTRY_COOLDOWN_MINUTES, 2, 0, 1440),
     maxBuysPerToken: parseNumberInRange("MAX_BUYS_PER_TOKEN", env.MAX_BUYS_PER_TOKEN, 3, 0, 1000),
     reservedNewCoinSlots: parseNumberInRange("RESERVED_NEW_COIN_SLOTS", env.RESERVED_NEW_COIN_SLOTS, 1, 0, 100),
