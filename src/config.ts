@@ -111,6 +111,16 @@ export interface AppConfig {
    *  never done. */
   telegramScrapeChannels: string[];
   telegramScrapeIntervalSeconds: number;
+  /**
+   * Hard ceiling on candidate age, applied to every candidate in the scanner's
+   * initial filter. Was a hardcoded 168 (7 days), which let the bot spend its
+   * slots on week-old coins that had already made their move.
+   */
+  maxTokenAgeHours: number;
+  /** RugCheck RAW score above which a coin is rejected. See small-cap-gate.ts. */
+  maxRugCheckScoreRaw: number;
+  /** Reject any coin RugCheck flags with a danger-level risk. */
+  blockDangerRisks: boolean;
   /** Global dead-coin floor, applied to every candidate regardless of size. */
   minMarketCapUsd: number;
   /** Below this market cap, checkSmallCapGate() applies instead of the normal rug gate. */
@@ -357,6 +367,9 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       .map((c) => c.trim())
       .filter((c) => c.length > 0),
     telegramScrapeIntervalSeconds: parseNumberInRange("TELEGRAM_SCRAPE_INTERVAL_SECONDS", env.TELEGRAM_SCRAPE_INTERVAL_SECONDS, 45, 10, 3600),
+    maxTokenAgeHours: parseNumberInRange("MAX_TOKEN_AGE_HOURS", env.MAX_TOKEN_AGE_HOURS, 24, 0.01, 8760),
+    maxRugCheckScoreRaw: parseNumberInRange("MAX_RUGCHECK_SCORE_RAW", env.MAX_RUGCHECK_SCORE_RAW, 5000, 0, 10_000_000),
+    blockDangerRisks: parseBoolean(env.BLOCK_DANGER_RISKS, true),
     minMarketCapUsd: parseNumberInRange("MIN_MARKET_CAP_USD", env.MIN_MARKET_CAP_USD, 7000, 0, 100_000_000),
     smallCapMaxMarketCapUsd: parseNumberInRange("SMALL_CAP_MAX_MARKET_CAP_USD", env.SMALL_CAP_MAX_MARKET_CAP_USD, 40_000, 0, 100_000_000),
     smallCapMinHolders: parseNumberInRange("SMALL_CAP_MIN_HOLDERS", env.SMALL_CAP_MIN_HOLDERS, 60, 0, 1_000_000),

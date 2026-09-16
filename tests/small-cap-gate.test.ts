@@ -12,10 +12,14 @@ function goodReport(over: Partial<RugCheckReport> = {}): RugCheckReport {
     mintAuthorityDisabled: true,
     freezeAuthorityDisabled: true,
     totalHolders: 200,
+    hasHolderData: true,
     devHoldingPct: 3,
     insiderHoldingPct: 5,
     bundlerHoldingPct: 4,
     scoreNormalised: 20,
+    scoreRaw: 1,
+    rugged: false,
+    dangerRisks: [],
     ...over,
   };
 }
@@ -128,4 +132,69 @@ test("every threshold is independently configurable", () => {
   assert.equal(c.smallCapMaxMarketCapUsd, 50_000);
   assert.equal(c.smallCapMinHolders, 100);
   assert.equal(c.newCoinCooldownExempt, true);
+});
+
+// --- Checks added 2026-09-16 after a run of rugged buys. Values in these
+// tests are the real ones measured from api.rugcheck.xyz that day.
+
+test("RugCheck's own rugged flag blocks the buy outright", () => {
+  const r = checkSmallCapGate({ ...baseInput, rugCheck: goodReport({ rugged: true }) });
+  assert.equal(r.pass, false);
+  assert.match(r.reason ?? "", /rugged/i);
+});
+
+test("a danger-level risk blocks the buy — this is the unsellable-rug signal", () => {
+  // COOK carried exactly this and the position could not be exited.
+  const r = checkSmallCapGate({
+    ...baseInput,
+    rugCheck: goodReport({ dangerRisks: ["Large Amount of LP Unlocked"] }),
+  });
+  assert.equal(r.pass, false);
+  assert.match(r.reason ?? "", /Large Amount of LP Unlocked/);
+});
+
+test("danger risks can be turned off without disabling the rest of the gate", () => {
+  const r = checkSmallCapGate(
+    { ...baseInput, rugCheck: goodReport({ dangerRisks: ["Large Amount of LP Unlocked"] }) },
+    { ...DEFAULT_SMALL_CAP_GATE, blockDangerRisks: false }
+  );
+  assert.equal(r.pass, true);
+});
+
+test("the raw score catches what the normalised score misses", () => {
+  // PAIDLON: raw 10001 normalises to exactly 50, passing a "<=50" bar by zero
+  // margin. The raw bar is what actually rejects it.
+  const paidlon = goodReport({ scoreRaw: 10001, scoreNormalised: 50 });
+  assert.equal(checkSmallCapGate({ ...baseInput, rugCheck: paidlon }).pass, false);
+  // A genuinely clean token (measured raw 1) still passes.
+  assert.equal(checkSmallCapGate({ ...baseInput, rugCheck: goodReport({ scoreRaw: 1 }) }).pass, true);
+});
+
+test("raw-score boundary is inclusive", () => {
+  assert.equal(checkSmallCapGate({ ...baseInput, rugCheck: goodReport({ scoreRaw: 5000 }) }).pass, true);
+  assert.equal(checkSmallCapGate({ ...baseInput, rugCheck: goodReport({ scoreRaw: 5001 }) }).pass, false);
+});
+
+test("unindexed holder data does not reject a fresh coin", () => {
+  // A brand-new mint reports totalHolders: 0 with an empty topHolders[].
+  // Treating that as "0 holders" would block every new launch — the exact
+  // segment this bot is being pointed at.
+  const fresh = goodReport({ totalHolders: 0, hasHolderData: false, devHoldingPct: 0, insiderHoldingPct: 0 });
+  assert.equal(checkSmallCapGate({ ...baseInput, rugCheck: fresh }).pass, true);
+});
+
+test("but a coin WITH holder data is still held to the distribution limits", () => {
+  const concentrated = goodReport({ totalHolders: 120, hasHolderData: true, devHoldingPct: 40 });
+  const r = checkSmallCapGate({ ...baseInput, rugCheck: concentrated });
+  assert.equal(r.pass, false);
+  assert.match(r.reason ?? "", /dev holds/);
+});
+
+test("an unindexed coin is still screened on authorities and rugged flag", () => {
+  const fresh = { totalHolders: 0, hasHolderData: false } as Partial<RugCheckReport>;
+  assert.equal(
+    checkSmallCapGate({ ...baseInput, rugCheck: goodReport({ ...fresh, mintAuthorityDisabled: false }) }).pass,
+    false
+  );
+  assert.equal(checkSmallCapGate({ ...baseInput, rugCheck: goodReport({ ...fresh, rugged: true }) }).pass, false);
 });

@@ -332,7 +332,7 @@ export function passesInitialFilter(candidate: TokenCandidate): boolean {
   if (candidate.volume24h < 10000) return false;
   if (candidate.liquidityUsd < 5000) return false;
   if (candidate.buyToSellRatio < 0.45) return false;
-  if (candidate.ageHours > 168) return false;
+  if (candidate.ageHours > CONFIG.maxTokenAgeHours) return false;
   if (!candidate.address || candidate.address.length < 10) return false;
   if (!Number.isFinite(candidate.priceUsd) || candidate.priceUsd <= 0) return false;
   return true;
