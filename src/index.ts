@@ -30,7 +30,13 @@ import { adjustConfidence, checkRugGates, qualifiesForInstantBuy } from "./entry
 import { fetchRugCheckReport } from "./rugcheck.js";
 import { fetchNewPoolMints } from "./geckoterminal.js";
 import { checkSmallCapGate, isSmallCap, DEFAULT_SMALL_CAP_GATE } from "./small-cap-gate.js";
-import { fetchCreatorWallet, fetchDevReputation, devReputationBonus } from "./dev-reputation.js";
+import {
+  fetchCreatorWallet,
+  fetchDevReputation,
+  devReputationBonus,
+  fetchNewPumpMints,
+} from "./dev-reputation.js";
+import { extractBucket, pruneBucketExits, trendBonus, type BucketExit } from "./narrative-trend.js";
 import {
   canReenter,
   pruneExits,
@@ -91,6 +97,14 @@ let buyCounts: TokenBuyCount[] = [];
  */
 let boostSightings: BoostSightings = new Map();
 let boostBaselineTaken = false;
+
+/**
+ * Closed trades bucketed by keyword ("cat", "dog", ...), feeding the
+ * trend-following bonus. Deliberately NOT persisted, same reasoning as
+ * buyCounts above: a meta's win rate is a same-session observation, and
+ * yesterday's hot bucket is usually today's dead one.
+ */
+let recentBucketExits: BucketExit[] = [];
 
 /**
  * Retention window for pruneExits(). Must be at least as long as the LONGER
@@ -433,6 +447,25 @@ async function runCycle(): Promise<void> {
     }
   }
 
+  // pump.fun's own creation feed — the earliest a Solana meme coin is visible
+  // anywhere, well before DexScreener indexes a pool for it. Same
+  // discovery-only contract as GeckoTerminal above: mints in,
+  // resolveMintsToCandidates() supplies every real field, so a coin too new to
+  // have a resolvable pool simply drops out here instead of being traded on
+  // data nobody fetched.
+  if (CONFIG.pumpfunDiscoveryEnabled) {
+    const pumpMints = (await fetchNewPumpMints(CONFIG.pumpfunDiscoveryLimit)).filter(
+      (addr) => !candidates.some((c) => c.address === addr)
+    );
+    if (pumpMints.length > 0) {
+      const resolved = await resolveMintsToCandidates(pumpMints);
+      if (resolved.length > 0) {
+        logger.info(`💊 pump.fun: ${resolved.length} new mint(s) resolved to candidates`);
+      }
+      candidates = [...candidates, ...resolved];
+    }
+  }
+
   // Fold this poll into the boost sighting record BEFORE any buy decision, so
   // freshness is judged against when the bot actually first saw each boost.
   const now = Date.now();
@@ -688,6 +721,23 @@ async function runCycle(): Promise<void> {
         logger.info(
           `📡 ${s.token.symbol}: ${before}% → ${s.confidence}% (+${CONFIG.telegramMentionBonus} mentioned in ${sig.channel})`
         );
+      }
+    }
+  }
+
+  // Trend following, off the bot's own realised results: if recent closed
+  // trades in this coin's keyword bucket have been winning, nudge it up. Needs
+  // DEFAULT_TREND.minSamples closes in the bucket first, so it contributes
+  // nothing until the session has actually traded a meta a few times.
+  if (CONFIG.narrativeTrendEnabled) {
+    recentBucketExits = pruneBucketExits(recentBucketExits, Date.now());
+    for (const s of signals) {
+      const bucket = extractBucket(`${s.token.symbol} ${s.token.name}`);
+      const { bonus, reason } = trendBonus(bucket, recentBucketExits, Date.now());
+      if (bonus > 0) {
+        const before = s.confidence;
+        s.confidence = Math.min(100, s.confidence + bonus);
+        logger.info(`📈 ${s.token.symbol}: ${before}% → ${s.confidence}% (${reason})`);
       }
     }
   }
@@ -959,6 +1009,17 @@ async function main(): Promise<void> {
     void reportTrade(event);
     // Record every exit so the same coin cannot be re-bought on the next cycle.
     if (event.type === "SELL") {
+      // Feed the trend memory. TradeEvent carries no token name, so the bucket
+      // is matched on symbol alone here while the bonus side below matches
+      // symbol + name — a coin whose theme is only in its full name records
+      // nothing rather than recording wrong.
+      const exitBucket = extractBucket(event.symbol);
+      if (exitBucket) {
+        recentBucketExits = pruneBucketExits(
+          [...recentBucketExits, { bucket: exitBucket, pnlPercent: event.pnlPercent ?? 0, exitedAt: Date.now() }],
+          Date.now()
+        );
+      }
       recentExits = recordExit(recentExits, {
         tokenAddress: event.tokenAddress,
         tokenSymbol: event.symbol,

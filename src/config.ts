@@ -142,6 +142,11 @@ export interface AppConfig {
   geckoTerminalNewPoolsLimit: number;
   /** A candidate at or below this market cap qualifies for a reserved slot. */
   newCoinSlotMaxMarketCapUsd: number;
+  /** Bonus when a candidate's keyword bucket has been winning recently. */
+  narrativeTrendEnabled: boolean;
+  /** pump.fun's creation feed as a third candidate source. */
+  pumpfunDiscoveryEnabled: boolean;
+  pumpfunDiscoveryLimit: number;
   devReputationEnabled: boolean;
   devMinFollowers: number;
   devMinMigratedTokens: number;
@@ -376,6 +381,9 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     geckoTerminalEnabled: parseBoolean(env.GECKOTERMINAL_ENABLED, true),
     geckoTerminalNewPoolsLimit: parseNumberInRange("GECKOTERMINAL_NEW_POOLS_LIMIT", env.GECKOTERMINAL_NEW_POOLS_LIMIT, 20, 1, 100),
     newCoinSlotMaxMarketCapUsd: parseNumberInRange("NEW_COIN_SLOT_MAX_MARKET_CAP_USD", env.NEW_COIN_SLOT_MAX_MARKET_CAP_USD, 60_000, 0, 100_000_000),
+    narrativeTrendEnabled: parseBoolean(env.NARRATIVE_TREND_ENABLED, false),
+    pumpfunDiscoveryEnabled: parseBoolean(env.PUMPFUN_DISCOVERY_ENABLED, false),
+    pumpfunDiscoveryLimit: parseNumberInRange("PUMPFUN_DISCOVERY_LIMIT", env.PUMPFUN_DISCOVERY_LIMIT, 20, 1, 100),
     devReputationEnabled: parseBoolean(env.DEV_REPUTATION_ENABLED, false),
     devMinFollowers: parseNumberInRange("DEV_MIN_FOLLOWERS", env.DEV_MIN_FOLLOWERS, 2000, 0, 10_000_000),
     devMinMigratedTokens: parseNumberInRange("DEV_MIN_MIGRATED_TOKENS", env.DEV_MIN_MIGRATED_TOKENS, 3, 0, 10_000),
