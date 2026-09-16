@@ -157,6 +157,35 @@ export async function fetchDevReputation(
 }
 
 /**
+ * Newest pump.fun mints, newest first.
+ *
+ * Third discovery source, alongside DexScreener and GeckoTerminal. Verified
+ * live 2026-09-16: GET /coins?sort=created_timestamp&order=DESC returns coins
+ * seconds old, carrying mint/symbol/creator/created_timestamp inline.
+ *
+ * Discovery ONLY — returns mint addresses, exactly like geckoterminal.ts and
+ * for the same reason: a candidate built from this payload would carry no
+ * liquidity or paid-info data and would fail the RugCheck gate's social bar on
+ * data that was simply never fetched. The caller resolves these through
+ * resolveMintsToCandidates(), so every existing check still applies.
+ *
+ * `complete: true` means the bonding curve already finished, so the launch move
+ * is over — dropped here rather than wasting a resolve round-trip.
+ *
+ * Unofficial API, so the usual rule: any failure returns [], never throws.
+ */
+export async function fetchNewPumpMints(limit = 20, timeoutMs = 6000): Promise<string[]> {
+  const raw = await getJson(
+    `${PUMP_API}/coins?sort=created_timestamp&order=DESC&limit=${Math.max(1, Math.floor(limit))}`,
+    timeoutMs
+  );
+  if (!Array.isArray(raw)) return [];
+  return (raw as PumpCoin[])
+    .filter((c) => c?.complete !== true && typeof c?.mint === "string" && c.mint.length > 0)
+    .map((c) => c.mint as string);
+}
+
+/**
  * Resolve the creator wallet for a mint. Only pump.fun mints have one; anything
  * else returns undefined and simply gets no dev bonus.
  */
