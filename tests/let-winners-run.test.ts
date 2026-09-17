@@ -70,7 +70,9 @@ test("an unarmed trail leaves the fixed take-profit in force", () => {
 });
 
 test("the armed trail still exits once momentum breaks", () => {
-  // Ran to 200, trail 10% below peak = 180, price falls back to 179.
+  // Ran to 200 (+100%, >= 6x the 15% activation): tiered distance quarters
+  // 10% to 2.5%, so the trail sits at 195, not the old flat-10% 180 — a big
+  // runner now keeps more of its peak. Price falls back to 194.
   const trail = updateTrailingStop({
     entryPrice: 100,
     currentPrice: 200,
@@ -79,9 +81,9 @@ test("the armed trail still exits once momentum breaks", () => {
     activateAtPercent: 15,
     distancePercent: 10,
   });
-  assert.equal(trail.stopLoss, 180);
+  assert.equal(trail.stopLoss, 195);
   const exit = chooseExit({
-    currentPrice: 179,
+    currentPrice: 194,
     stopLoss: trail.stopLoss,
     takeProfit: 150,
     trailArmed: true,

@@ -48,6 +48,26 @@ function isPositive(n: number | undefined): n is number {
 }
 
 /**
+ * A big winner should give back LESS of its peak, not the same flat slice a
+ * modest one does. Measured live 2026-09-17: positions that only ever reached
+ * +10-15% (barely past a typical activation threshold) locked as little as
+ * +5-10% before the trail caught them — the flat 8% distance ate most of a
+ * thin gain. Positions that ran to +100%+ kept the bulk of it, because the
+ * same flat 8% is a much smaller bite out of a much bigger number.
+ *
+ * ponytail: two hardcoded tiers (half distance at 3x activation, quarter at
+ * 6x), not a configurable curve — nobody has asked to tune the multipliers
+ * themselves, only for big runners to give back less. Revisit if that changes.
+ */
+function effectiveDistance(peakGainPercent: number, activateAtPercent: number, distancePercent: number): number {
+  if (activateAtPercent > 0) {
+    if (peakGainPercent >= activateAtPercent * 6) return distancePercent / 4;
+    if (peakGainPercent >= activateAtPercent * 3) return distancePercent / 2;
+  }
+  return distancePercent;
+}
+
+/**
  * Compute the peak and stop for a position at a new price.
  *
  * Returns the stop unchanged (raised: false) whenever the numbers are unusable,
@@ -86,7 +106,8 @@ export function updateTrailingStop(input: TrailingStopInputs): TrailingStopResul
   // would arm and still exit at a loss — the exact outcome it exists to
   // prevent. Once a position has proven itself by reaching the activation
   // gain, it must never be allowed to become a losing trade.
-  const trailed = Math.max(peakPrice * (1 - distancePercent / 100), entryPrice);
+  const distance = effectiveDistance(peakGainPercent, activateAtPercent, distancePercent);
+  const trailed = Math.max(peakPrice * (1 - distance / 100), entryPrice);
 
   // Ratchet: only ever raise. Also never at or above the current price, which
   // would trigger an exit at a level the market has not actually reached.
