@@ -12,8 +12,13 @@
     "dev": "tsx watch src/index.ts",
     "scan": "tsx src/scanner.ts",
     "analyze": "tsx src/analyze.ts",
+    "paper-sim": "tsx src/paper-sim.ts",
+    "mcp": "tsx src/mcp-server.ts",
+    "mcp:start": "node dist/mcp-server.js",
     "inspect-web": "tsx src/web-audit.ts",
     "trade": "tsx src/index.ts",
+    "api": "tsx src/api.ts",
+    "check-key": "tsx src/check-openrouter-key.ts",
     "test": "tsx --test tests/*.test.ts",
     "server:dev": "tsx watch server/index.ts",
     "server:build": "tsc -p tsconfig.server.json",
@@ -21,9 +26,11 @@
     "web:dev": "npm --prefix web run dev",
     "web:build": "npm --prefix web run build",
     "web:install": "npm --prefix web install",
-    "hash-password": "tsx server/hash-password.ts"
+    "hash-password": "tsx server/hash-password.ts",
+    "telegram-login": "tsx scripts/telegram-login.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@solana/spl-token": "^0.4.0",
     "@solana/web3.js": "^1.95.0",
     "axios": "^1.7.0",
@@ -33,7 +40,10 @@
     "dotenv": "^16.4.0",
     "express": "^5.2.1",
     "express-rate-limit": "^8.5.2",
-    "jsonwebtoken": "^9.0.3"
+    "ipaddr.js": "^2.5.0",
+    "jsonwebtoken": "^9.0.3",
+    "telegram": "^2.26.22",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/cookie-parser": "^1.4.10",
