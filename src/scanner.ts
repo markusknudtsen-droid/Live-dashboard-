@@ -1,6 +1,7 @@
 import { CONFIG } from "./config.js";
 import { httpGet } from "./http.js";
 import { logger } from "./logger.js";
+import { sanitizeDisplayText } from "./text-sanitize.js";
 
 export interface TokenCandidate {
   address: string;
@@ -24,6 +25,12 @@ export interface TokenCandidate {
   ageHours: number;
   boostAmount?: number;
   url: string;
+  /** True when the token has an X/Twitter link in DexScreener's paid info. */
+  hasXSocial: boolean;
+  /** True when it has a non-X social or website, but no X link. */
+  hasOtherSocial: boolean;
+  /** True when any paid DexScreener info (site or social) is present. */
+  hasPaidDexInfo: boolean;
 }
 
 interface DexTokenBoost {
@@ -66,6 +73,17 @@ export interface DexPair {
   fdv?: number;
   pairCreatedAt?: number;
   url?: string;
+  /**
+   * Present only once a project has paid for DexScreener's "Update Token
+   * Info" listing — imageUrl/header can be pulled from on-chain Metaplex
+   * metadata for free, but websites/socials cannot: a mint has no on-chain
+   * concept of a Twitter link, so their presence is real evidence someone
+   * paid for the listing, not an artifact of any free/default token data.
+   */
+  info?: {
+    websites?: { url?: string; label?: string }[];
+    socials?: { url?: string; type?: string }[];
+  };
 }
 
 interface DexSearchResponse {
@@ -81,13 +99,98 @@ function asNumber(value: string | number | undefined, fallback = 0): number {
  * Scan DexScreener for high-potential memecoin candidates
  * Filters: volume > $10k, liquidity > $5k, age < 72h, buy ratio > 55%
  */
+/**
+ * A candidate is worth analysing if it clears the established-coin bar OR the
+ * new-coin bar. Keeping them as two separate tests (rather than loosening the
+ * one filter) means an established coin still has to prove real trailing
+ * volume, while a fresh one is judged on depth and live momentum instead.
+ */
+function isWorthAnalysing(c: TokenCandidate): boolean {
+  if (passesInitialFilter(c)) return true;
+  if (!CONFIG.watchNewCoins) return false;
+  return passesNewCoinFilter(
+    c,
+    CONFIG.newCoinMaxAgeHours,
+    CONFIG.minLiquidityUsd,
+    CONFIG.newCoinMinMomentumPercent
+  );
+}
+
+async function fetchCandidateForMint(mint: string): Promise<TokenCandidate | null> {
+  try {
+    const pairs = await httpGet<DexPair[]>(`${CONFIG.dexScreenerApiUrl}/tokens/v1/solana/${mint}`);
+    if (!pairs?.length) return null;
+    return parsePairToCandidate(pairs[0]);
+  } catch {
+    logger.debug(`Could not resolve mint ${mint} to a candidate`);
+    return null;
+  }
+}
+
+/**
+ * Resolve a set of mint addresses (e.g. from Telegram) into candidates via the
+ * same DexScreener pair lookup already used for boosted tokens, and route them
+ * through isWorthAnalysing() — a Telegram mention must clear the same
+ * liquidity/volume/age bars as anything else, never bypass them.
+ */
+export async function resolveMintsToCandidates(mints: string[]): Promise<TokenCandidate[]> {
+  const out: TokenCandidate[] = [];
+  for (const mint of mints.slice(0, 10)) {
+    const candidate = await fetchCandidateForMint(mint);
+    if (candidate && isWorthAnalysing(candidate)) out.push(candidate);
+  }
+  return out;
+}
+
+/**
+ * Same lookup as resolveMintsToCandidates, but WITHOUT the isWorthAnalysing
+ * filter — for re-checking tokens the bot already holds. A held position must
+ * stay checkable however far it degrades; filtering it out the moment it stops
+ * looking like a fresh buy candidate would silently stop watching it right
+ * when watching it matters most.
+ */
+export async function resolveMintsUnfiltered(mints: string[]): Promise<TokenCandidate[]> {
+  const out: TokenCandidate[] = [];
+  for (const mint of mints.slice(0, 10)) {
+    const candidate = await fetchCandidateForMint(mint);
+    if (candidate) out.push(candidate);
+  }
+  return out;
+}
+
 export async function scanForCandidates(): Promise<TokenCandidate[]> {
   const candidates: TokenCandidate[] = [];
 
   try {
-    const boostedTokens = await httpGet<DexTokenBoost[]>(`${CONFIG.dexScreenerApiUrl}/token-boosts/top/v1`);
+    // Two boost feeds, deliberately. `top` is the leaderboard — a coin only
+    // appears once it has already climbed it, which is late by definition and
+    // is why entries have been landing after 400-800% moves. `latest` carries
+    // boosts as they are purchased, and is the only feed that can see a coin at
+    // the moment it gets boosted. Failures are independent: one feed being down
+    // must not blind the scanner to the other.
+    const [topBoosts, latestBoosts] = await Promise.all([
+      httpGet<DexTokenBoost[]>(`${CONFIG.dexScreenerApiUrl}/token-boosts/top/v1`).catch(() => {
+        logger.debug("Top boosts feed unavailable.");
+        return [] as DexTokenBoost[];
+      }),
+      httpGet<DexTokenBoost[]>(`${CONFIG.dexScreenerApiUrl}/token-boosts/latest/v1`).catch(() => {
+        logger.debug("Latest boosts feed unavailable.");
+        return [] as DexTokenBoost[];
+      }),
+    ]);
 
-    const relevantBoosted = (boostedTokens || []).filter((t) => CONFIG.scanChains.includes(String(t.chainId || "").toLowerCase()));
+    // Latest first so a freshly boosted coin wins de-duplication and keeps its
+    // own (newer) boost amount.
+    const seenBoosted = new Set<string>();
+    const boostedTokens: DexTokenBoost[] = [];
+    for (const t of [...(latestBoosts || []), ...(topBoosts || [])]) {
+      const key = `${t.chainId}:${t.tokenAddress}`;
+      if (!t.tokenAddress || seenBoosted.has(key)) continue;
+      seenBoosted.add(key);
+      boostedTokens.push(t);
+    }
+
+    const relevantBoosted = boostedTokens.filter((t) => CONFIG.scanChains.includes(String(t.chainId || "").toLowerCase()));
 
     for (const token of relevantBoosted.slice(0, 20)) {
       try {
@@ -97,7 +200,7 @@ export async function scanForCandidates(): Promise<TokenCandidate[]> {
         if (pairs.length > 0) {
           const pair = pairs[0];
           const candidate = parsePairToCandidate(pair, token.totalAmount || token.amount);
-          if (candidate && passesInitialFilter(candidate)) {
+          if (candidate && isWorthAnalysing(candidate)) {
             candidates.push(candidate);
           }
         }
@@ -117,7 +220,7 @@ export async function scanForCandidates(): Promise<TokenCandidate[]> {
         const memePairs = memeSearch.pairs || [];
         for (const pair of memePairs.slice(0, 15)) {
           const candidate = parsePairToCandidate(pair);
-          if (candidate && passesInitialFilter(candidate) && !candidates.find((c) => c.address === candidate.address)) {
+          if (candidate && isWorthAnalysing(candidate) && !candidates.find((c) => c.address === candidate.address)) {
             candidates.push(candidate);
           }
         }
@@ -147,10 +250,23 @@ export function parsePairToCandidate(pair: DexPair, boostAmount?: number): Token
     const ageMs = pairCreatedAt ? Date.now() - pairCreatedAt : Infinity;
     const ageHours = ageMs / (1000 * 60 * 60);
 
+    const socials = pair.info?.socials ?? [];
+    const websites = pair.info?.websites ?? [];
+    const hasXSocial = socials.some((s) => /twitter|^x$/i.test(s.type ?? ""));
+    const hasAnyInfo = socials.length > 0 || websites.length > 0;
+
     return {
       address: pair.baseToken?.address || "",
-      symbol: pair.baseToken?.symbol || "?",
-      name: pair.baseToken?.name || "Unknown",
+      // The "?"/"Unknown" fallback guards a missing/empty raw value, but a
+      // non-empty raw value made ENTIRELY of control/format characters (or
+      // whitespace) is truthy — so it skips that fallback — and then
+      // sanitization can still collapse it to "". Re-apply the fallback
+      // after sanitizing so that case can't produce an empty tokenSymbol: a
+      // real BUY persisted with one would fail isRestorablePosition's
+      // non-empty-string check after a restart, leaving an actual open
+      // position unrestorable and unmonitored.
+      symbol: sanitizeDisplayText(pair.baseToken?.symbol || "?") || "?",
+      name: sanitizeDisplayText(pair.baseToken?.name || "Unknown") || "Unknown",
       chainId: pair.chainId || "solana",
       pairAddress: pair.pairAddress || "",
       priceUsd,
@@ -169,6 +285,9 @@ export function parsePairToCandidate(pair: DexPair, boostAmount?: number): Token
       ageHours,
       boostAmount,
       url: pair.url || `https://dexscreener.com/${pair.chainId}/${pair.pairAddress}`,
+      hasXSocial,
+      hasOtherSocial: hasAnyInfo && !hasXSocial,
+      hasPaidDexInfo: hasAnyInfo,
     };
   } catch {
     return null;
@@ -178,11 +297,42 @@ export function parsePairToCandidate(pair: DexPair, boostAmount?: number): Token
 /**
  * Initial filter to remove obvious bad candidates before AI analysis
  */
+/**
+ * A young coin cannot satisfy the standard filter, and that is not a tuning
+ * problem — it is arithmetic. volume24h is a TRAILING 24-hour figure, so a coin
+ * minutes old has almost none of it no matter how hard it is trading right now.
+ * Requiring $10k of it makes freshly-launched tokens structurally invisible,
+ * which is why the candidate pool kept returning the same established coins
+ * (11 unique tokens across an entire run, several analysed 70+ times) and why
+ * entries kept landing on coins already up hundreds of percent.
+ *
+ * New coins are therefore judged on what they CAN evidence at their age:
+ * real depth to trade against, and current momentum — not trailing volume.
+ */
+export function passesNewCoinFilter(
+  candidate: TokenCandidate,
+  maxAgeHours: number,
+  minLiquidityUsd: number,
+  minMomentumPercent: number
+): boolean {
+  if (!Number.isFinite(candidate.ageHours) || candidate.ageHours > maxAgeHours) return false;
+  // Liquidity is the one hard requirement that does not relax with age: it is
+  // what decides whether a position can be exited at all.
+  if (candidate.liquidityUsd < minLiquidityUsd) return false;
+  if (!candidate.address || candidate.address.length < 10) return false;
+  if (!Number.isFinite(candidate.priceUsd) || candidate.priceUsd <= 0) return false;
+
+  // Momentum over the shortest windows available, since longer ones are as
+  // meaningless as volume24h at this age.
+  const momentum = Math.max(candidate.priceChange5m, candidate.priceChange1h);
+  return Number.isFinite(momentum) && momentum >= minMomentumPercent;
+}
+
 export function passesInitialFilter(candidate: TokenCandidate): boolean {
   if (candidate.volume24h < 10000) return false;
   if (candidate.liquidityUsd < 5000) return false;
   if (candidate.buyToSellRatio < 0.45) return false;
-  if (candidate.ageHours > 168) return false;
+  if (candidate.ageHours > CONFIG.maxTokenAgeHours) return false;
   if (!candidate.address || candidate.address.length < 10) return false;
   if (!Number.isFinite(candidate.priceUsd) || candidate.priceUsd <= 0) return false;
   return true;

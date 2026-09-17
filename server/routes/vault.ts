@@ -6,6 +6,7 @@ import { loadSettings } from "../../src/settingsStore.js";
 import { getActiveKeypair } from "../walletSigner.js";
 import { SERVER_CONFIG } from "../env.js";
 import { safeCompare } from "../password.js";
+import { checkWithdrawalDestination } from "../withdrawalPolicy.js";
 import rateLimit from "express-rate-limit";
 
 const router = Router();
@@ -69,6 +70,17 @@ router.post("/withdraw", withdrawLimiter, async (req, res) => {
     destinationPubkey = new PublicKey(destinationAddress);
   } catch {
     res.status(400).json({ error: "destinationAddress is not a valid Solana public key." });
+    return;
+  }
+
+  // Compare the normalised address so no alternative encoding of the same input
+  // can slip past the allowlist.
+  const destinationError = checkWithdrawalDestination(
+    destinationPubkey.toBase58(),
+    SERVER_CONFIG.withdrawalAllowlistAddress
+  );
+  if (destinationError) {
+    res.status(403).json({ error: destinationError });
     return;
   }
 
