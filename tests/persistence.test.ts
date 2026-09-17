@@ -106,6 +106,56 @@ test("saveState/loadState round-trips firstTradeValidated (true and false)", asy
   assert.equal((await loadState()).firstTradeValidated, false);
 });
 
+// The bug this guards: parseStateFile rebuilt BotState field by field and
+// simply left recentExits out, so it was written to disk but never read back.
+// Every restart started with an empty block list, and a coin that had just
+// rugged was immediately buyable again (2026-09-17, Schrodinger, -98%).
+test("saveState/loadState round-trips recentExits so re-entry blocks survive a restart", async () => {
+  const exit = {
+    tokenAddress: "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+    tokenSymbol: "BONK",
+    exitedAt: 1789567200000,
+    wasLoss: true,
+  };
+  await saveState({ activePositions: [], tradeHistory: [], firstTradeValidated: null, recentExits: [exit] });
+  assert.deepEqual((await loadState()).recentExits, [exit]);
+});
+
+test("loadState treats a malformed recentExits value as empty instead of crashing or trusting it", async () => {
+  await writeFile(
+    process.env.BOT_STATE_FILE!,
+    JSON.stringify({ activePositions: [], tradeHistory: [], firstTradeValidated: null, recentExits: "nope" }),
+    "utf-8"
+  );
+  assert.deepEqual((await loadState()).recentExits, []);
+});
+
+// canReenter() builds its block reason from this symbol and index.ts logs that
+// reason verbatim, so a restored entry reaches a log line without passing
+// through the open-position path that normally sanitizes.
+test("loadState sanitizes a tokenSymbol restored from recentExits", async () => {
+  await writeFile(
+    process.env.BOT_STATE_FILE!,
+    JSON.stringify({
+      activePositions: [],
+      tradeHistory: [],
+      firstTradeValidated: null,
+      recentExits: [
+        {
+          tokenAddress: "So11111111111111111111111111111111111111112",
+          tokenSymbol: "AB[31mCD",
+          exitedAt: 1789567200000,
+          wasLoss: true,
+        },
+      ],
+    }),
+    "utf-8"
+  );
+  const restored = (await loadState()).recentExits!;
+  assert.equal(restored.length, 1);
+  assert.ok(!restored[0].tokenSymbol.includes(""), "escape sequence survived sanitization");
+});
+
 test("loadState treats a malformed firstTradeValidated value as null instead of trusting it", async () => {
   await writeFile(
     process.env.BOT_STATE_FILE!,
