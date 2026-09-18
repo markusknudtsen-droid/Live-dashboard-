@@ -49,6 +49,20 @@ export interface ActivePosition {
    * seeded from entryPrice on first evaluation.
    */
   peakPrice?: number;
+  /**
+   * Raw base-unit quantity of the token actually received at buy time, from
+   * the Jupiter swap's own outAmount. Every sell caps at min(wallet balance,
+   * this value) instead of sweeping the wallet's whole balance of the mint.
+   *
+   * 2026-09-17: a manually-bought $SOF position shared the bot's wallet with
+   * the bot's own $SOF position. The bot's stop-loss/partial-take-profit read
+   * getTokenAccountsByOwner and sold the ENTIRE wallet balance of the mint,
+   * taking the operator's manually-held tokens along with its own. Recording
+   * what THIS position actually bought, and never selling more than that, is
+   * the fix. Optional: a position restored from state persisted before this
+   * field existed falls back to the old whole-wallet-balance behaviour.
+   */
+  tokenAmountRaw?: string;
   /** Set once the deferral message has been logged, to keep it to one line. */
   takeProfitDeferredLogged?: boolean;
   /**
@@ -71,6 +85,18 @@ export interface ActivePosition {
 
 interface DexPairPrice {
   priceUsd?: string | number;
+}
+
+/**
+ * The raw base-unit amount to sell for a position: never more than the
+ * wallet actually holds, and never more than this position itself recorded
+ * having bought. Exported so the cap can be exercised without a live RPC
+ * connection or Jupiter round-trip - see tokenAmountRaw's doc comment for
+ * the failure ($SOF, 2026-09-17) this replaces.
+ */
+export function capSellAmount(walletRaw: bigint, positionRaw: bigint | undefined): bigint {
+  if (positionRaw === undefined) return walletRaw;
+  return positionRaw < walletRaw ? positionRaw : walletRaw;
 }
 
 /**
@@ -507,6 +533,9 @@ async function executeBuyLocked(signal: TradeSignal): Promise<TradeResult> {
       entryTime: Date.now(),
       pnlPercent: 0,
       txSignature,
+      // The quote is already validated (outAmount present, > 0) before this
+      // point is reached - see getJupiterQuote's own checks.
+      tokenAmountRaw: order.outAmount,
       enteredAsNewCoin: token.marketCap < CONFIG.newCoinSlotMaxMarketCapUsd,
     });
 
@@ -666,9 +695,12 @@ async function executeSellPartialLocked(
     const tokenAccounts = await connection.getParsedTokenAccountsByOwner(wallet.publicKey, { mint: tokenMint });
     if (tokenAccounts.value.length === 0) return failure("No token balance found");
 
-    // Raw base units. Floor rather than round, so the quote can never ask for
-    // more than the wallet actually holds.
-    const rawBalance = BigInt(tokenAccounts.value[0].account.data.parsed.info.tokenAmount.amount);
+    // Raw base units, capped at this position's own recorded amount (see
+    // tokenAmountRaw's doc comment) rather than the wallet's whole balance of
+    // the mint - the same fix as the full sell path. Floor rather than round,
+    // so the quote can never ask for more than is actually available.
+    const walletRawBalance = BigInt(tokenAccounts.value[0].account.data.parsed.info.tokenAmount.amount);
+    const rawBalance = capSellAmount(walletRawBalance, position.tokenAmountRaw ? BigInt(position.tokenAmountRaw) : undefined);
     const rawToSell = (rawBalance * BigInt(Math.round(fraction * 10_000))) / 10_000n;
     if (rawToSell <= 0n) return failure("Partial sell amount rounds to zero");
 
@@ -693,6 +725,13 @@ async function executeSellPartialLocked(
     // fire again on a later tick.
     position.amountSol -= soldSol;
     position.partialTakeProfitTaken = true;
+    // Shrink the recorded amount by exactly what was sold, so a later full
+    // sell of the remainder is still capped against what THIS position
+    // actually has left, not the wallet's whole balance of the mint.
+    if (position.tokenAmountRaw) {
+      const remaining = BigInt(position.tokenAmountRaw) - rawToSell;
+      position.tokenAmountRaw = (remaining > 0n ? remaining : 0n).toString();
+    }
 
     logger.info(`✅ Banked ${soldSol.toFixed(4)} SOL of ${position.tokenSymbol}! TX: ${execution.signature}`);
     logger.info(`   ${position.amountSol.toFixed(4)} SOL still running in ${position.tokenSymbol}.`);
@@ -838,7 +877,24 @@ async function executeSellLocked(position: ActivePosition, reason: string, markP
       };
     }
 
-    const tokenBalance = tokenAccounts.value[0].account.data.parsed.info.tokenAmount.amount;
+    // Cap at this position's own recorded amount, never the whole wallet
+    // balance of the mint - see tokenAmountRaw's doc comment for why. Falls
+    // back to the old whole-balance behaviour only when the position predates
+    // this field (nothing recorded to cap against).
+    const walletRaw = BigInt(tokenAccounts.value[0].account.data.parsed.info.tokenAmount.amount);
+    const sellRaw = capSellAmount(walletRaw, position.tokenAmountRaw ? BigInt(position.tokenAmountRaw) : undefined);
+    if (sellRaw <= 0n) {
+      return {
+        success: false,
+        entryPrice: position.entryPrice,
+        amountSol: position.amountSol,
+        tokenAddress: position.tokenAddress,
+        tokenSymbol: position.tokenSymbol,
+        timestamp: Date.now(),
+        error: "Recorded position amount is zero or the wallet holds none of this mint",
+      };
+    }
+    const tokenBalance = sellRaw.toString();
     const order = await getJupiterQuote(position.tokenAddress, SOL_MINT, tokenBalance, wallet.publicKey.toBase58());
     if (!order?.transaction || !order.requestId) {
       return {
