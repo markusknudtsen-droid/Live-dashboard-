@@ -107,6 +107,14 @@ interface DexPairPrice {
  * connection or Jupiter round-trip - see tokenAmountRaw's doc comment for
  * the failure ($SOF, 2026-09-17) this replaces.
  */
+/**
+ * Positions already warned about an inert rug exit, so the warning is emitted
+ * once per position instead of on every monitoring cycle. Cleared for a token
+ * as soon as a valid liquidity reading arrives, so a feed that recovers and
+ * then fails again warns again.
+ */
+const rugExitInertWarned = new Set<string>();
+
 export function capSellAmount(walletRaw: bigint, positionRaw: bigint | undefined): bigint {
   if (positionRaw === undefined) return walletRaw;
   return positionRaw < walletRaw ? positionRaw : walletRaw;
@@ -713,6 +721,15 @@ async function executeSellPartialLocked(
     // the mint - the same fix as the full sell path. Floor rather than round,
     // so the quote can never ask for more than is actually available.
     const walletRawBalance = BigInt(tokenAccounts.value[0].account.data.parsed.info.tokenAmount.amount);
+    // Same fallback warning as the full-sell path: without a recorded buy
+    // quantity this partial is a fraction of the WHOLE wallet balance, which
+    // would take a slice of any manually-held tokens of the same mint too.
+    if (!position.tokenAmountRaw) {
+      logger.warn(
+        `⚠️  ${position.tokenSymbol}: no recorded buy quantity — partial sell is sized off the wallet's ENTIRE ` +
+          `balance of this mint, including any manually-held tokens.`
+      );
+    }
     const rawBalance = capSellAmount(walletRawBalance, position.tokenAmountRaw ? BigInt(position.tokenAmountRaw) : undefined);
     const rawToSell = (rawBalance * BigInt(Math.round(fraction * 10_000))) / 10_000n;
     if (rawToSell <= 0n) return failure("Partial sell amount rounds to zero");
@@ -895,6 +912,16 @@ async function executeSellLocked(position: ActivePosition, reason: string, markP
     // back to the old whole-balance behaviour only when the position predates
     // this field (nothing recorded to cap against).
     const walletRaw = BigInt(tokenAccounts.value[0].account.data.parsed.info.tokenAmount.amount);
+    // Falling back means selling the wallet's WHOLE balance of this mint —
+    // the pre-fix behaviour that took a manually-held $SOF position on
+    // 2026-09-17. It is the safe choice for an old position (the alternative
+    // is failing to sell at all), but the operator should know it happened.
+    if (!position.tokenAmountRaw) {
+      logger.warn(
+        `⚠️  ${position.tokenSymbol}: no recorded buy quantity — selling the wallet's ENTIRE balance of this ` +
+          `mint. Any manually-held tokens of the same coin will be sold with it.`
+      );
+    }
     const sellRaw = capSellAmount(walletRaw, position.tokenAmountRaw ? BigInt(position.tokenAmountRaw) : undefined);
     if (sellRaw <= 0n) {
       return {
@@ -1128,6 +1155,24 @@ export async function evaluatePositionAtPrice(
   // no ratchet logic can defer it, and it never consults the model: the 5-15s
   // AI round-trip is exactly what turned Schrodinger into -98.28%.
   if (CONFIG.rugExitEnabled) {
+    // A rug exit that can never fire looks exactly like a rug that never
+    // happened: both are silence. If the feed gives us no liquidity for this
+    // position, the drain check below is inert for it and the operator has no
+    // way to know their protection is off. Say so once per position — once,
+    // because monitoring re-evaluates every cycle and this would otherwise
+    // repeat every few seconds for the life of the position.
+    if (typeof currentLiquidityUsd !== "number" || !Number.isFinite(currentLiquidityUsd)) {
+      if (!rugExitInertWarned.has(position.tokenAddress)) {
+        rugExitInertWarned.add(position.tokenAddress);
+        logger.warn(
+          `⚠️  ${position.tokenSymbol}: no liquidity reading from the price feed — rug exit is INERT for this ` +
+            `position (stop-loss and trailing stop still apply).`
+        );
+      }
+    } else {
+      rugExitInertWarned.delete(position.tokenAddress);
+    }
+
     position.peakLiquidityUsd = updatePeakLiquidity(position.peakLiquidityUsd, currentLiquidityUsd);
 
     const rug = shouldExitOnLiquidityDrop(position.peakLiquidityUsd, currentLiquidityUsd, {
