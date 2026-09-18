@@ -43,6 +43,10 @@ export interface AppConfig {
   /** Hard entry gates: off by default. */
   rugGatesEnabled: boolean;
   minLiquidityUsd: number;
+  /** Exit a held position when its pool drains this far below its own peak. */
+  rugExitLiquidityDropPercent: number;
+  /** Master switch for liquidity-drain rug detection on held positions. */
+  rugExitEnabled: boolean;
   holderCheckMinMarketCapUsd: number;
   maxTopHolderPercent: number;
   /** Confidence modifiers from age/socials/boost: off by default. */
@@ -322,6 +326,18 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     ),
     rugGatesEnabled: parseBoolean(env.RUG_GATES_ENABLED, false),
     minLiquidityUsd: parseNumberInRange("MIN_LIQUIDITY_USD", env.MIN_LIQUIDITY_USD, 5000, 0, 100_000_000),
+    // Defaults on: a drained pool is the one exit signal that is never a false
+    // alarm worth ignoring, and it costs no extra API call to watch.
+    rugExitEnabled: parseBoolean(env.RUG_EXIT_ENABLED, true),
+    // Floor of 5 keeps this from being set so tight that ordinary swap noise
+    // closes healthy positions; 99 keeps it from being disabled by stealth.
+    rugExitLiquidityDropPercent: parseNumberInRange(
+      "RUG_EXIT_LIQUIDITY_DROP_PERCENT",
+      env.RUG_EXIT_LIQUIDITY_DROP_PERCENT,
+      40,
+      5,
+      99
+    ),
     holderCheckMinMarketCapUsd: parseNumberInRange(
       "HOLDER_CHECK_MIN_MARKET_CAP_USD",
       env.HOLDER_CHECK_MIN_MARKET_CAP_USD,

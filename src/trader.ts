@@ -11,6 +11,7 @@ import {
 import bs58 from "bs58";
 import { randomBytes } from "node:crypto";
 import { CONFIG } from "./config.js";
+import { shouldExitOnLiquidityDrop, updatePeakLiquidity, DEFAULT_RUG_EXIT } from "./rug-exit.js";
 import { updateTrailingStop } from "./trailing-stop.js";
 import { decideSweep } from "./profit-sweep.js";
 import { TradeSignal } from "./analyze.js";
@@ -49,6 +50,12 @@ export interface ActivePosition {
    * seeded from entryPrice on first evaluation.
    */
   peakPrice?: number;
+  /**
+   * Highest pool liquidity (USD) seen since entry, used by the rug exit.
+   * Optional so positions persisted before rug detection existed still
+   * rehydrate; it is seeded from the first valid reading.
+   */
+  peakLiquidityUsd?: number;
   /** Set once the deferral message has been logged, to keep it to one line. */
   takeProfitDeferredLogged?: boolean;
   /**
@@ -71,6 +78,12 @@ export interface ActivePosition {
 
 interface DexPairPrice {
   priceUsd?: string | number;
+  /**
+   * DexScreener has always sent this on the same payload monitorPositions()
+   * already fetches; it simply was not read. Watching it is what lets a drain
+   * be seen as it happens instead of inferred from price afterwards.
+   */
+  liquidity?: { usd?: string | number };
 }
 
 /**
@@ -1007,7 +1020,12 @@ export async function monitorPositions(): Promise<void> {
       if (!pairs.length) continue;
 
       const currentPrice = Number(pairs[0].priceUsd || 0);
-      await evaluatePositionAtPrice(position, currentPrice);
+      // Deliberately NOT `|| 0`: a missing field must stay undefined so the rug
+      // check can tell "unreadable" from "the pool is actually gone". Coercing
+      // it to 0 would panic-sell every position on any partial API response.
+      const rawLiquidity = pairs[0].liquidity?.usd;
+      const currentLiquidityUsd = rawLiquidity === undefined || rawLiquidity === null ? undefined : Number(rawLiquidity);
+      await evaluatePositionAtPrice(position, currentPrice, currentLiquidityUsd);
 
       await new Promise((r) => setTimeout(r, 500));
     } catch {
@@ -1022,7 +1040,11 @@ export async function monitorPositions(): Promise<void> {
  * DexScreener price fetch in monitorPositions so the exit logic can be exercised
  * without any network access (used by the paper-trading simulation and tests).
  */
-export async function evaluatePositionAtPrice(position: ActivePosition, currentPrice: number): Promise<void> {
+export async function evaluatePositionAtPrice(
+  position: ActivePosition,
+  currentPrice: number,
+  currentLiquidityUsd?: number
+): Promise<void> {
   if (!Number.isFinite(currentPrice) || currentPrice <= 0) {
     logger.warn(`Skipping invalid price for ${position.tokenSymbol}`);
     return;
@@ -1042,6 +1064,28 @@ export async function evaluatePositionAtPrice(position: ActivePosition, currentP
   logger.info(
     `${position.tokenSymbol}: $${currentPrice.toFixed(10)} (${position.pnlPercent >= 0 ? "+" : ""}${position.pnlPercent.toFixed(2)}%)`
   );
+
+  // A draining pool outranks every other exit. Stop-loss, take-profit and the
+  // partial all reason about price, and during a rug the price is the last
+  // thing to tell the truth — the pool empties first and whatever is left to
+  // sell into disappears with it. This runs before the trailing-stop update so
+  // no ratchet logic can defer it, and it never consults the model: the 5-15s
+  // AI round-trip is exactly what turned Schrodinger into -98.28%.
+  if (CONFIG.rugExitEnabled) {
+    position.peakLiquidityUsd = updatePeakLiquidity(position.peakLiquidityUsd, currentLiquidityUsd);
+
+    const rug = shouldExitOnLiquidityDrop(position.peakLiquidityUsd, currentLiquidityUsd, {
+      liquidityDropPercent: CONFIG.rugExitLiquidityDropPercent,
+      minTrackedLiquidityUsd: DEFAULT_RUG_EXIT.minTrackedLiquidityUsd,
+    });
+
+    if (rug.exit) {
+      logger.warn(`🚨 RUG EXIT for ${position.tokenSymbol}: ${rug.reason} — selling now, no model call.`);
+      const rugResult = await executeSell(position, "LIQUIDITY_DRAIN", currentPrice);
+      if (rugResult.success) resetFailedSellCount(position.tokenAddress);
+      return;
+    }
+  }
 
   // Pass this call's own currentPrice through as executeSell's markPriceUsd
   // rather than relying on the position.currentPrice/pnlPercent just written
