@@ -102,6 +102,25 @@ All configuration is via `.env` file:
 | `BOT_STATE_FILE` | `./data/state.json` | Local JSON file used to persist positions and trade history |
 | `JUPITER_API_KEY` (alias: `JUPITER_API`) | none | Optional Jupiter API key for higher rate limits; swaps work fine without one |
 | `JUPITER_API_BASE_URL` | `https://quote-api.jup.ag/v6` | Jupiter quote/swap host; only change if your Jupiter plan uses a different authenticated endpoint |
+| `WITHDRAWAL_ADDRESS` | none | Destination for both the dashboard's manual withdrawal and the automatic profit sweep below |
+| `PROFIT_SWEEP_ENABLED` | false | Automatically send excess SOL to `WITHDRAWAL_ADDRESS` — see "Automatic profit sweep" below |
+| `PROFIT_SWEEP_RESERVE_SOL` | 0.5 | Balance always left behind so the bot can keep filling its trading slots |
+| `PROFIT_SWEEP_MIN_SOL` | 0.1 | Excess below this is left alone rather than swept, to avoid dust-sized transfers |
+| `PROFIT_SWEEP_MAX_SOL` | 0 (unlimited) | Caps a single sweep's size; 0 sweeps the full excess every time |
+
+### Automatic profit sweep
+
+The dashboard already has a manual withdrawal flow (`server/routes/vault.ts`) —
+open it, enter an amount, and confirm with a secondary confirmation code. Set
+`PROFIT_SWEEP_ENABLED=true` for a fully automatic alternative: every cycle, once
+the wallet balance exceeds `PROFIT_SWEEP_RESERVE_SOL`, the bot sends the excess
+(minus `PROFIT_SWEEP_MIN_SOL`/`PROFIT_SWEEP_MAX_SOL` bounds) to
+`WITHDRAWAL_ADDRESS` itself.
+
+**This path has no confirmation code and no human step — that is a deliberate
+trade-off**, not an oversight. Set `PROFIT_SWEEP_RESERVE_SOL` to at least
+`MAX_CONCURRENT_POSITIONS * MAX_POSITION_SOL + 0.05`, or the sweep will
+regularly starve the bot of the SOL it needs to fill its own trading slots.
 
 ### Using a Jupiter API key
 
