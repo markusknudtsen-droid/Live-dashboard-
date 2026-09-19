@@ -401,13 +401,42 @@ export async function executeBuy(signal: TradeSignal): Promise<TradeResult> {
 }
 
 async function executeBuyLocked(signal: TradeSignal): Promise<TradeResult> {
-  const { token, positionSizeSol, stopLoss, takeProfit } = signal;
+  const { token, positionSizeSol } = signal;
+
+  // Re-anchor the exit levels to the price we are ACTUALLY entering at.
+  //
+  // signal.stopLoss/takeProfit were computed against signal.entryPrice when
+  // the model analysed the token. On a fast mover the price has moved by the
+  // time the buy executes, and the position then stores a fresh entryPrice
+  // (token.priceUsd) alongside stale levels - so the levels no longer mean
+  // what their percentages claim.
+  //
+  // Observed live 2026-09-19, LAUNCH: analysed at $0.00008301, filled at
+  // $0.0001741. The "+50%" take-profit landed at $0.0001245 - BELOW the entry
+  // - so it fired on the first price tick for +0.00%, and the "-33%" stop sat
+  // at $0.0000556, a real -68% from entry. Double the intended risk, and a
+  // take-profit that could never be a profit.
+  //
+  // Preserve the RATIOS (the recommended percentages) and re-apply them to the
+  // real fill price. Falls back to the signal's own levels only when the
+  // signal's entry price is unusable, which is what the old code always did.
+  const anchor = Number.isFinite(signal.entryPrice) && signal.entryPrice > 0 ? signal.entryPrice : 0;
+  const stopLoss = anchor > 0 ? token.priceUsd * (signal.stopLoss / anchor) : signal.stopLoss;
+  const takeProfit = anchor > 0 ? token.priceUsd * (signal.takeProfit / anchor) : signal.takeProfit;
 
   logger.info(`🛒 Executing BUY: ${token.symbol}`);
   logger.info(`Amount: ${positionSizeSol.toFixed(4)} SOL`);
   logger.info(`Entry: $${token.priceUsd.toFixed(10)}`);
   logger.info(`Stop Loss: $${stopLoss.toFixed(10)} (-${CONFIG.stopLossPercent}%)`);
   logger.info(`Take Profit: $${takeProfit.toFixed(10)} (+${CONFIG.takeProfitPercent}%)`);
+  // A big gap here is the signature of the bug above, so make it visible
+  // rather than silently correcting it.
+  if (anchor > 0 && Math.abs(token.priceUsd / anchor - 1) > 0.1) {
+    logger.warn(
+      `⚠️  ${token.symbol}: price moved ${(((token.priceUsd - anchor) / anchor) * 100).toFixed(1)}% between analysis ` +
+        `($${anchor.toFixed(10)}) and fill ($${token.priceUsd.toFixed(10)}) — exit levels re-anchored to the fill price.`
+    );
+  }
 
   try {
     const tokenValidation = isTradeSignalSafe(signal);
