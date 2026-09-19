@@ -2,7 +2,12 @@ node_modules/
 dist/
 dist-server/
 .env
+.env.*
+!.env.example
 *.log
 data/
 web/node_modules/
 web/dist/
+logs/
+.claude/
+.ecc/

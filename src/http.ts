@@ -1,11 +1,20 @@
 import axios, { AxiosRequestConfig } from "axios";
 import { CONFIG } from "./config.js";
 
-function isRetryableError(error: unknown): boolean {
+// Exported so callers that catch an error AFTER requestWithRetry has already
+// exhausted its retries (e.g. model-preflight.ts) can still tell a
+// deterministic client-side failure (a genuine 4xx) apart from a transient
+// one (no response at all, or a status that indicates timing/load rather
+// than a broken request) — the same distinction this makes for deciding
+// whether to retry in the first place. 408 (Request Timeout) and 425 (Too
+// Early) are both < 500 and not 429, but neither means "this request is
+// fundamentally wrong" the way 400/401/403/404 do — both are explicitly
+// about timing and are expected to succeed on a plain retry per their RFCs.
+export function isRetryableError(error: unknown): boolean {
   if (!axios.isAxiosError(error)) return false;
   const status = error.response?.status;
   if (!status) return true;
-  return status === 429 || status >= 500;
+  return status === 408 || status === 425 || status === 429 || status >= 500;
 }
 
 async function sleep(ms: number): Promise<void> {
