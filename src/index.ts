@@ -5,6 +5,7 @@ import {
   initTrader,
   executeBuy,
   executeAddOn,
+  trailIsArmed,
   executeSell,
   executeSweep,
   monitorPositions,
@@ -334,6 +335,20 @@ async function checkHeldPositionsForBearishExit(): Promise<void> {
     const position = getActivePositions().find((p) => p.tokenAddress === signal.token.address);
     if (!position) continue;
     if (!shouldCloseHeldPosition(signal.trendStrength, signal.momentum, signal.confidence, CONFIG.holdExitConfidenceThreshold)) {
+      continue;
+    }
+
+    // A winner whose trailing stop has armed is already protected on price: it
+    // cannot give back more than the trail distance from its peak. Closing it
+    // here trades that guarantee for an opinion, and the opinion reads
+    // "reversing" on every pullback inside a real run — which is how a position
+    // gets sold at a 300k cap that later prints 8M. Same condition that already
+    // defers take-profit in executeSell, applied to the AI exit too.
+    if (CONFIG.letWinnersRun && trailIsArmed(position)) {
+      logger.info(
+        `🏃 ${position.tokenSymbol}: model reads trend=${signal.trendStrength} momentum=${signal.momentum} ` +
+          `but the trailing stop is armed — letting it run instead of cutting the winner.`
+      );
       continue;
     }
 
@@ -1033,7 +1048,11 @@ async function main(): Promise<void> {
         tokenAddress: event.tokenAddress,
         tokenSymbol: event.symbol,
         exitedAt: Date.now(),
-        wasLoss: (event.pnlPercent ?? 0) <= 0,
+        // Strictly negative: a breakeven exit is not a loss, and treating it as
+        // one let BLOCK_LOSING_REENTRY_FOR_RUN bar re-entry on coins that cost
+        // nothing. It also made the "N straight losses" read in the exit log
+        // count flat trades as losers.
+        wasLoss: (event.pnlPercent ?? 0) < 0,
       });
       recentExits = pruneExits(recentExits, Date.now(), pruneConfig());
       // Persist immediately rather than waiting for cycle end. An exit record

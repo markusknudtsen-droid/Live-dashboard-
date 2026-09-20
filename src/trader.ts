@@ -270,7 +270,7 @@ function findPositionIndex(position: ActivePosition): number {
  * reached the activation gain, so the stop is now trailing rather than sitting
  * at the original level.
  */
-function trailIsArmed(position: ActivePosition): boolean {
+export function trailIsArmed(position: ActivePosition): boolean {
   if (!Number.isFinite(position.entryPrice) || position.entryPrice <= 0) return false;
   const peak = position.peakPrice ?? position.entryPrice;
   const peakGainPercent = ((peak - position.entryPrice) / position.entryPrice) * 100;

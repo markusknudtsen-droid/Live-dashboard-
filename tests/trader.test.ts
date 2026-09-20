@@ -484,3 +484,25 @@ test("weightedAverageEntryPrice: a simple worked example", async () => {
   // Zero old quantity (defensive - should not occur in practice) falls back cleanly.
   assert.equal(weightedAverageEntryPrice(0, 1, 100, 2), 2);
 });
+
+test("trailIsArmed gates the AI-bearish winner exemption on peak gain, not current price", async () => {
+  const { trailIsArmed } = await import("../src/trader.js");
+  const { CONFIG } = await import("../src/config.js");
+  const arm = CONFIG.trailingStopActivatePercent;
+
+  const at = (entryPrice: number, peakPrice: number) =>
+    trailIsArmed({ entryPrice, peakPrice } as Parameters<typeof trailIsArmed>[0]);
+
+  // Below the activation gain the trail has not armed: the AI exit still rules.
+  assert.equal(at(1, 1 + (arm / 100) * 0.99), false);
+  // Just past the activation gain it arms, so the winner is spared. (Not tested
+  // exactly AT the threshold: 1 + 15/100 - 1 is 0.1499...  in binary floating
+  // point, so that would assert on float representation, not on behaviour.)
+  assert.equal(at(1, 1 + (arm / 100) * 1.01), true);
+  // Well past it, obviously armed.
+  assert.equal(at(1, 5), true);
+  // A never-set peak defaults to entry: not armed.
+  assert.equal(trailIsArmed({ entryPrice: 1 } as Parameters<typeof trailIsArmed>[0]), false);
+  // Garbage entry price cannot arm the exemption.
+  assert.equal(at(0, 100), false);
+});
