@@ -13,6 +13,14 @@ export interface ServerConfig {
    * disabled and the endpoint responds 503.
    */
   ingestApiKey: string;
+  /**
+   * When set, withdrawals may only go to this Solana address. Deliberately read
+   * from server config rather than dashboard settings: an allowlist the
+   * dashboard could edit would let anyone who reached the dashboard redirect
+   * funds, which is exactly what this lock exists to prevent. Empty disables the
+   * lock and any valid address is accepted.
+   */
+  withdrawalAllowlistAddress: string;
 }
 
 function requireEnv(key: string, fallbackForDev?: string): string {
@@ -31,6 +39,7 @@ export function buildServerConfig(env: NodeJS.ProcessEnv = process.env): ServerC
     withdrawalConfirmationCode: env.WITHDRAWAL_CONFIRMATION_CODE || "",
     walletEncryptionPassphrase: env.WALLET_ENCRYPTION_PASSPHRASE || "",
     ingestApiKey: env.DASHBOARD_INGEST_KEY || "",
+    withdrawalAllowlistAddress: (env.WITHDRAWAL_ADDRESS || "").trim(),
   };
 }
 
