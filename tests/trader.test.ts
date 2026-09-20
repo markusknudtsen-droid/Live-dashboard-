@@ -416,3 +416,71 @@ test("a queued sell runs before an earlier-queued buy once the lock frees up", a
   assert.equal(events[1].type, "SELL", "the queued sell runs before buy2, despite being invoked/queued later");
   assert.equal(events[2].type, "BUY", "buy2 only runs once the higher-priority sell ahead of it releases the lock");
 });
+
+// The bug this feature closes: "Already in position for X, skipping." was
+// unconditional in index.ts - no signal, however bullish, could ever top up a
+// held position. executeAddOn is the mechanics half of the fix.
+test("executeAddOn tops up a held position: sums SOL, blends the entry price, re-anchors stop/take-profit", async () => {
+  const { executeAddOn } = await import("../src/trader.js");
+
+  await executeBuy(makeSignal()); // entryPrice 0.00002, 0.2 SOL
+  const position = getActivePositions()[0];
+
+  // The operator's own example: down 18% from entry.
+  const dipPrice = position.entryPrice * 0.82;
+  const addOnSignal = makeSignal({ priceUsd: dipPrice });
+  const result = await executeAddOn(position, addOnSignal, 0.05);
+
+  assert.equal(result.success, true);
+  assert.equal(position.amountSol, 0.25, "0.2 original + 0.05 add-on");
+  assert.equal(position.addOnTaken, true);
+
+  // Weighted average: 0.2 SOL-worth at the original price, 0.05 SOL-worth at
+  // the dip price (DRY_RUN has no real token quantity, so quantity is SOL/price).
+  const oldQty = 0.2 / 0.00002;
+  const newQty = 0.05 / dipPrice;
+  const expectedEntry = (oldQty * 0.00002 + newQty * dipPrice) / (oldQty + newQty);
+  assert.ok(Math.abs(position.entryPrice - expectedEntry) < 1e-12, "entry price is the SOL-weighted average, not a simple average");
+  assert.ok(position.entryPrice < 0.00002, "blended entry must move toward the dip, not stay at the original price");
+  assert.ok(position.entryPrice > dipPrice, "blended entry must not fall all the way to the dip price either");
+
+  // Levels re-derived from the NEW entry, not carried over stale from the
+  // original buy - same principle as the fill-price re-anchoring fix.
+  assert.ok(Math.abs(position.stopLoss - position.entryPrice * 0.67) < 1e-9);
+  assert.ok(Math.abs(position.takeProfit - position.entryPrice * 1.5) < 1e-9);
+});
+
+test("executeAddOn refuses a second add-on on the same position", async () => {
+  const { executeAddOn } = await import("../src/trader.js");
+  await executeBuy(makeSignal());
+  const position = getActivePositions()[0];
+
+  const first = await executeAddOn(position, makeSignal(), 0.05);
+  assert.equal(first.success, true);
+
+  const second = await executeAddOn(position, makeSignal(), 0.05);
+  assert.equal(second.success, false);
+  assert.match(second.error!, /already used/i);
+  assert.equal(position.amountSol, 0.25, "the refused second attempt must not have added anything");
+});
+
+test("executeAddOn refuses to top up a position that already closed", async () => {
+  const { executeAddOn } = await import("../src/trader.js");
+  await executeBuy(makeSignal());
+  const position = getActivePositions()[0];
+  await executeSell(position, "TAKE_PROFIT", position.entryPrice * 1.5);
+
+  const result = await executeAddOn(position, makeSignal(), 0.05);
+  assert.equal(result.success, false);
+  assert.match(result.error!, /already closed/i);
+});
+
+test("weightedAverageEntryPrice: a simple worked example", async () => {
+  const { weightedAverageEntryPrice } = await import("../src/trader.js");
+  // 100 units at $1, then 100 more at $0.50 -> average $0.75, not $1 or $0.50.
+  assert.equal(weightedAverageEntryPrice(100, 1, 100, 0.5), 0.75);
+  // Buying nothing more must not move the price.
+  assert.equal(weightedAverageEntryPrice(100, 1, 0, 999), 1);
+  // Zero old quantity (defensive - should not occur in practice) falls back cleanly.
+  assert.equal(weightedAverageEntryPrice(0, 1, 100, 2), 2);
+});

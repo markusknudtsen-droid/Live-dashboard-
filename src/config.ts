@@ -150,6 +150,17 @@ export interface AppConfig {
   /** Slots held open for new/small coins so established ones cannot take every slot. 0 disables. */
   reservedNewCoinSlots: number;
   /** Gain at which a slice of the position is banked. 0 disables partial take-profit. */
+  /**
+   * Whether the bot may add to a position it already holds, once, when it has
+   * dipped and the model is still bullish on it at a fresh look. Before this,
+   * "Already in position for X, skipping." was unconditional — no matter how
+   * strong a later signal was, a held token could never be topped up.
+   */
+  addOnEnabled: boolean;
+  /** Flat SOL size for a single add-on buy, independent of maxPositionSol. */
+  addOnSol: number;
+  /** Position must be down at least this many percent to qualify for an add-on. */
+  addOnTriggerDipPercent: number;
   partialTakeProfitPercent: number;
   /** Fraction of the position sold when that gain is reached, 0..1. */
   partialTakeProfitFraction: number;
@@ -408,6 +419,9 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     newCoinReentryCooldownMinutes: parseNumberInRange("NEW_COIN_REENTRY_COOLDOWN_MINUTES", env.NEW_COIN_REENTRY_COOLDOWN_MINUTES, 2, 0, 1440),
     maxBuysPerToken: parseNumberInRange("MAX_BUYS_PER_TOKEN", env.MAX_BUYS_PER_TOKEN, 3, 0, 1000),
     reservedNewCoinSlots: parseNumberInRange("RESERVED_NEW_COIN_SLOTS", env.RESERVED_NEW_COIN_SLOTS, 1, 0, 100),
+    addOnEnabled: parseBoolean(env.ADD_ON_ENABLED, true),
+    addOnSol: parseNumberInRange("ADD_ON_SOL", env.ADD_ON_SOL, 0.05, 0, 100),
+    addOnTriggerDipPercent: parseNumberInRange("ADD_ON_TRIGGER_DIP_PERCENT", env.ADD_ON_TRIGGER_DIP_PERCENT, 15, 0.1, 100),
     partialTakeProfitPercent: parseNumberInRange("PARTIAL_TAKE_PROFIT_PERCENT", env.PARTIAL_TAKE_PROFIT_PERCENT, 100, 0, 100_000),
     partialTakeProfitFraction: parseNumberInRange("PARTIAL_TAKE_PROFIT_FRACTION", env.PARTIAL_TAKE_PROFIT_FRACTION, 0.5, 0.01, 0.99),
     geckoTerminalEnabled: parseBoolean(env.GECKOTERMINAL_ENABLED, true),

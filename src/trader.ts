@@ -70,6 +70,8 @@ export interface ActivePosition {
    * field existed falls back to the old whole-wallet-balance behaviour.
    */
   tokenAmountRaw?: string;
+  /** Set once this position has taken its one allowed add-on buy. */
+  addOnTaken?: boolean;
   /** Set once the deferral message has been logged, to keep it to one line. */
   takeProfitDeferredLogged?: boolean;
   /**
@@ -394,10 +396,162 @@ async function executeSweepLocked(): Promise<SweepResult> {
 }
 
 /**
+ * Cost basis after buying `newQty` more at `newPrice`, on top of `oldQty`
+ * already held at `oldPrice`. Unit-agnostic: `oldQty`/`newQty` must use the
+ * SAME unit as each other (raw token base units, or a SOL-implied quantity),
+ * but the two calls in executeAddOnLocked never mix units within one call.
+ */
+export function weightedAverageEntryPrice(oldQty: number, oldPrice: number, newQty: number, newPrice: number): number {
+  const totalQty = oldQty + newQty;
+  if (!(totalQty > 0)) return oldPrice;
+  return (oldQty * oldPrice + newQty * newPrice) / totalQty;
+}
+
+/**
  * Execute a buy trade using Jupiter aggregator
  */
 export async function executeBuy(signal: TradeSignal): Promise<TradeResult> {
   return withTraderLock(buyQueue, () => executeBuyLocked(signal));
+}
+
+/**
+ * Add to a position the bot already holds. Before this existed, "Already in
+ * position for X, skipping." was unconditional: no signal, however bullish,
+ * could ever top up a held position. Distinct from executeBuy - this mutates
+ * the EXISTING position in place rather than opening a new one, so it does
+ * not consume a MAX_CONCURRENT_POSITIONS slot.
+ *
+ * The one-shot cap (position.addOnTaken) is enforced by the caller in
+ * index.ts, which is where the dip-percent and re-analysis-confidence gates
+ * live too - this function's job is only the mechanics of the top-up once the
+ * caller has decided one is warranted.
+ */
+export async function executeAddOn(position: ActivePosition, signal: TradeSignal, addOnSol: number): Promise<TradeResult> {
+  return withTraderLock(buyQueue, () => executeAddOnLocked(position, signal, addOnSol));
+}
+
+async function executeAddOnLocked(position: ActivePosition, signal: TradeSignal, addOnSol: number): Promise<TradeResult> {
+  const { token } = signal;
+  const failure = (error: string): TradeResult => ({
+    success: false,
+    entryPrice: position.entryPrice,
+    amountSol: addOnSol,
+    tokenAddress: token.address,
+    tokenSymbol: token.symbol,
+    timestamp: Date.now(),
+    error,
+  });
+
+  // A position closed (sold out, rugged) while this was queued must not be
+  // topped up - same stale-reference guard executeSellLocked already uses.
+  if (findPositionIndex(position) === -1) return failure("Position already closed");
+  if (position.addOnTaken) return failure("Add-on already used for this position");
+
+  const balance = await getBalance();
+  const feeBufferSol = CONFIG.dryRun ? 0 : 0.01;
+  if (balance < addOnSol + feeBufferSol) {
+    const need = CONFIG.dryRun ? addOnSol.toFixed(4) : `${addOnSol.toFixed(4)} + fees`;
+    return failure(`Insufficient balance: ${balance.toFixed(4)} SOL (need ${need})`);
+  }
+
+  logger.info(`➕ Adding to ${token.symbol}: +${addOnSol.toFixed(4)} SOL at $${token.priceUsd.toFixed(10)}`);
+
+  /**
+   * Re-derive stopLoss/takeProfit from the NEW blended entry using the
+   * bot's configured percentages - never carry forward the old position's
+   * absolute levels, which were anchored to a now-outdated entry price. Same
+   * philosophy as executeBuyLocked's fill-price re-anchoring: an absolute
+   * price level is only meaningful relative to the basis it was derived from.
+   */
+  function applyAddOn(newEntryPrice: number): void {
+    position.amountSol += addOnSol;
+    position.entryPrice = newEntryPrice;
+    position.stopLoss = newEntryPrice * (1 - CONFIG.stopLossPercent / 100);
+    position.takeProfit = newEntryPrice * (1 + CONFIG.takeProfitPercent / 100);
+    position.addOnTaken = true;
+  }
+
+  if (CONFIG.dryRun) {
+    const txSignature = generateDryRunTxSignature();
+    paperBalanceSol -= addOnSol;
+
+    // No real quote exists in DRY_RUN, so token quantity is only implied by
+    // SOL spent - fine for a paper weighted average, not exact accounting.
+    const oldQty = position.amountSol / position.entryPrice;
+    const newQty = addOnSol / token.priceUsd;
+    applyAddOn(weightedAverageEntryPrice(oldQty, position.entryPrice, newQty, token.priceUsd));
+
+    logger.info(`🧪 [DRY RUN] Add-on executed. New avg entry: $${position.entryPrice.toFixed(10)}. Fake TX: ${txSignature}`);
+    emitTrade({
+      type: "BUY",
+      symbol: token.symbol,
+      tokenAddress: token.address,
+      chainId: token.chainId,
+      amountSol: addOnSol,
+      price: token.priceUsd,
+      paper: true,
+      txSignature,
+      timestamp: Date.now(),
+      confidence: signal.confidence,
+    });
+    return {
+      success: true,
+      txSignature,
+      entryPrice: position.entryPrice,
+      amountSol: addOnSol,
+      tokenAddress: token.address,
+      tokenSymbol: token.symbol,
+      timestamp: Date.now(),
+    };
+  }
+
+  const amountLamports = Math.floor(addOnSol * LAMPORTS_PER_SOL);
+  const order = await getJupiterQuote(SOL_MINT, token.address, amountLamports, wallet.publicKey.toBase58());
+  if (!order?.transaction || !order.requestId) return failure("No valid Jupiter Swap V2 order found");
+
+  const transaction = VersionedTransaction.deserialize(Buffer.from(order.transaction, "base64"));
+  transaction.sign([wallet]);
+  const signedTransaction = Buffer.from(transaction.serialize()).toString("base64");
+  const execution = await executeJupiterSwap(order, signedTransaction);
+  if (!execution || execution.status !== "Success" || !execution.signature) {
+    return failure(`Jupiter execution failed${execution?.error ? `: ${execution.error}` : ""}`);
+  }
+
+  // getJupiterQuote() itself already rejects a response with no outAmount
+  // before returning it (same invariant executeBuyLocked relies on) — this is
+  // a belt-and-suspenders type guard, not an expected runtime path.
+  if (!order.outAmount) return failure("Jupiter order settled with no outAmount");
+
+  // Raw base-unit quantities as weights - decimals cancel in the ratio, and
+  // this is the same quantity capSellAmount relies on for sell-sizing, so the
+  // combined total must be exact (BigInt), not a float approximation.
+  const oldRaw = position.tokenAmountRaw ? BigInt(position.tokenAmountRaw) : 0n;
+  const newRaw = BigInt(order.outAmount);
+  position.tokenAmountRaw = (oldRaw + newRaw).toString();
+  applyAddOn(weightedAverageEntryPrice(Number(oldRaw), position.entryPrice, Number(newRaw), token.priceUsd));
+
+  logger.info(`✅ Add-on executed! New avg entry: $${position.entryPrice.toFixed(10)}. TX: ${execution.signature}`);
+  emitTrade({
+    type: "BUY",
+    symbol: token.symbol,
+    tokenAddress: token.address,
+    chainId: token.chainId,
+    amountSol: addOnSol,
+    price: token.priceUsd,
+    paper: false,
+    txSignature: execution.signature,
+    timestamp: Date.now(),
+    confidence: signal.confidence,
+  });
+  return {
+    success: true,
+    txSignature: execution.signature,
+    entryPrice: position.entryPrice,
+    amountSol: addOnSol,
+    tokenAddress: token.address,
+    tokenSymbol: token.symbol,
+    timestamp: Date.now(),
+  };
 }
 
 async function executeBuyLocked(signal: TradeSignal): Promise<TradeResult> {

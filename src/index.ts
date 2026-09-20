@@ -4,6 +4,7 @@ import { batchAnalyze, TradeSignal } from "./analyze.js";
 import {
   initTrader,
   executeBuy,
+  executeAddOn,
   executeSell,
   executeSweep,
   monitorPositions,
@@ -762,8 +763,29 @@ async function runCycle(): Promise<void> {
   const tradesToExecute = buySignals.slice(0, slotsAvailable);
 
   for (const signal of tradesToExecute) {
-    if (activePositions.find((p) => p.tokenAddress === signal.token.address)) {
-      logger.info(`Already in position for ${signal.token.symbol}, skipping.`);
+    const held = activePositions.find((p) => p.tokenAddress === signal.token.address);
+    if (held) {
+      // A fresh BUY signal for a token we already hold used to be thrown away
+      // unconditionally. If it has genuinely dipped AND the model looked at it
+      // again just now and still says BUY at full confidence, that is exactly
+      // the case worth topping up rather than ignoring - once per position,
+      // at a flat size independent of the original entry.
+      if (
+        CONFIG.addOnEnabled &&
+        !held.addOnTaken &&
+        held.pnlPercent <= -CONFIG.addOnTriggerDipPercent
+      ) {
+        logger.info(
+          `➕ ${signal.token.symbol} is down ${held.pnlPercent.toFixed(1)}% and still reads BUY (${signal.confidence}%) — adding ${CONFIG.addOnSol} SOL.`
+        );
+        const addOnResult = await executeAddOn(held, signal, CONFIG.addOnSol);
+        if (!addOnResult.success) {
+          logger.warn(`Add-on for ${signal.token.symbol} failed: ${addOnResult.error}`);
+        }
+        await persistRuntimeState();
+      } else {
+        logger.info(`Already in position for ${signal.token.symbol}, skipping.`);
+      }
       continue;
     }
 
