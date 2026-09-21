@@ -227,6 +227,14 @@ export interface AppConfig {
    * DexScreener remains the fallback for mints Jupiter does not index.
    */
   useJupiterPriceFeed: boolean;
+  /**
+   * How far above the recorded buy quantity a FULL exit may still sweep the
+   * whole wallet balance, so a closed position leaves no dust behind. Covers
+   * the quote-vs-fill difference (observed: 0.008% on COPPERCAT). A balance
+   * beyond this is treated as manually-held coins and left alone — that is the
+   * $SOF protection. 0 restores the old strict cap.
+   */
+  fullExitSweepTolerancePercent: number;
   /** A second, creation-time-sorted candidate source, alongside DexScreener. */
   geckoTerminalEnabled: boolean;
   geckoTerminalNewPoolsLimit: number;
@@ -501,6 +509,13 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     partialTakeProfitFraction: parseNumberInRange("PARTIAL_TAKE_PROFIT_FRACTION", env.PARTIAL_TAKE_PROFIT_FRACTION, 0.5, 0.01, 0.99),
     takeProfitLadder: parseLadder(env.TAKE_PROFIT_LADDER),
     useJupiterPriceFeed: parseBoolean(env.USE_JUPITER_PRICE_FEED, true),
+    fullExitSweepTolerancePercent: parseNumberInRange(
+      "FULL_EXIT_SWEEP_TOLERANCE_PERCENT",
+      env.FULL_EXIT_SWEEP_TOLERANCE_PERCENT,
+      5,
+      0,
+      100
+    ),
     geckoTerminalEnabled: parseBoolean(env.GECKOTERMINAL_ENABLED, true),
     geckoTerminalNewPoolsLimit: parseNumberInRange("GECKOTERMINAL_NEW_POOLS_LIMIT", env.GECKOTERMINAL_NEW_POOLS_LIMIT, 20, 1, 100),
     newCoinSlotMaxMarketCapUsd: parseNumberInRange("NEW_COIN_SLOT_MAX_MARKET_CAP_USD", env.NEW_COIN_SLOT_MAX_MARKET_CAP_USD, 60_000, 0, 100_000_000),

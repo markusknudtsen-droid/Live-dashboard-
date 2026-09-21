@@ -143,6 +143,42 @@ export function capSellAmount(walletRaw: bigint, positionRaw: bigint | undefined
 }
 
 /**
+ * The amount to sell on a FULL exit, where the intent is to end up holding
+ * none of the coin.
+ *
+ * capSellAmount deliberately sells no more than the position recorded buying,
+ * and that leaves a crumb behind: the recorded figure is Jupiter's QUOTED
+ * outAmount, while the wallet receives whatever the route actually filled.
+ * When the fill lands slightly above the quote, the difference is stranded.
+ * Observed 2026-09-21: COPPERCAT was bought and stopped out three times and
+ * left 6.07 tokens — $0.0016, about 0.008% of the position — sitting in a
+ * token account whose rent costs more than the dust is worth.
+ *
+ * So a full exit sweeps the whole wallet balance, EXCEPT when that balance is
+ * far more than this position ever bought. That gap is the signal that
+ * someone bought the same coin by hand into the same wallet, which is the
+ * failure capSellAmount exists to prevent ($SOF, 2026-09-17). Rounding dust is
+ * a fraction of a percent; a manual holding is not, so one tolerance separates
+ * them cleanly.
+ *
+ * Partial sells keep the strict cap — there the remainder is the point.
+ */
+export function fullExitSellAmount(
+  walletRaw: bigint,
+  positionRaw: bigint | undefined,
+  tolerancePercent: number
+): bigint {
+  // Same fail-closed rule as capSellAmount: with no recorded quantity there is
+  // nothing to measure the wallet against, so nothing is sold.
+  if (positionRaw === undefined) return 0n;
+  if (walletRaw <= positionRaw) return walletRaw;
+
+  // Basis points, so a fractional tolerance percent survives integer maths.
+  const ceiling = positionRaw + (positionRaw * BigInt(Math.max(0, Math.round(tolerancePercent * 100)))) / 10_000n;
+  return walletRaw <= ceiling ? walletRaw : positionRaw;
+}
+
+/**
  * A completed trade, emitted after every successful buy/sell so external
  * consumers (e.g. the dashboard reporter) can react without the trader needing
  * to know about them. `paper` is true for DRY_RUN/simulated trades.
@@ -1147,21 +1183,29 @@ async function executeSellLocked(position: ActivePosition, reason: string, markP
     }
 
     // Cap at this position's own recorded amount, never the whole wallet
-    // balance of the mint - see tokenAmountRaw's doc comment for why. Falls
-    // back to the old whole-balance behaviour only when the position predates
-    // this field (nothing recorded to cap against).
+    // This is the FULL exit, so it sweeps the wallet balance rather than
+    // stopping at the recorded buy quantity — otherwise the quote-vs-fill
+    // difference is stranded as dust (COPPERCAT, 6.07 tokens). The sweep is
+    // still bounded: a balance far above what this position bought means
+    // manually-held coins, and those are left alone. See fullExitSellAmount.
     const walletRaw = BigInt(tokenAccounts.value[0].account.data.parsed.info.tokenAmount.amount);
-    // Falling back means selling the wallet's WHOLE balance of this mint —
-    // the pre-fix behaviour that took a manually-held $SOF position on
-    // 2026-09-17. It is the safe choice for an old position (the alternative
-    // is failing to sell at all), but the operator should know it happened.
     if (!position.tokenAmountRaw) {
       logger.error(
         `⛔ ${position.tokenSymbol}: no recorded buy quantity — REFUSING to sell, because the bot cannot tell ` +
           `its own tokens from any you hold manually. Sell this position by hand.`
       );
     }
-    const sellRaw = capSellAmount(walletRaw, position.tokenAmountRaw ? BigInt(position.tokenAmountRaw) : undefined);
+    const recordedRaw = position.tokenAmountRaw ? BigInt(position.tokenAmountRaw) : undefined;
+    const sellRaw = fullExitSellAmount(walletRaw, recordedRaw, CONFIG.fullExitSweepTolerancePercent);
+    if (recordedRaw !== undefined && walletRaw > recordedRaw && sellRaw === recordedRaw) {
+      // The sweep was declined — say so, because the leftover is intentional
+      // here rather than the rounding crumb this change exists to remove.
+      logger.warn(
+        `⚠️  ${position.tokenSymbol}: wallet holds more than this position bought ` +
+          `(${walletRaw} vs ${recordedRaw}) — selling only the position's share and leaving the rest, ` +
+          `which looks like coins you bought yourself.`
+      );
+    }
     if (sellRaw <= 0n) {
       return {
         success: false,
