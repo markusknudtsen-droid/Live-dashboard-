@@ -19,6 +19,7 @@ import { logger } from "./logger.js";
 import { httpGet } from "./http.js";
 import { executeJupiterSwap, getJupiterQuote, isValidSolanaMint, SOL_MINT } from "./services/jupiter-client.js";
 import { forcePriorityFee } from "./services/priority-fee.js";
+import { nextLadderRung } from "./take-profit-ladder.js";
 
 export interface TradeResult {
   success: boolean;
@@ -91,6 +92,12 @@ export interface ActivePosition {
    * as "not yet taken".
    */
   partialTakeProfitTaken?: boolean;
+  /**
+   * How many TAKE_PROFIT_LADDER rungs this position has already banked.
+   * Separate from partialTakeProfitTaken so the single-shot behaviour is
+   * untouched when no ladder is configured.
+   */
+  ladderRungsTaken?: number;
 }
 
 interface DexPairPrice {
@@ -119,7 +126,17 @@ interface DexPairPrice {
 const rugExitInertWarned = new Set<string>();
 
 export function capSellAmount(walletRaw: bigint, positionRaw: bigint | undefined): bigint {
-  if (positionRaw === undefined) return walletRaw;
+  // FAILS CLOSED. Without a recorded buy quantity there is no way to tell which
+  // part of the wallet's balance belongs to the bot, and this wallet is also
+  // traded by hand — returning walletRaw here is exactly how the operator's own
+  // $SOF was liquidated on 2026-09-17.
+  //
+  // The cost of this choice is that a position with no recorded quantity cannot
+  // be sold automatically at all, including by the stop-loss. That is the
+  // deliberate trade: an unsellable position is visible, loud, and fixable by
+  // hand, whereas selling someone else's coins is neither. Every live buy
+  // records tokenAmountRaw, so this only affects legacy or desynced state.
+  if (positionRaw === undefined) return 0n;
   return positionRaw < walletRaw ? positionRaw : walletRaw;
 }
 
@@ -933,13 +950,13 @@ async function executeSellPartialLocked(
     // the mint - the same fix as the full sell path. Floor rather than round,
     // so the quote can never ask for more than is actually available.
     const walletRawBalance = BigInt(tokenAccounts.value[0].account.data.parsed.info.tokenAmount.amount);
-    // Same fallback warning as the full-sell path: without a recorded buy
-    // quantity this partial is a fraction of the WHOLE wallet balance, which
-    // would take a slice of any manually-held tokens of the same mint too.
+    // Same fail-closed rule as the full-sell path: with no recorded buy
+    // quantity, a fraction of the WHOLE wallet balance would take a slice of
+    // any manually-held tokens of the same mint, so nothing is sold.
     if (!position.tokenAmountRaw) {
-      logger.warn(
-        `⚠️  ${position.tokenSymbol}: no recorded buy quantity — partial sell is sized off the wallet's ENTIRE ` +
-          `balance of this mint, including any manually-held tokens.`
+      logger.error(
+        `⛔ ${position.tokenSymbol}: no recorded buy quantity — REFUSING to take profit, because the bot cannot ` +
+          `tell its own tokens from any you hold manually. Sell this position by hand.`
       );
     }
     const rawBalance = capSellAmount(walletRawBalance, position.tokenAmountRaw ? BigInt(position.tokenAmountRaw) : undefined);
@@ -1130,9 +1147,9 @@ async function executeSellLocked(position: ActivePosition, reason: string, markP
     // 2026-09-17. It is the safe choice for an old position (the alternative
     // is failing to sell at all), but the operator should know it happened.
     if (!position.tokenAmountRaw) {
-      logger.warn(
-        `⚠️  ${position.tokenSymbol}: no recorded buy quantity — selling the wallet's ENTIRE balance of this ` +
-          `mint. Any manually-held tokens of the same coin will be sold with it.`
+      logger.error(
+        `⛔ ${position.tokenSymbol}: no recorded buy quantity — REFUSING to sell, because the bot cannot tell ` +
+          `its own tokens from any you hold manually. Sell this position by hand.`
       );
     }
     const sellRaw = capSellAmount(walletRaw, position.tokenAmountRaw ? BigInt(position.tokenAmountRaw) : undefined);
@@ -1466,8 +1483,30 @@ export async function evaluatePositionAtPrice(
   // whole position makes a partial sale pointless. Computed from currentPrice
   // rather than position.pnlPercent so it cannot act on a stale value.
   const gainPercent = ((currentPrice - position.entryPrice) / position.entryPrice) * 100;
+
+  // Ladder first, when one is configured: it supersedes the single-shot
+  // partial below rather than stacking with it, so a position cannot be
+  // scaled out of twice for the same gain.
+  if (!exitReason && CONFIG.takeProfitLadder.length > 0) {
+    const step = nextLadderRung(gainPercent, CONFIG.takeProfitLadder, position.ladderRungsTaken ?? 0);
+    if (step) {
+      logger.info(
+        `🪜 LADDER RUNG ${step.rungsConsumed}/${CONFIG.takeProfitLadder.length} for ${position.tokenSymbol} ` +
+          `at +${gainPercent.toFixed(2)}% (rung +${step.rung.gainPercent}%): selling ` +
+          `${Math.round(step.rung.sellFraction * 100)}% of what is left.`
+      );
+      // Marked BEFORE the sell: a failed sale must not leave the rung armed to
+      // retry every tick, which is how a transient RPC error turns into a
+      // stream of partial sales.
+      position.ladderRungsTaken = step.rungsConsumed;
+      await executeSellPartial(position, step.rung.sellFraction, "PARTIAL_TAKE_PROFIT", currentPrice);
+      return;
+    }
+  }
+
   if (
     !exitReason &&
+    CONFIG.takeProfitLadder.length === 0 &&
     CONFIG.partialTakeProfitPercent > 0 &&
     !position.partialTakeProfitTaken &&
     Number.isFinite(gainPercent) &&

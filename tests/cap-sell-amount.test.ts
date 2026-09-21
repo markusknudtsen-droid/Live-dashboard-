@@ -36,8 +36,16 @@ test("selling never exceeds what the wallet actually holds, even if more was rec
   assert.equal(capSellAmount(walletRaw, positionRaw), 40_000_000n);
 });
 
-test("a position with no recorded amount (persisted before this field existed) falls back to the whole wallet balance", () => {
-  assert.equal(capSellAmount(75_000_000n, undefined), 75_000_000n);
+test("a position with no recorded amount sells NOTHING — it must not reach for the whole wallet", () => {
+  // Fails closed. This wallet is also traded by hand, so an untracked position
+  // cannot prove any of the balance is the bot's: returning the wallet total
+  // here is how the operator's own $SOF was liquidated (2026-09-17). An
+  // unsellable position is loud and fixable; selling someone else's coins is
+  // neither.
+  assert.equal(capSellAmount(75_000_000n, undefined), 0n);
+  // True even when the wallet holds nothing, so the caller sees one consistent
+  // "cannot size this sell" answer rather than two different zeroes.
+  assert.equal(capSellAmount(0n, undefined), 0n);
 });
 
 test("recorded amount exactly matching the wallet balance sells all of it", () => {

@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { PublicKey } from "@solana/web3.js";
+import { parseLadder, describeLadder, type LadderRung } from "./take-profit-ladder.js";
 
 export interface AppConfig {
   openRouterApiKey: string;
@@ -213,6 +214,12 @@ export interface AppConfig {
   partialTakeProfitPercent: number;
   /** Fraction of the position sold when that gain is reached, 0..1. */
   partialTakeProfitFraction: number;
+  /**
+   * Multi-stage scale-out, e.g. "40:50,100:50,250:50" — at +40% sell 50% of the
+   * position, at +100% sell 50% of what is left, and so on. Empty falls back to
+   * the single-shot partialTakeProfit above, which is the existing behaviour.
+   */
+  takeProfitLadder: LadderRung[];
   /** A second, creation-time-sorted candidate source, alongside DexScreener. */
   geckoTerminalEnabled: boolean;
   geckoTerminalNewPoolsLimit: number;
@@ -485,6 +492,7 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     addOnTriggerDipPercent: parseNumberInRange("ADD_ON_TRIGGER_DIP_PERCENT", env.ADD_ON_TRIGGER_DIP_PERCENT, 15, 0.1, 100),
     partialTakeProfitPercent: parseNumberInRange("PARTIAL_TAKE_PROFIT_PERCENT", env.PARTIAL_TAKE_PROFIT_PERCENT, 100, 0, 100_000),
     partialTakeProfitFraction: parseNumberInRange("PARTIAL_TAKE_PROFIT_FRACTION", env.PARTIAL_TAKE_PROFIT_FRACTION, 0.5, 0.01, 0.99),
+    takeProfitLadder: parseLadder(env.TAKE_PROFIT_LADDER),
     geckoTerminalEnabled: parseBoolean(env.GECKOTERMINAL_ENABLED, true),
     geckoTerminalNewPoolsLimit: parseNumberInRange("GECKOTERMINAL_NEW_POOLS_LIMIT", env.GECKOTERMINAL_NEW_POOLS_LIMIT, 20, 1, 100),
     newCoinSlotMaxMarketCapUsd: parseNumberInRange("NEW_COIN_SLOT_MAX_MARKET_CAP_USD", env.NEW_COIN_SLOT_MAX_MARKET_CAP_USD, 60_000, 0, 100_000_000),
@@ -613,7 +621,12 @@ export function validateConfig(config: AppConfig = CONFIG): void {
         `resolved via DexScreener like every other source.`
     );
   }
-  if (config.partialTakeProfitPercent > 0) {
+  if (config.takeProfitLadder.length > 0) {
+    console.log(
+      `   🪜 TAKE_PROFIT_LADDER: ${describeLadder(config.takeProfitLadder)} ` +
+        `(each sells that share of what REMAINS; supersedes PARTIAL_TAKE_PROFIT).`
+    );
+  } else if (config.partialTakeProfitPercent > 0) {
     console.log(
       `   💰 PARTIAL_TAKE_PROFIT: at +${config.partialTakeProfitPercent}%, ` +
         `${Math.round(config.partialTakeProfitFraction * 100)}% of the position is banked; the rest runs on.`
