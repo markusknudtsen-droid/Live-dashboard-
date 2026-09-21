@@ -20,6 +20,7 @@ import { httpGet } from "./http.js";
 import { executeJupiterSwap, getJupiterQuote, isValidSolanaMint, SOL_MINT } from "./services/jupiter-client.js";
 import { forcePriorityFee } from "./services/priority-fee.js";
 import { nextLadderRung } from "./take-profit-ladder.js";
+import { fetchLivePrice } from "./live-price.js";
 
 export interface TradeResult {
   success: boolean;
@@ -1328,18 +1329,17 @@ export async function monitorPositions(): Promise<void> {
 
   for (const position of [...activePositions]) {
     try {
-      const pairs = await httpGet<DexPairPrice[]>(
-        `${CONFIG.dexScreenerApiUrl}/tokens/v1/${position.chainId}/${position.tokenAddress}`
-      );
-      if (!pairs.length) continue;
+      // Jupiter first, DexScreener as fallback — see live-price.ts for the
+      // measured staleness that motivated the switch. Skipping the tick on a
+      // total failure is deliberate: acting on a price neither source could
+      // supply is worse than waiting for the next poll.
+      const live = await fetchLivePrice(position.tokenAddress, position.chainId);
+      if (!live) continue;
 
-      const currentPrice = Number(pairs[0].priceUsd || 0);
-      // Deliberately NOT `|| 0`: a missing field must stay undefined so the rug
-      // check can tell "unreadable" from "the pool is actually gone". Coercing
-      // it to 0 would panic-sell every position on any partial API response.
-      const rawLiquidity = pairs[0].liquidity?.usd;
-      const currentLiquidityUsd = rawLiquidity === undefined || rawLiquidity === null ? undefined : Number(rawLiquidity);
-      await evaluatePositionAtPrice(position, currentPrice, currentLiquidityUsd);
+      // liquidityUsd stays undefined when unreported — the rug check needs to
+      // tell "unreadable" from "the pool is actually gone", and coercing it to
+      // 0 would panic-sell every position on any partial API response.
+      await evaluatePositionAtPrice(position, live.priceUsd, live.liquidityUsd);
 
       await new Promise((r) => setTimeout(r, 500));
     } catch {

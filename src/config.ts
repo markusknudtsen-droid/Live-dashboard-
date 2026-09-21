@@ -220,6 +220,13 @@ export interface AppConfig {
    * the single-shot partialTakeProfit above, which is the existing behaviour.
    */
   takeProfitLadder: LadderRung[];
+  /**
+   * Read held-position price and liquidity from Jupiter instead of
+   * DexScreener. Measured 2026-09-21: over one minute on an actively traded
+   * token, DexScreener's price changed twice and Jupiter's sixteen times.
+   * DexScreener remains the fallback for mints Jupiter does not index.
+   */
+  useJupiterPriceFeed: boolean;
   /** A second, creation-time-sorted candidate source, alongside DexScreener. */
   geckoTerminalEnabled: boolean;
   geckoTerminalNewPoolsLimit: number;
@@ -493,6 +500,7 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     partialTakeProfitPercent: parseNumberInRange("PARTIAL_TAKE_PROFIT_PERCENT", env.PARTIAL_TAKE_PROFIT_PERCENT, 100, 0, 100_000),
     partialTakeProfitFraction: parseNumberInRange("PARTIAL_TAKE_PROFIT_FRACTION", env.PARTIAL_TAKE_PROFIT_FRACTION, 0.5, 0.01, 0.99),
     takeProfitLadder: parseLadder(env.TAKE_PROFIT_LADDER),
+    useJupiterPriceFeed: parseBoolean(env.USE_JUPITER_PRICE_FEED, true),
     geckoTerminalEnabled: parseBoolean(env.GECKOTERMINAL_ENABLED, true),
     geckoTerminalNewPoolsLimit: parseNumberInRange("GECKOTERMINAL_NEW_POOLS_LIMIT", env.GECKOTERMINAL_NEW_POOLS_LIMIT, 20, 1, 100),
     newCoinSlotMaxMarketCapUsd: parseNumberInRange("NEW_COIN_SLOT_MAX_MARKET_CAP_USD", env.NEW_COIN_SLOT_MAX_MARKET_CAP_USD, 60_000, 0, 100_000_000),
