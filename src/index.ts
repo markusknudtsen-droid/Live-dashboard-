@@ -18,6 +18,7 @@ import {
   MAX_CONCURRENT_POSITIONS,
 } from "./trader.js";
 import { isBearishSignal, shouldCloseHeldPosition } from "./momentum-guard.js";
+import { findFreshLaunches, type FreshLaunchCandidate } from "./fresh-launch.js";
 import { logger } from "./logger.js";
 import { filterRestorablePositions, loadState, saveState, TradeHistoryItem } from "./persistence.js";
 import { isDashboardReportingEnabled, reportTrade } from "./dashboard-reporter.js";
@@ -181,6 +182,115 @@ function reentryBlocked(tokenAddress: string, symbol: string, useNewCoinCooldown
  * much risk to take. Confidence is recorded as 100 only to denote "did not go
  * through the model"; it is never compared against minConfidence on this path.
  */
+/**
+ * Scan Jupiter's newest pools and buy anything that clears the fresh-launch
+ * gate, at its own size and take-profit.
+ *
+ * Deliberately separate from the main pipeline: no model call (a five-minute-
+ * old token has nothing to analyse) and no DexScreener dependency. The gate in
+ * fresh-launch.ts is the only thing standing between this and the wallet, so
+ * it fails closed on missing data.
+ *
+ * Still subject to every shared safety rule: concurrent-position limits,
+ * re-entry blocks, and not doubling into something already held.
+ */
+async function scanFreshLaunches(): Promise<void> {
+  if (!CONFIG.freshLaunchEnabled || CONFIG.dryRun) return;
+
+  const candidates = await findFreshLaunches();
+  if (candidates.length === 0) return;
+
+  for (const fresh of candidates) {
+    const activePositions = getActivePositions();
+    if (activePositions.length >= MAX_CONCURRENT_POSITIONS) {
+      logger.info(`🌱 ${fresh.symbol} qualified but all ${MAX_CONCURRENT_POSITIONS} position slots are full.`);
+      return;
+    }
+    if (activePositions.some((p) => p.tokenAddress === fresh.address)) continue;
+
+    // Shared helper, so this path obeys MAX_BUYS_PER_TOKEN and the loss/cooldown
+    // rules identically to every other entry. Treated as a new coin, which is
+    // what it is.
+    if (reentryBlocked(fresh.address, fresh.symbol, true)) continue;
+
+    logger.info(
+      `🌱 FRESH LAUNCH BUY: ${fresh.symbol} — ${fresh.ageMinutes.toFixed(1)}m old, ` +
+        `$${fresh.liquidityUsd.toFixed(0)} liq, $${fresh.buyVolume5m.toFixed(0)} 5m buys, ` +
+        `${fresh.organicBuyPercent.toFixed(1)}% organic`
+    );
+
+    const result = await executeBuy(buildFreshLaunchSignal(fresh));
+    tradeHistory.push({
+      timestamp: Date.now(),
+      symbol: fresh.symbol,
+      action: "BUY",
+      confidence: 100,
+      result: result.success ? "SUCCESS" : `FAILED: ${result.error}`,
+      txSignature: result.txSignature,
+    });
+    if (result.success) {
+      logger.info(`✅ Fresh-launch buy executed: ${fresh.symbol}`);
+      buyCounts = recordBuy(buyCounts, fresh.address, fresh.symbol);
+    } else {
+      logger.warn(`❌ Fresh-launch buy failed: ${result.error}`);
+    }
+    await persistRuntimeState();
+  }
+}
+
+/**
+ * A synthetic signal for a fresh launch. Take-profit comes from the
+ * fresh-launch config (75% by default) rather than the main TAKE_PROFIT_PERCENT
+ * — the whole point of this path is a bigger target on a smaller stake. The
+ * stop-loss stays on the shared setting so one risk rule governs the bot.
+ */
+function buildFreshLaunchSignal(fresh: FreshLaunchCandidate): TradeSignal {
+  const token: TokenCandidate = {
+    address: fresh.address,
+    symbol: fresh.symbol,
+    name: fresh.name,
+    chainId: "solana",
+    pairAddress: fresh.address,
+    priceUsd: fresh.priceUsd,
+    priceChange5m: 0,
+    priceChange1h: 0,
+    priceChange6h: 0,
+    priceChange24h: 0,
+    volume24h: fresh.buyVolume5m,
+    volumeChange: 0,
+    liquidityUsd: fresh.liquidityUsd,
+    marketCap: fresh.marketCapUsd,
+    txns24hBuys: 0,
+    txns24hSells: 0,
+    buyToSellRatio: 0,
+    pairCreatedAt: Date.now() - fresh.ageMinutes * 60_000,
+    ageHours: fresh.ageMinutes / 60,
+    url: `https://jup.ag/tokens/${fresh.address}`,
+    hasXSocial: false,
+    hasOtherSocial: false,
+    hasPaidDexInfo: false,
+  };
+
+  return {
+    token,
+    confidence: 100,
+    action: "BUY",
+    reasoning:
+      `Fresh launch: ${fresh.ageMinutes.toFixed(1)}m old, $${fresh.liquidityUsd.toFixed(0)} liquidity, ` +
+      `$${fresh.buyVolume5m.toFixed(0)} 5m buy volume, ${fresh.organicBuyPercent.toFixed(1)}% organic, ` +
+      `mint+freeze disabled. No model analysis.`,
+    entryPrice: fresh.priceUsd,
+    stopLoss: fresh.priceUsd * (1 - CONFIG.stopLossPercent / 100),
+    takeProfit: fresh.priceUsd * (1 + CONFIG.freshLaunchTakeProfitPercent / 100),
+    positionSizeSol: CONFIG.freshLaunchPositionSol,
+    riskRewardRatio: CONFIG.freshLaunchTakeProfitPercent / CONFIG.stopLossPercent,
+    trendStrength: "unknown",
+    momentum: "unknown",
+    riskLevel: "high",
+    narrative: "fresh-launch",
+  };
+}
+
 function buildInstantBuySignal(token: TokenCandidate): TradeSignal {
   return {
     token,
@@ -401,6 +511,15 @@ async function runCycle(): Promise<void> {
     } catch (error) {
       logger.error(`Profit sweep threw (non-fatal): ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+
+  // Runs before the main scan: this path is only useful inside a five-minute
+  // window, so it must not queue behind the model calls below. Never fatal —
+  // a failure here leaves the normal pipeline untouched.
+  try {
+    await scanFreshLaunches();
+  } catch (error) {
+    logger.error(`Fresh-launch scan threw (non-fatal): ${error instanceof Error ? error.message : String(error)}`);
   }
 
   if (analysisModelStatus !== "ok") {

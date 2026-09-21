@@ -127,6 +127,22 @@ export interface AppConfig {
    * ~30 calls/min and was measured dropping 2 of 5 calls; 0 disables caching.
    */
   geckoterminalCacheSeconds: number;
+  /**
+   * Side scanner for brand-new launches (src/fresh-launch.ts). Independent of
+   * the main pipeline: its own position size and take-profit, and it buys
+   * without a model call, because a token this young has nothing to analyse.
+   *
+   * freshLaunchMinOrganicBuyPercent stands in for the "pro traders" bar —
+   * Jupiter's UI shows one but the public API does not expose it, so this
+   * reads Jupiter's organic share of 5m buy volume instead.
+   */
+  freshLaunchEnabled: boolean;
+  freshLaunchMaxAgeMinutes: number;
+  freshLaunchMinLiquidityUsd: number;
+  freshLaunchMinBuyVolume5m: number;
+  freshLaunchMinOrganicBuyPercent: number;
+  freshLaunchPositionSol: number;
+  freshLaunchTakeProfitPercent: number;
   /** Minutes an AI verdict is reused before re-analysing the same token. */
   analysisCacheMinutes: number;
   /**
@@ -423,6 +439,13 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     maxCandidatesPerCycle: parseNumberInRange("MAX_CANDIDATES_PER_CYCLE", env.MAX_CANDIDATES_PER_CYCLE, 5, 1, 25),
     analysisConcurrency: parseNumberInRange("ANALYSIS_CONCURRENCY", env.ANALYSIS_CONCURRENCY, 4, 1, 10),
     geckoterminalCacheSeconds: parseNumberInRange("GECKOTERMINAL_CACHE_SECONDS", env.GECKOTERMINAL_CACHE_SECONDS, 45, 0, 3600),
+    freshLaunchEnabled: parseBoolean(env.FRESH_LAUNCH_ENABLED, false),
+    freshLaunchMaxAgeMinutes: parseNumberInRange("FRESH_LAUNCH_MAX_AGE_MINUTES", env.FRESH_LAUNCH_MAX_AGE_MINUTES, 5, 0.1, 120),
+    freshLaunchMinLiquidityUsd: parseNumberInRange("FRESH_LAUNCH_MIN_LIQUIDITY_USD", env.FRESH_LAUNCH_MIN_LIQUIDITY_USD, 4800, 0, 10_000_000),
+    freshLaunchMinBuyVolume5m: parseNumberInRange("FRESH_LAUNCH_MIN_BUY_VOLUME_5M", env.FRESH_LAUNCH_MIN_BUY_VOLUME_5M, 1100, 0, 10_000_000),
+    freshLaunchMinOrganicBuyPercent: parseNumberInRange("FRESH_LAUNCH_MIN_ORGANIC_BUY_PERCENT", env.FRESH_LAUNCH_MIN_ORGANIC_BUY_PERCENT, 45, 0, 100),
+    freshLaunchPositionSol: parseNumberInRange("FRESH_LAUNCH_POSITION_SOL", env.FRESH_LAUNCH_POSITION_SOL, 0.05, 0, 100),
+    freshLaunchTakeProfitPercent: parseNumberInRange("FRESH_LAUNCH_TAKE_PROFIT_PERCENT", env.FRESH_LAUNCH_TAKE_PROFIT_PERCENT, 75, 1, 10_000),
     analysisCacheMinutes: parseNumberInRange("ANALYSIS_CACHE_MINUTES", env.ANALYSIS_CACHE_MINUTES, 10, 0, 1440),
     telegramEnabled: parseBoolean(env.TELEGRAM_ENABLED, false),
     telegramApiId: parseNumberInRange("TELEGRAM_API_ID", env.TELEGRAM_API_ID, 0, 0, 1_000_000_000),
