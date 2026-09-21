@@ -17,10 +17,11 @@ import { decideSweep } from "./profit-sweep.js";
 import { TradeSignal } from "./analyze.js";
 import { logger } from "./logger.js";
 import { httpGet } from "./http.js";
-import { executeJupiterSwap, getJupiterQuote, isValidSolanaMint, SOL_MINT } from "./services/jupiter-client.js";
+import { getJupiterQuote, isValidSolanaMint, SOL_MINT } from "./services/jupiter-client.js";
 import { forcePriorityFee } from "./services/priority-fee.js";
 import { nextLadderRung } from "./take-profit-ladder.js";
 import { fetchLivePrice } from "./live-price.js";
+import { confirmOrRecoverSwap, deriveTransactionSignature } from "./services/swap-confirmation.js";
 
 export interface TradeResult {
   success: boolean;
@@ -558,9 +559,10 @@ async function executeAddOnLocked(position: ActivePosition, signal: TradeSignal,
   applyPriorityFee(transaction, "ADD-ON");
   transaction.sign([wallet]);
   const signedTransaction = Buffer.from(transaction.serialize()).toString("base64");
-  const execution = await executeJupiterSwap(order, signedTransaction);
-  if (!execution || execution.status !== "Success" || !execution.signature) {
-    return failure(`Jupiter execution failed${execution?.error ? `: ${execution.error}` : ""}`);
+  const ownSignature = deriveTransactionSignature(transaction);
+  const execution = await confirmOrRecoverSwap(connection, order, signedTransaction, ownSignature);
+  if (!execution.success || !execution.signature) {
+    return failure(execution.error ?? "Jupiter execution failed");
   }
 
   // getJupiterQuote() itself already rejects a response with no outAmount
@@ -756,17 +758,22 @@ async function executeBuyLocked(signal: TradeSignal): Promise<TradeResult> {
     applyPriorityFee(transaction, "BUY");
     transaction.sign([wallet]);
     const signedTransaction = Buffer.from(transaction.serialize()).toString("base64");
-    const execution = await executeJupiterSwap(order, signedTransaction);
-    if (!execution || execution.status !== "Success" || !execution.signature) {
+    // Derived BEFORE calling Jupiter: this is the transaction's own signature,
+    // known locally regardless of whether Jupiter ever answers — see
+    // swap-confirmation.ts for why an unanswered /execute is not the same as
+    // "this did not happen".
+    const ownSignature = deriveTransactionSignature(transaction);
+    const execution = await confirmOrRecoverSwap(connection, order, signedTransaction, ownSignature);
+    if (!execution.success || !execution.signature) {
       return {
         success: false,
-        txSignature: execution?.signature,
+        txSignature: execution.signature,
         entryPrice: token.priceUsd,
         amountSol: positionSizeSol,
         tokenAddress: token.address,
         tokenSymbol: token.symbol,
         timestamp: Date.now(),
-        error: `Jupiter execution failed${execution?.error ? `: ${execution.error}` : ""}`,
+        error: execution.error ?? "Jupiter execution failed",
       };
     }
 
@@ -976,9 +983,10 @@ async function executeSellPartialLocked(
     applyPriorityFee(transaction, "PARTIAL SELL");
     transaction.sign([wallet]);
     const signedTransaction = Buffer.from(transaction.serialize()).toString("base64");
-    const execution = await executeJupiterSwap(order, signedTransaction);
-    if (!execution || execution.status !== "Success" || !execution.signature) {
-      throw new Error(`Jupiter partial sell failed${execution?.error ? `: ${execution.error}` : ""}`);
+    const ownSignature = deriveTransactionSignature(transaction);
+    const execution = await confirmOrRecoverSwap(connection, order, signedTransaction, ownSignature);
+    if (!execution.success || !execution.signature) {
+      throw new Error(execution.error ?? "Jupiter partial sell failed");
     }
 
     // Only mutate the position after the swap has actually settled, so a
@@ -1183,9 +1191,10 @@ async function executeSellLocked(position: ActivePosition, reason: string, markP
     applyPriorityFee(transaction, "SELL");
     transaction.sign([wallet]);
     const signedTransaction = Buffer.from(transaction.serialize()).toString("base64");
-    const execution = await executeJupiterSwap(order, signedTransaction);
-    if (!execution || execution.status !== "Success" || !execution.signature) {
-      throw new Error(`Jupiter sell execution failed${execution?.error ? `: ${execution.error}` : ""}`);
+    const ownSignature = deriveTransactionSignature(transaction);
+    const execution = await confirmOrRecoverSwap(connection, order, signedTransaction, ownSignature);
+    if (!execution.success || !execution.signature) {
+      throw new Error(execution.error ?? "Jupiter sell execution failed");
     }
 
     const txSignature = execution.signature;
