@@ -15,6 +15,25 @@ export interface AppConfig {
   dexScreenerApiUrl: string;
   jupiterApiBaseUrl: string;
   jupiterApiKey: string;
+  /**
+   * Slippage tolerance sent to Jupiter, per side. Asymmetric on purpose: a buy
+   * that misses is a missed opportunity, but a sell that misses leaves money
+   * in a coin that may be draining, so the exit is given more room than the
+   * entry.
+   */
+  buySlippagePercent: number;
+  sellSlippagePercent: number;
+  /**
+   * Priority fee budget per swap, in SOL.
+   *
+   * NOTE: measured 2026-09-21 against api.jup.ag/swap/v2, the /order endpoint
+   * ignores client-supplied fee parameters and sets prioritizationFeeLamports
+   * itself (~0.0002 SOL, varying with congestion). Baseline and requested runs
+   * landed in the same 173k-235k lamport range. This value is still sent, so
+   * it takes effect if Jupiter honours it (e.g. with an API key), but do not
+   * assume it is being applied today - see the report in this session.
+   */
+  priorityFeeSol: number;
   scanChains: string[];
   dashboardApiUrl: string;
   dashboardApiKey: string;
@@ -101,6 +120,11 @@ export interface AppConfig {
    * full batch, on coins whose whole edge is measured in seconds.
    */
   analysisConcurrency: number;
+  /**
+   * Seconds a GeckoTerminal new-pools result is reused. Their keyless tier is
+   * ~30 calls/min and was measured dropping 2 of 5 calls; 0 disables caching.
+   */
+  geckoterminalCacheSeconds: number;
   /** Minutes an AI verdict is reused before re-analysing the same token. */
   analysisCacheMinutes: number;
   /**
@@ -299,6 +323,9 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     // production bot and higher reliability. Strip trailing slashes so
     // `${base}/order` never produces a double slash.
     jupiterApiBaseUrl: (env.JUPITER_API_BASE_URL || "https://api.jup.ag/swap/v2").replace(/\/+$/, ""),
+    buySlippagePercent: parseNumberInRange("BUY_SLIPPAGE_PERCENT", env.BUY_SLIPPAGE_PERCENT, 35, 0.1, 100),
+    sellSlippagePercent: parseNumberInRange("SELL_SLIPPAGE_PERCENT", env.SELL_SLIPPAGE_PERCENT, 50, 0.1, 100),
+    priorityFeeSol: parseNumberInRange("PRIORITY_FEE_SOL", env.PRIORITY_FEE_SOL, 0.005, 0, 1),
     // Accept either name: JUPITER_API_KEY, or JUPITER_API (the label Jupiter's
     // own portal shows when you generate a key).
     jupiterApiKey: env.JUPITER_API_KEY || env.JUPITER_API || "",
@@ -393,6 +420,7 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     newCoinMinMomentumPercent: parseNumberInRange("NEW_COIN_MIN_MOMENTUM_PERCENT", env.NEW_COIN_MIN_MOMENTUM_PERCENT, 15, -100, 10_000),
     maxCandidatesPerCycle: parseNumberInRange("MAX_CANDIDATES_PER_CYCLE", env.MAX_CANDIDATES_PER_CYCLE, 5, 1, 25),
     analysisConcurrency: parseNumberInRange("ANALYSIS_CONCURRENCY", env.ANALYSIS_CONCURRENCY, 4, 1, 10),
+    geckoterminalCacheSeconds: parseNumberInRange("GECKOTERMINAL_CACHE_SECONDS", env.GECKOTERMINAL_CACHE_SECONDS, 45, 0, 3600),
     analysisCacheMinutes: parseNumberInRange("ANALYSIS_CACHE_MINUTES", env.ANALYSIS_CACHE_MINUTES, 10, 0, 1440),
     telegramEnabled: parseBoolean(env.TELEGRAM_ENABLED, false),
     telegramApiId: parseNumberInRange("TELEGRAM_API_ID", env.TELEGRAM_API_ID, 0, 0, 1_000_000_000),

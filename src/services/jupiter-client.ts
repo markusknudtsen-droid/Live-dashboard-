@@ -58,12 +58,26 @@ export async function getJupiterQuote(
     return null;
   }
 
+  // Side is derived rather than passed: in this bot a buy is always
+  // SOL -> token and a sell always token -> SOL, so every one of the four
+  // call sites in trader.ts is unambiguous. A hypothetical token -> token
+  // swap would get the (wider) sell tolerance, which is the safe direction.
+  const isBuy = inputMint === SOL_MINT;
+  const slippagePercent = isBuy ? CONFIG.buySlippagePercent : CONFIG.sellSlippagePercent;
+
   const data = await httpGet<JupiterOrderResponse | null>(`${CONFIG.jupiterApiBaseUrl}/order`, {
     params: {
       inputMint,
       outputMint,
       amount: String(amount),
       taker,
+      slippageBps: String(Math.round(slippagePercent * 100)),
+      // Jupiter currently overrides this with its own dynamic figure on the
+      // v2 /order endpoint (see CONFIG.priorityFeeSol). Sent anyway so the
+      // configured budget applies the moment Jupiter honours it.
+      ...(CONFIG.priorityFeeSol > 0
+        ? { priorityFeeLamports: String(Math.round(CONFIG.priorityFeeSol * 1_000_000_000)) }
+        : {}),
     },
     headers: jupiterAuthHeaders(),
   });

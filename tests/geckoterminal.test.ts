@@ -51,3 +51,53 @@ test("malformed included entries (wrong type, missing address) are ignored", () 
   };
   assert.deepEqual(extractMints(shape, 10), []);
 });
+
+test("a second call inside the TTL is served from cache, not the network", async () => {
+  const { fetchNewPoolMints, clearNewPoolCache } = await import("../src/geckoterminal.js");
+  const { CONFIG } = await import("../src/config.js");
+
+  if (CONFIG.geckoterminalCacheSeconds <= 0) return; // caching disabled by config
+
+  const realFetch = globalThis.fetch;
+  let calls = 0;
+  let mode: "ok" | "ratelimited" = "ok";
+
+  globalThis.fetch = (async () => {
+    calls++;
+    if (mode === "ratelimited") return new Response("rate limited", { status: 429 });
+    return new Response(JSON.stringify(FIXTURE), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  try {
+    clearNewPoolCache();
+
+    const first = await fetchNewPoolMints("solana", 20);
+    assert.equal(calls, 1, "cold cache must hit the network");
+    assert.ok(first.length > 0);
+
+    const second = await fetchNewPoolMints("solana", 20);
+    assert.equal(calls, 1, "second call inside the TTL must NOT hit the network");
+    assert.deepEqual(second, first);
+
+    // A different limit is a different cache key, so it must fetch again.
+    await fetchNewPoolMints("solana", 5);
+    assert.equal(calls, 2, "a different limit must not read the other key's entry");
+
+    // A 429 on a warm cache serves the last good list rather than [], so one
+    // rate-limited call cannot blind the scanner for a cycle.
+    mode = "ratelimited";
+    const warmFail = await fetchNewPoolMints("solana", 20);
+    assert.deepEqual(warmFail, first, "a warm cache must survive a rate-limited call");
+
+    // A cold cache with a failing call has nothing to fall back on.
+    clearNewPoolCache();
+    const coldFail = await fetchNewPoolMints("solana", 20);
+    assert.deepEqual(coldFail, [], "a cold cache with a failing call yields empty");
+  } finally {
+    globalThis.fetch = realFetch;
+    clearNewPoolCache();
+  }
+});
