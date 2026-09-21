@@ -24,14 +24,16 @@ export interface AppConfig {
   buySlippagePercent: number;
   sellSlippagePercent: number;
   /**
-   * Priority fee budget per swap, in SOL.
+   * Priority fee paid per swap, in SOL.
    *
-   * NOTE: measured 2026-09-21 against api.jup.ag/swap/v2, the /order endpoint
-   * ignores client-supplied fee parameters and sets prioritizationFeeLamports
-   * itself (~0.0002 SOL, varying with congestion). Baseline and requested runs
-   * landed in the same 173k-235k lamport range. This value is still sent, so
-   * it takes effect if Jupiter honours it (e.g. with an API key), but do not
-   * assume it is being applied today - see the report in this session.
+   * Jupiter's /order ignores client-supplied fee parameters and sets
+   * prioritizationFeeLamports itself (~0.0002 SOL), so this is ENFORCED by
+   * rewriting the transaction's ComputeBudget instruction before signing —
+   * see services/priority-fee.ts. Verified against a live order: Jupiter's
+   * own 193952 lamports became exactly 1000000.
+   *
+   * Cost check before raising this: at 0.1 SOL positions, 0.001 is 1% per
+   * swap and 2% per round trip.
    */
   priorityFeeSol: number;
   scanChains: string[];
@@ -325,7 +327,7 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     jupiterApiBaseUrl: (env.JUPITER_API_BASE_URL || "https://api.jup.ag/swap/v2").replace(/\/+$/, ""),
     buySlippagePercent: parseNumberInRange("BUY_SLIPPAGE_PERCENT", env.BUY_SLIPPAGE_PERCENT, 35, 0.1, 100),
     sellSlippagePercent: parseNumberInRange("SELL_SLIPPAGE_PERCENT", env.SELL_SLIPPAGE_PERCENT, 50, 0.1, 100),
-    priorityFeeSol: parseNumberInRange("PRIORITY_FEE_SOL", env.PRIORITY_FEE_SOL, 0.005, 0, 1),
+    priorityFeeSol: parseNumberInRange("PRIORITY_FEE_SOL", env.PRIORITY_FEE_SOL, 0.001, 0, 1),
     // Accept either name: JUPITER_API_KEY, or JUPITER_API (the label Jupiter's
     // own portal shows when you generate a key).
     jupiterApiKey: env.JUPITER_API_KEY || env.JUPITER_API || "",

@@ -18,6 +18,7 @@ import { TradeSignal } from "./analyze.js";
 import { logger } from "./logger.js";
 import { httpGet } from "./http.js";
 import { executeJupiterSwap, getJupiterQuote, isValidSolanaMint, SOL_MINT } from "./services/jupiter-client.js";
+import { forcePriorityFee } from "./services/priority-fee.js";
 
 export interface TradeResult {
   success: boolean;
@@ -270,6 +271,32 @@ function findPositionIndex(position: ActivePosition): number {
  * reached the activation gain, so the stop is now trailing rather than sitting
  * at the original level.
  */
+/**
+ * Force CONFIG.priorityFeeSol onto a Jupiter-assembled swap, before signing.
+ *
+ * Jupiter's /order sets its own prioritizationFeeLamports (~0.0002 SOL) and
+ * ignores the fee parameters we send, so the only way to control what the
+ * trade actually pays to land is to rewrite the ComputeBudget instruction
+ * here. Verified against a live order: 193952 lamports in, 1000000 out.
+ *
+ * Logged either way — if Jupiter ever changes the transaction shape and the
+ * rewrite stops finding its instruction, that must be visible rather than
+ * silently reverting to their fee.
+ */
+function applyPriorityFee(tx: VersionedTransaction, label: string): void {
+  if (CONFIG.priorityFeeSol <= 0) return;
+  const target = Math.round(CONFIG.priorityFeeSol * LAMPORTS_PER_SOL);
+  const result = forcePriorityFee(tx, target);
+  if (result.applied) {
+    logger.info(
+      `⚡ ${label}: priority fee forced to ${CONFIG.priorityFeeSol} SOL ` +
+        `(${result.microLamportsPerCu} µlamports/CU over ${result.computeUnitLimit} CU)`
+    );
+  } else {
+    logger.warn(`⚡ ${label}: priority fee NOT applied — ${result.reason}`);
+  }
+}
+
 export function trailIsArmed(position: ActivePosition): boolean {
   if (!Number.isFinite(position.entryPrice) || position.entryPrice <= 0) return false;
   const peak = position.peakPrice ?? position.entryPrice;
@@ -510,6 +537,7 @@ async function executeAddOnLocked(position: ActivePosition, signal: TradeSignal,
   if (!order?.transaction || !order.requestId) return failure("No valid Jupiter Swap V2 order found");
 
   const transaction = VersionedTransaction.deserialize(Buffer.from(order.transaction, "base64"));
+  applyPriorityFee(transaction, "ADD-ON");
   transaction.sign([wallet]);
   const signedTransaction = Buffer.from(transaction.serialize()).toString("base64");
   const execution = await executeJupiterSwap(order, signedTransaction);
@@ -707,6 +735,7 @@ async function executeBuyLocked(signal: TradeSignal): Promise<TradeResult> {
     }
 
     const transaction = VersionedTransaction.deserialize(Buffer.from(order.transaction, "base64"));
+    applyPriorityFee(transaction, "BUY");
     transaction.sign([wallet]);
     const signedTransaction = Buffer.from(transaction.serialize()).toString("base64");
     const execution = await executeJupiterSwap(order, signedTransaction);
@@ -926,6 +955,7 @@ async function executeSellPartialLocked(
     if (!order?.transaction || !order.requestId) return failure("No valid Jupiter Swap V2 partial sell order found");
 
     const transaction = VersionedTransaction.deserialize(Buffer.from(order.transaction, "base64"));
+    applyPriorityFee(transaction, "PARTIAL SELL");
     transaction.sign([wallet]);
     const signedTransaction = Buffer.from(transaction.serialize()).toString("base64");
     const execution = await executeJupiterSwap(order, signedTransaction);
@@ -1132,6 +1162,7 @@ async function executeSellLocked(position: ActivePosition, reason: string, markP
     }
 
     const transaction = VersionedTransaction.deserialize(Buffer.from(order.transaction, "base64"));
+    applyPriorityFee(transaction, "SELL");
     transaction.sign([wallet]);
     const signedTransaction = Buffer.from(transaction.serialize()).toString("base64");
     const execution = await executeJupiterSwap(order, signedTransaction);
