@@ -94,6 +94,13 @@ export interface AppConfig {
   newCoinMinMomentumPercent: number;
   /** Candidates sent to the model per cycle. Was hardcoded at 5. */
   maxCandidatesPerCycle: number;
+  /**
+   * How many candidates are analysed at once. Analysis used to be strictly
+   * sequential, so a BUY decided on the first token still waited for every
+   * later token's model call before anything could execute — minutes on a
+   * full batch, on coins whose whole edge is measured in seconds.
+   */
+  analysisConcurrency: number;
   /** Minutes an AI verdict is reused before re-analysing the same token. */
   analysisCacheMinutes: number;
   /**
@@ -385,6 +392,7 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     newCoinMaxAgeHours: parseNumberInRange("NEW_COIN_MAX_AGE_HOURS", env.NEW_COIN_MAX_AGE_HOURS, 6, 0.05, 168),
     newCoinMinMomentumPercent: parseNumberInRange("NEW_COIN_MIN_MOMENTUM_PERCENT", env.NEW_COIN_MIN_MOMENTUM_PERCENT, 15, -100, 10_000),
     maxCandidatesPerCycle: parseNumberInRange("MAX_CANDIDATES_PER_CYCLE", env.MAX_CANDIDATES_PER_CYCLE, 5, 1, 25),
+    analysisConcurrency: parseNumberInRange("ANALYSIS_CONCURRENCY", env.ANALYSIS_CONCURRENCY, 4, 1, 10),
     analysisCacheMinutes: parseNumberInRange("ANALYSIS_CACHE_MINUTES", env.ANALYSIS_CACHE_MINUTES, 10, 0, 1440),
     telegramEnabled: parseBoolean(env.TELEGRAM_ENABLED, false),
     telegramApiId: parseNumberInRange("TELEGRAM_API_ID", env.TELEGRAM_API_ID, 0, 0, 1_000_000_000),
