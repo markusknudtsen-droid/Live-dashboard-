@@ -115,8 +115,29 @@ test("a zero cooldown allows immediate re-entry", () => {
 });
 
 test("the most recent exit governs", () => {
-  const exits: RecentExit[] = [exitedAt(600), { ...exitedAt(2), wasLoss: false }];
+  // Both losses, so the cooldown applies either way — this is purely about
+  // which record wins. The old one is long past its cooldown; the new one is
+  // not, so a block proves the 2-minute-old record is the one being read.
+  const exits: RecentExit[] = [exitedAt(600), exitedAt(2)];
   assert.equal(canReenter("mintX", exits, NOW).allowed, false, "the 2-minute-old exit wins");
+});
+
+test("a winning exit serves no cooldown — it is a re-entry, not a mistake", () => {
+  // Operator rule: a coin that spiked, was banked, and dipped back is exactly
+  // the setup to take again. Only losses wait.
+  const justWon: RecentExit[] = [{ ...exitedAt(0), wasLoss: false }];
+  assert.equal(canReenter("mintX", justWon, NOW).allowed, true, "a winner is immediately re-enterable");
+
+  // And the same token exited at a loss a moment ago is still barred.
+  const justLost: RecentExit[] = [exitedAt(0)];
+  assert.equal(canReenter("mintX", justLost, NOW).allowed, false);
+});
+
+test("a winner is re-enterable even when the loss-block is on", () => {
+  // blockLosersForRun must not leak into profitable exits.
+  const cfg = { ...DEFAULT_REENTRY, blockLosersForRun: true };
+  const won: RecentExit[] = [{ ...exitedAt(1), wasLoss: false }];
+  assert.equal(canReenter("mintX", won, NOW, cfg).allowed, true);
 });
 
 test("recordExit replaces the previous record rather than appending forever", () => {

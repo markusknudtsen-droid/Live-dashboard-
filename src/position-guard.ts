@@ -117,6 +117,13 @@ export function canReenter(
     return { allowed: false, reason: `${latest.tokenSymbol} exited at a loss this run; re-entry blocked` };
   }
 
+  // A profitable exit is not a warning, it is the setup the operator wants to
+  // take again — a coin that spiked, was banked, and dips back is a re-entry,
+  // not a mistake to sit out. Only losses serve the cooldown. MAX_BUYS_PER_TOKEN
+  // still caps how many times a single token can be entered in one run, so
+  // dropping the timer here cannot turn into an unbounded loop on one coin.
+  if (!latest.wasLoss) return { allowed: true };
+
   const elapsedMinutes = (now - latest.exitedAt) / 60_000;
   if (Number.isFinite(elapsedMinutes) && elapsedMinutes < config.cooldownMinutes) {
     const remaining = Math.ceil(config.cooldownMinutes - elapsedMinutes);

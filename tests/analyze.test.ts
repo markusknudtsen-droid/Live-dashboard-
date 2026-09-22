@@ -11,14 +11,22 @@ import type { AddressInfo } from "node:net";
 let mockResponse: { status: number; body: unknown } = { status: 200, body: {} };
 let lastRequest: { path: string; authorization: string | undefined } | null = null;
 
+// When set, the server awaits this before answering. Lets a test hold every
+// request open at once to observe real in-flight concurrency.
+let beforeRespond: (() => Promise<void>) | null = null;
+
 const server = http.createServer((req, res) => {
   let raw = "";
   req.on("data", (chunk) => (raw += chunk));
   req.on("end", () => {
     lastRequest = { path: req.url || "", authorization: req.headers.authorization };
-    res.statusCode = mockResponse.status;
-    res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify(mockResponse.body));
+    const respond = () => {
+      res.statusCode = mockResponse.status;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify(mockResponse.body));
+    };
+    if (beforeRespond) void beforeRespond().then(respond);
+    else respond();
   });
 });
 
@@ -42,6 +50,7 @@ const {
   resetAnalysisFailureTracking,
   buildAnalysisRequestBody,
   analyzeToken,
+  batchAnalyze,
 } = await import("../src/analyze.js");
 const { logger } = await import("../src/logger.js");
 const { CONFIG } = await import("../src/config.js");
@@ -442,4 +451,60 @@ test("noteAnalysisOutcome: a success after failures resets the streak", (t) => {
   noteAnalysisOutcome(false, "err3");
   noteAnalysisOutcome(false, "err4");
   assert.equal(errorSpy.mock.calls.length, 0, "streak must have been reset by the success");
+});
+
+test("batchAnalyze runs candidates concurrently", async () => {
+  // The gate server holds every request open until `wanted` of them have
+  // arrived at once, so this can only complete if the calls are genuinely in
+  // flight together. Sequentially it deadlocks and times out — which is the
+  // point: the test fails if concurrency ever regresses.
+  const wanted = Math.min(CONFIG.analysisConcurrency, 4);
+  assert.ok(wanted >= 2, "this test needs analysisConcurrency >= 2");
+
+  // Each response is delayed by DELAY_MS. Run sequentially that costs
+  // wanted*DELAY_MS; run concurrently it costs about DELAY_MS. The threshold
+  // sits well between the two, so this fails if concurrency regresses without
+  // being sensitive to machine speed.
+  const DELAY_MS = 200;
+  const sequentialMs = wanted * DELAY_MS;
+  const threshold = sequentialMs * 0.6;
+
+  mockResponse = {
+    status: 200,
+    body: {
+      choices: [
+        {
+          message: {
+            content: JSON.stringify({
+              action: "SKIP",
+              confidence: 10,
+              reasoning: "concurrency probe",
+              trendStrength: "neutral",
+              momentum: "steady",
+              suggestedPositionSol: 0,
+              stopLossPercent: 30,
+              takeProfitPercent: 50,
+            }),
+          },
+        },
+      ],
+    },
+  };
+
+  beforeRespond = () => new Promise<void>((r) => setTimeout(r, DELAY_MS));
+
+  try {
+    const candidates = Array.from({ length: wanted }, (_, i) => ({ ...CANDIDATE, symbol: `TOK${i}` }));
+    const started = Date.now();
+    const out = await batchAnalyze(candidates);
+    const elapsed = Date.now() - started;
+
+    assert.equal(out.length, wanted, "every candidate should yield a signal");
+    assert.ok(
+      elapsed < threshold,
+      `expected ~${DELAY_MS}ms concurrent, got ${elapsed}ms (sequential would be ~${sequentialMs}ms)`
+    );
+  } finally {
+    beforeRespond = null;
+  }
 });

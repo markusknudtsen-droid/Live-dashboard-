@@ -4,6 +4,8 @@ import { batchAnalyze, TradeSignal } from "./analyze.js";
 import {
   initTrader,
   executeBuy,
+  executeAddOn,
+  trailIsArmed,
   executeSell,
   executeSweep,
   monitorPositions,
@@ -16,6 +18,8 @@ import {
   MAX_CONCURRENT_POSITIONS,
 } from "./trader.js";
 import { isBearishSignal, shouldCloseHeldPosition } from "./momentum-guard.js";
+import { findFreshLaunches, type FreshLaunchCandidate } from "./fresh-launch.js";
+import { sizeForConfidence } from "./position-sizing.js";
 import { logger } from "./logger.js";
 import { filterRestorablePositions, loadState, saveState, TradeHistoryItem } from "./persistence.js";
 import { isDashboardReportingEnabled, reportTrade } from "./dashboard-reporter.js";
@@ -27,6 +31,7 @@ import {
 } from "./first-trade-gate.js";
 import type { FirstTradeValidation } from "./first-trade-gate.js";
 import { adjustConfidence, checkRugGates, qualifiesForInstantBuy } from "./entry-score.js";
+import { recallVerdict, rememberVerdict, type AnalysisCache } from "./analysis-cache.js";
 import { fetchRugCheckReport } from "./rugcheck.js";
 import { fetchNewPoolMints } from "./geckoterminal.js";
 import { checkSmallCapGate } from "./small-cap-gate.js";
@@ -66,8 +71,12 @@ const tradeHistory: TradeHistoryItem[] = [];
  * Recent model verdicts, keyed by token address. The scan sources return a
  * stable set, so without this the bot pays to re-analyse unchanged tokens every
  * cycle instead of spending that budget on ones it has not seen.
+ *
+ * Stored and returned BY VALUE — see analysis-cache.ts. Handing out the live
+ * object let the confidence modifiers boost the cached verdict in place, so
+ * every reuse inside the TTL applied those bonuses a second time.
  */
-const analysisCache = new Map<string, { at: number; signal: TradeSignal }>();
+const analysisCache: AnalysisCache = new Map();
 
 /**
  * When each held position was last re-analysed for a bearish exit. Separate
@@ -179,6 +188,115 @@ function reentryBlocked(tokenAddress: string, symbol: string, useNewCoinCooldown
  * much risk to take. Confidence is recorded as 100 only to denote "did not go
  * through the model"; it is never compared against minConfidence on this path.
  */
+/**
+ * Scan Jupiter's newest pools and buy anything that clears the fresh-launch
+ * gate, at its own size and take-profit.
+ *
+ * Deliberately separate from the main pipeline: no model call (a five-minute-
+ * old token has nothing to analyse) and no DexScreener dependency. The gate in
+ * fresh-launch.ts is the only thing standing between this and the wallet, so
+ * it fails closed on missing data.
+ *
+ * Still subject to every shared safety rule: concurrent-position limits,
+ * re-entry blocks, and not doubling into something already held.
+ */
+async function scanFreshLaunches(): Promise<void> {
+  if (!CONFIG.freshLaunchEnabled || CONFIG.dryRun) return;
+
+  const candidates = await findFreshLaunches();
+  if (candidates.length === 0) return;
+
+  for (const fresh of candidates) {
+    const activePositions = getActivePositions();
+    if (activePositions.length >= MAX_CONCURRENT_POSITIONS) {
+      logger.info(`🌱 ${fresh.symbol} qualified but all ${MAX_CONCURRENT_POSITIONS} position slots are full.`);
+      return;
+    }
+    if (activePositions.some((p) => p.tokenAddress === fresh.address)) continue;
+
+    // Shared helper, so this path obeys MAX_BUYS_PER_TOKEN and the loss/cooldown
+    // rules identically to every other entry. Treated as a new coin, which is
+    // what it is.
+    if (reentryBlocked(fresh.address, fresh.symbol, true)) continue;
+
+    logger.info(
+      `🌱 FRESH LAUNCH BUY: ${fresh.symbol} — ${fresh.ageMinutes.toFixed(1)}m old, ` +
+        `$${fresh.liquidityUsd.toFixed(0)} liq, $${fresh.buyVolume5m.toFixed(0)} 5m buys, ` +
+        `${fresh.organicBuyPercent.toFixed(1)}% organic`
+    );
+
+    const result = await executeBuy(buildFreshLaunchSignal(fresh));
+    tradeHistory.push({
+      timestamp: Date.now(),
+      symbol: fresh.symbol,
+      action: "BUY",
+      confidence: 100,
+      result: result.success ? "SUCCESS" : `FAILED: ${result.error}`,
+      txSignature: result.txSignature,
+    });
+    if (result.success) {
+      logger.info(`✅ Fresh-launch buy executed: ${fresh.symbol}`);
+      buyCounts = recordBuy(buyCounts, fresh.address, fresh.symbol);
+    } else {
+      logger.warn(`❌ Fresh-launch buy failed: ${result.error}`);
+    }
+    await persistRuntimeState();
+  }
+}
+
+/**
+ * A synthetic signal for a fresh launch. Take-profit comes from the
+ * fresh-launch config (75% by default) rather than the main TAKE_PROFIT_PERCENT
+ * — the whole point of this path is a bigger target on a smaller stake. The
+ * stop-loss stays on the shared setting so one risk rule governs the bot.
+ */
+function buildFreshLaunchSignal(fresh: FreshLaunchCandidate): TradeSignal {
+  const token: TokenCandidate = {
+    address: fresh.address,
+    symbol: fresh.symbol,
+    name: fresh.name,
+    chainId: "solana",
+    pairAddress: fresh.address,
+    priceUsd: fresh.priceUsd,
+    priceChange5m: 0,
+    priceChange1h: 0,
+    priceChange6h: 0,
+    priceChange24h: 0,
+    volume24h: fresh.buyVolume5m,
+    volumeChange: 0,
+    liquidityUsd: fresh.liquidityUsd,
+    marketCap: fresh.marketCapUsd,
+    txns24hBuys: 0,
+    txns24hSells: 0,
+    buyToSellRatio: 0,
+    pairCreatedAt: Date.now() - fresh.ageMinutes * 60_000,
+    ageHours: fresh.ageMinutes / 60,
+    url: `https://jup.ag/tokens/${fresh.address}`,
+    hasXSocial: false,
+    hasOtherSocial: false,
+    hasPaidDexInfo: false,
+  };
+
+  return {
+    token,
+    confidence: 100,
+    action: "BUY",
+    reasoning:
+      `Fresh launch: ${fresh.ageMinutes.toFixed(1)}m old, $${fresh.liquidityUsd.toFixed(0)} liquidity, ` +
+      `$${fresh.buyVolume5m.toFixed(0)} 5m buy volume, ${fresh.organicBuyPercent.toFixed(1)}% organic, ` +
+      `mint+freeze disabled. No model analysis.`,
+    entryPrice: fresh.priceUsd,
+    stopLoss: fresh.priceUsd * (1 - CONFIG.stopLossPercent / 100),
+    takeProfit: fresh.priceUsd * (1 + CONFIG.freshLaunchTakeProfitPercent / 100),
+    positionSizeSol: CONFIG.freshLaunchPositionSol,
+    riskRewardRatio: CONFIG.freshLaunchTakeProfitPercent / CONFIG.stopLossPercent,
+    trendStrength: "unknown",
+    momentum: "unknown",
+    riskLevel: "high",
+    narrative: "fresh-launch",
+  };
+}
+
 function buildInstantBuySignal(token: TokenCandidate): TradeSignal {
   return {
     token,
@@ -336,6 +454,20 @@ async function checkHeldPositionsForBearishExit(): Promise<void> {
       continue;
     }
 
+    // A winner whose trailing stop has armed is already protected on price: it
+    // cannot give back more than the trail distance from its peak. Closing it
+    // here trades that guarantee for an opinion, and the opinion reads
+    // "reversing" on every pullback inside a real run — which is how a position
+    // gets sold at a 300k cap that later prints 8M. Same condition that already
+    // defers take-profit in executeSell, applied to the AI exit too.
+    if (CONFIG.letWinnersRun && trailIsArmed(position)) {
+      logger.info(
+        `🏃 ${position.tokenSymbol}: model reads trend=${signal.trendStrength} momentum=${signal.momentum} ` +
+          `but the trailing stop is armed — letting it run instead of cutting the winner.`
+      );
+      continue;
+    }
+
     logger.warn(
       isBearishSignal(signal.trendStrength, signal.momentum)
         ? `📉 ${position.tokenSymbol}: model now reads trend=${signal.trendStrength} momentum=${signal.momentum} — closing position`
@@ -385,6 +517,15 @@ async function runCycle(): Promise<void> {
     } catch (error) {
       logger.error(`Profit sweep threw (non-fatal): ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+
+  // Runs before the main scan: this path is only useful inside a five-minute
+  // window, so it must not queue behind the model calls below. Never fatal —
+  // a failure here leaves the normal pipeline untouched.
+  try {
+    await scanFreshLaunches();
+  } catch (error) {
+    logger.error(`Fresh-launch scan threw (non-fatal): ${error instanceof Error ? error.message : String(error)}`);
   }
 
   if (analysisModelStatus !== "ok") {
@@ -616,11 +757,11 @@ async function runCycle(): Promise<void> {
   const fresh: typeof candidates = [];
   const reused: TradeSignal[] = [];
   for (const c of candidates) {
-    const hit = analysisCache.get(c.address);
-    if (analysisTtlMs > 0 && hit && nowMs - hit.at < analysisTtlMs) {
+    const hit = recallVerdict(analysisCache, c.address, nowMs, analysisTtlMs);
+    if (hit) {
       // Re-point the cached verdict at the current candidate so price-derived
       // fields downstream are current, even though the model's judgement is not.
-      reused.push({ ...hit.signal, token: c });
+      reused.push({ ...hit, token: c });
     } else {
       fresh.push(c);
     }
@@ -633,7 +774,7 @@ async function runCycle(): Promise<void> {
       ` of ${candidates.length} found...`
   );
   const analysed = await batchAnalyze(toAnalyse);
-  for (const sig of analysed) analysisCache.set(sig.token.address, { at: nowMs, signal: sig });
+  for (const sig of analysed) rememberVerdict(analysisCache, sig, nowMs);
   const signals = [...analysed, ...reused];
 
   // Modifiers adjust the model's confidence using cheap-to-fake marketing
@@ -762,8 +903,29 @@ async function runCycle(): Promise<void> {
   const tradesToExecute = buySignals.slice(0, slotsAvailable);
 
   for (const signal of tradesToExecute) {
-    if (activePositions.find((p) => p.tokenAddress === signal.token.address)) {
-      logger.info(`Already in position for ${signal.token.symbol}, skipping.`);
+    const held = activePositions.find((p) => p.tokenAddress === signal.token.address);
+    if (held) {
+      // A fresh BUY signal for a token we already hold used to be thrown away
+      // unconditionally. If it has genuinely dipped AND the model looked at it
+      // again just now and still says BUY at full confidence, that is exactly
+      // the case worth topping up rather than ignoring - once per position,
+      // at a flat size independent of the original entry.
+      if (
+        CONFIG.addOnEnabled &&
+        !held.addOnTaken &&
+        held.pnlPercent <= -CONFIG.addOnTriggerDipPercent
+      ) {
+        logger.info(
+          `➕ ${signal.token.symbol} is down ${held.pnlPercent.toFixed(1)}% and still reads BUY (${signal.confidence}%) — adding ${CONFIG.addOnSol} SOL.`
+        );
+        const addOnResult = await executeAddOn(held, signal, CONFIG.addOnSol);
+        if (!addOnResult.success) {
+          logger.warn(`Add-on for ${signal.token.symbol} failed: ${addOnResult.error}`);
+        }
+        await persistRuntimeState();
+      } else {
+        logger.info(`Already in position for ${signal.token.symbol}, skipping.`);
+      }
       continue;
     }
 
@@ -890,6 +1052,23 @@ async function runCycle(): Promise<void> {
     );
     logger.info(`Reasoning=${signal.reasoning}`);
 
+    // Size by conviction, using the FINAL confidence — the same number the
+    // filter above used, after every modifier. analyze.ts set a flat size from
+    // MAX_POSITION_SOL before any of those modifiers existed, so this is the
+    // only place the two can agree. Untiered config leaves the original size
+    // untouched, and the instant-buy and fresh-launch paths keep their own
+    // deliberate stakes.
+    if (CONFIG.positionSizeTiers.length > 0) {
+      const tiered = sizeForConfidence(signal.confidence, CONFIG.positionSizeTiers, signal.positionSizeSol);
+      if (tiered !== signal.positionSizeSol) {
+        logger.info(
+          `🎚️  ${signal.token.symbol}: ${signal.confidence}% confidence → staking ${tiered} SOL ` +
+            `(was ${signal.positionSizeSol}).`
+        );
+        signal.positionSizeSol = tiered;
+      }
+    }
+
     const result = await executeBuy(signal);
 
     tradeHistory.push({
@@ -1011,7 +1190,11 @@ async function main(): Promise<void> {
         tokenAddress: event.tokenAddress,
         tokenSymbol: event.symbol,
         exitedAt: Date.now(),
-        wasLoss: (event.pnlPercent ?? 0) <= 0,
+        // Strictly negative: a breakeven exit is not a loss, and treating it as
+        // one let BLOCK_LOSING_REENTRY_FOR_RUN bar re-entry on coins that cost
+        // nothing. It also made the "N straight losses" read in the exit log
+        // count flat trades as losers.
+        wasLoss: (event.pnlPercent ?? 0) < 0,
       });
       recentExits = pruneExits(recentExits, Date.now(), pruneConfig());
       // Persist immediately rather than waiting for cycle end. An exit record

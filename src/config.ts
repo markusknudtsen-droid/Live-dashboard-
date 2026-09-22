@@ -1,5 +1,7 @@
 import "dotenv/config";
 import { PublicKey } from "@solana/web3.js";
+import { parseLadder, describeLadder, type LadderRung } from "./take-profit-ladder.js";
+import { parsePositionTiers, describeTiers, type PositionTier } from "./position-sizing.js";
 
 export interface AppConfig {
   openRouterApiKey: string;
@@ -15,6 +17,27 @@ export interface AppConfig {
   dexScreenerApiUrl: string;
   jupiterApiBaseUrl: string;
   jupiterApiKey: string;
+  /**
+   * Slippage tolerance sent to Jupiter, per side. Asymmetric on purpose: a buy
+   * that misses is a missed opportunity, but a sell that misses leaves money
+   * in a coin that may be draining, so the exit is given more room than the
+   * entry.
+   */
+  buySlippagePercent: number;
+  sellSlippagePercent: number;
+  /**
+   * Priority fee paid per swap, in SOL.
+   *
+   * Jupiter's /order ignores client-supplied fee parameters and sets
+   * prioritizationFeeLamports itself (~0.0002 SOL), so this is ENFORCED by
+   * rewriting the transaction's ComputeBudget instruction before signing —
+   * see services/priority-fee.ts. Verified against a live order: Jupiter's
+   * own 193952 lamports became exactly 1000000.
+   *
+   * Cost check before raising this: at 0.1 SOL positions, 0.001 is 1% per
+   * swap and 2% per round trip.
+   */
+  priorityFeeSol: number;
   scanChains: string[];
   dashboardApiUrl: string;
   dashboardApiKey: string;
@@ -43,6 +66,10 @@ export interface AppConfig {
   /** Hard entry gates: off by default. */
   rugGatesEnabled: boolean;
   minLiquidityUsd: number;
+  /** Exit a held position when its pool drains this far below its own peak. */
+  rugExitLiquidityDropPercent: number;
+  /** Master switch for liquidity-drain rug detection on held positions. */
+  rugExitEnabled: boolean;
   holderCheckMinMarketCapUsd: number;
   maxTopHolderPercent: number;
   /** Confidence modifiers from age/socials/boost: off by default. */
@@ -90,6 +117,34 @@ export interface AppConfig {
   newCoinMinMomentumPercent: number;
   /** Candidates sent to the model per cycle. Was hardcoded at 5. */
   maxCandidatesPerCycle: number;
+  /**
+   * How many candidates are analysed at once. Analysis used to be strictly
+   * sequential, so a BUY decided on the first token still waited for every
+   * later token's model call before anything could execute — minutes on a
+   * full batch, on coins whose whole edge is measured in seconds.
+   */
+  analysisConcurrency: number;
+  /**
+   * Seconds a GeckoTerminal new-pools result is reused. Their keyless tier is
+   * ~30 calls/min and was measured dropping 2 of 5 calls; 0 disables caching.
+   */
+  geckoterminalCacheSeconds: number;
+  /**
+   * Side scanner for brand-new launches (src/fresh-launch.ts). Independent of
+   * the main pipeline: its own position size and take-profit, and it buys
+   * without a model call, because a token this young has nothing to analyse.
+   *
+   * freshLaunchMinOrganicBuyPercent stands in for the "pro traders" bar —
+   * Jupiter's UI shows one but the public API does not expose it, so this
+   * reads Jupiter's organic share of 5m buy volume instead.
+   */
+  freshLaunchEnabled: boolean;
+  freshLaunchMaxAgeMinutes: number;
+  freshLaunchMinLiquidityUsd: number;
+  freshLaunchMinBuyVolume5m: number;
+  freshLaunchMinOrganicBuyPercent: number;
+  freshLaunchPositionSol: number;
+  freshLaunchTakeProfitPercent: number;
   /** Minutes an AI verdict is reused before re-analysing the same token. */
   analysisCacheMinutes: number;
   /**
@@ -146,9 +201,48 @@ export interface AppConfig {
   /** Slots held open for new/small coins so established ones cannot take every slot. 0 disables. */
   reservedNewCoinSlots: number;
   /** Gain at which a slice of the position is banked. 0 disables partial take-profit. */
+  /**
+   * Whether the bot may add to a position it already holds, once, when it has
+   * dipped and the model is still bullish on it at a fresh look. Before this,
+   * "Already in position for X, skipping." was unconditional — no matter how
+   * strong a later signal was, a held token could never be topped up.
+   */
+  addOnEnabled: boolean;
+  /** Flat SOL size for a single add-on buy, independent of maxPositionSol. */
+  addOnSol: number;
+  /** Position must be down at least this many percent to qualify for an add-on. */
+  addOnTriggerDipPercent: number;
   partialTakeProfitPercent: number;
   /** Fraction of the position sold when that gain is reached, 0..1. */
   partialTakeProfitFraction: number;
+  /**
+   * Multi-stage scale-out, e.g. "40:50,100:50,250:50" — at +40% sell 50% of the
+   * position, at +100% sell 50% of what is left, and so on. Empty falls back to
+   * the single-shot partialTakeProfit above, which is the existing behaviour.
+   */
+  takeProfitLadder: LadderRung[];
+  /**
+   * Read held-position price and liquidity from Jupiter instead of
+   * DexScreener. Measured 2026-09-21: over one minute on an actively traded
+   * token, DexScreener's price changed twice and Jupiter's sixteen times.
+   * DexScreener remains the fallback for mints Jupiter does not index.
+   */
+  useJupiterPriceFeed: boolean;
+  /**
+   * How far above the recorded buy quantity a FULL exit may still sweep the
+   * whole wallet balance, so a closed position leaves no dust behind. Covers
+   * the quote-vs-fill difference (observed: 0.008% on COPPERCAT). A balance
+   * beyond this is treated as manually-held coins and left alone — that is the
+   * $SOF protection. 0 restores the old strict cap.
+   */
+  fullExitSweepTolerancePercent: number;
+  /**
+   * Confidence-tiered stake, e.g. "65:0.1,80:0.15" — at 65%+ final confidence
+   * stake 0.1 SOL, at 80%+ stake 0.15. Empty keeps the flat MAX_POSITION_SOL
+   * sizing. MIN_CONFIDENCE still decides whether a trade happens at all; this
+   * only decides how much once it has.
+   */
+  positionSizeTiers: PositionTier[];
   /** A second, creation-time-sorted candidate source, alongside DexScreener. */
   geckoTerminalEnabled: boolean;
   geckoTerminalNewPoolsLimit: number;
@@ -277,6 +371,9 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     // production bot and higher reliability. Strip trailing slashes so
     // `${base}/order` never produces a double slash.
     jupiterApiBaseUrl: (env.JUPITER_API_BASE_URL || "https://api.jup.ag/swap/v2").replace(/\/+$/, ""),
+    buySlippagePercent: parseNumberInRange("BUY_SLIPPAGE_PERCENT", env.BUY_SLIPPAGE_PERCENT, 35, 0.1, 100),
+    sellSlippagePercent: parseNumberInRange("SELL_SLIPPAGE_PERCENT", env.SELL_SLIPPAGE_PERCENT, 50, 0.1, 100),
+    priorityFeeSol: parseNumberInRange("PRIORITY_FEE_SOL", env.PRIORITY_FEE_SOL, 0.001, 0, 1),
     // Accept either name: JUPITER_API_KEY, or JUPITER_API (the label Jupiter's
     // own portal shows when you generate a key).
     jupiterApiKey: env.JUPITER_API_KEY || env.JUPITER_API || "",
@@ -322,6 +419,18 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     ),
     rugGatesEnabled: parseBoolean(env.RUG_GATES_ENABLED, false),
     minLiquidityUsd: parseNumberInRange("MIN_LIQUIDITY_USD", env.MIN_LIQUIDITY_USD, 5000, 0, 100_000_000),
+    // Defaults on: a drained pool is the one exit signal that is never a false
+    // alarm worth ignoring, and it costs no extra API call to watch.
+    rugExitEnabled: parseBoolean(env.RUG_EXIT_ENABLED, true),
+    // Floor of 5 keeps this from being set so tight that ordinary swap noise
+    // closes healthy positions; 99 keeps it from being disabled by stealth.
+    rugExitLiquidityDropPercent: parseNumberInRange(
+      "RUG_EXIT_LIQUIDITY_DROP_PERCENT",
+      env.RUG_EXIT_LIQUIDITY_DROP_PERCENT,
+      40,
+      5,
+      99
+    ),
     holderCheckMinMarketCapUsd: parseNumberInRange(
       "HOLDER_CHECK_MIN_MARKET_CAP_USD",
       env.HOLDER_CHECK_MIN_MARKET_CAP_USD,
@@ -358,6 +467,15 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     newCoinMaxAgeHours: parseNumberInRange("NEW_COIN_MAX_AGE_HOURS", env.NEW_COIN_MAX_AGE_HOURS, 6, 0.05, 168),
     newCoinMinMomentumPercent: parseNumberInRange("NEW_COIN_MIN_MOMENTUM_PERCENT", env.NEW_COIN_MIN_MOMENTUM_PERCENT, 15, -100, 10_000),
     maxCandidatesPerCycle: parseNumberInRange("MAX_CANDIDATES_PER_CYCLE", env.MAX_CANDIDATES_PER_CYCLE, 5, 1, 25),
+    analysisConcurrency: parseNumberInRange("ANALYSIS_CONCURRENCY", env.ANALYSIS_CONCURRENCY, 4, 1, 10),
+    geckoterminalCacheSeconds: parseNumberInRange("GECKOTERMINAL_CACHE_SECONDS", env.GECKOTERMINAL_CACHE_SECONDS, 45, 0, 3600),
+    freshLaunchEnabled: parseBoolean(env.FRESH_LAUNCH_ENABLED, false),
+    freshLaunchMaxAgeMinutes: parseNumberInRange("FRESH_LAUNCH_MAX_AGE_MINUTES", env.FRESH_LAUNCH_MAX_AGE_MINUTES, 5, 0.1, 120),
+    freshLaunchMinLiquidityUsd: parseNumberInRange("FRESH_LAUNCH_MIN_LIQUIDITY_USD", env.FRESH_LAUNCH_MIN_LIQUIDITY_USD, 4800, 0, 10_000_000),
+    freshLaunchMinBuyVolume5m: parseNumberInRange("FRESH_LAUNCH_MIN_BUY_VOLUME_5M", env.FRESH_LAUNCH_MIN_BUY_VOLUME_5M, 1100, 0, 10_000_000),
+    freshLaunchMinOrganicBuyPercent: parseNumberInRange("FRESH_LAUNCH_MIN_ORGANIC_BUY_PERCENT", env.FRESH_LAUNCH_MIN_ORGANIC_BUY_PERCENT, 45, 0, 100),
+    freshLaunchPositionSol: parseNumberInRange("FRESH_LAUNCH_POSITION_SOL", env.FRESH_LAUNCH_POSITION_SOL, 0.05, 0, 100),
+    freshLaunchTakeProfitPercent: parseNumberInRange("FRESH_LAUNCH_TAKE_PROFIT_PERCENT", env.FRESH_LAUNCH_TAKE_PROFIT_PERCENT, 75, 1, 10_000),
     analysisCacheMinutes: parseNumberInRange("ANALYSIS_CACHE_MINUTES", env.ANALYSIS_CACHE_MINUTES, 10, 0, 1440),
     telegramEnabled: parseBoolean(env.TELEGRAM_ENABLED, false),
     telegramApiId: parseNumberInRange("TELEGRAM_API_ID", env.TELEGRAM_API_ID, 0, 0, 1_000_000_000),
@@ -392,8 +510,21 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     newCoinReentryCooldownMinutes: parseNumberInRange("NEW_COIN_REENTRY_COOLDOWN_MINUTES", env.NEW_COIN_REENTRY_COOLDOWN_MINUTES, 2, 0, 1440),
     maxBuysPerToken: parseNumberInRange("MAX_BUYS_PER_TOKEN", env.MAX_BUYS_PER_TOKEN, 3, 0, 1000),
     reservedNewCoinSlots: parseNumberInRange("RESERVED_NEW_COIN_SLOTS", env.RESERVED_NEW_COIN_SLOTS, 1, 0, 100),
+    addOnEnabled: parseBoolean(env.ADD_ON_ENABLED, true),
+    addOnSol: parseNumberInRange("ADD_ON_SOL", env.ADD_ON_SOL, 0.05, 0, 100),
+    addOnTriggerDipPercent: parseNumberInRange("ADD_ON_TRIGGER_DIP_PERCENT", env.ADD_ON_TRIGGER_DIP_PERCENT, 15, 0.1, 100),
     partialTakeProfitPercent: parseNumberInRange("PARTIAL_TAKE_PROFIT_PERCENT", env.PARTIAL_TAKE_PROFIT_PERCENT, 100, 0, 100_000),
     partialTakeProfitFraction: parseNumberInRange("PARTIAL_TAKE_PROFIT_FRACTION", env.PARTIAL_TAKE_PROFIT_FRACTION, 0.5, 0.01, 0.99),
+    takeProfitLadder: parseLadder(env.TAKE_PROFIT_LADDER),
+    useJupiterPriceFeed: parseBoolean(env.USE_JUPITER_PRICE_FEED, true),
+    positionSizeTiers: parsePositionTiers(env.POSITION_SIZE_TIERS),
+    fullExitSweepTolerancePercent: parseNumberInRange(
+      "FULL_EXIT_SWEEP_TOLERANCE_PERCENT",
+      env.FULL_EXIT_SWEEP_TOLERANCE_PERCENT,
+      5,
+      0,
+      100
+    ),
     geckoTerminalEnabled: parseBoolean(env.GECKOTERMINAL_ENABLED, true),
     geckoTerminalNewPoolsLimit: parseNumberInRange("GECKOTERMINAL_NEW_POOLS_LIMIT", env.GECKOTERMINAL_NEW_POOLS_LIMIT, 20, 1, 100),
     newCoinSlotMaxMarketCapUsd: parseNumberInRange("NEW_COIN_SLOT_MAX_MARKET_CAP_USD", env.NEW_COIN_SLOT_MAX_MARKET_CAP_USD, 60_000, 0, 100_000_000),
@@ -522,7 +653,12 @@ export function validateConfig(config: AppConfig = CONFIG): void {
         `resolved via DexScreener like every other source.`
     );
   }
-  if (config.partialTakeProfitPercent > 0) {
+  if (config.takeProfitLadder.length > 0) {
+    console.log(
+      `   🪜 TAKE_PROFIT_LADDER: ${describeLadder(config.takeProfitLadder)} ` +
+        `(each sells that share of what REMAINS; supersedes PARTIAL_TAKE_PROFIT).`
+    );
+  } else if (config.partialTakeProfitPercent > 0) {
     console.log(
       `   💰 PARTIAL_TAKE_PROFIT: at +${config.partialTakeProfitPercent}%, ` +
         `${Math.round(config.partialTakeProfitFraction * 100)}% of the position is banked; the rest runs on.`
@@ -572,6 +708,12 @@ export function validateConfig(config: AppConfig = CONFIG): void {
   }
   if (config.entryScoringEnabled) {
     console.log("   ⚖️  ENTRY_SCORING enabled: age/boost/social modifiers, bonuses capped at +15.");
+  }
+  if (config.positionSizeTiers.length > 0) {
+    console.log(
+      `   🎚️  POSITION_SIZE_TIERS: ${describeTiers(config.positionSizeTiers)} ` +
+        `(final confidence sets the stake; MIN_CONFIDENCE still gates the trade).`
+    );
   }
   if (config.useFixedPositionSize) {
     console.log(

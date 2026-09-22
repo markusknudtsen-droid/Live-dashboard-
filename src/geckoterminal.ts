@@ -31,6 +31,8 @@
  * array, never throws.
  */
 
+import { CONFIG } from "./config.js";
+
 const GECKOTERMINAL_API = "https://api.geckoterminal.com/api/v2";
 
 interface GtToken {
@@ -51,10 +53,33 @@ interface GtResponse {
 }
 
 /**
+ * GeckoTerminal's keyless tier allows roughly 30 calls/minute. At a 10s scan
+ * interval this endpoint alone burns 6/min before any other lookup, and it was
+ * measured failing 2 of 5 calls on 2026-09-21. New pools do not meaningfully
+ * change inside a few seconds, so a short in-process TTL removes most of the
+ * traffic without costing freshness.
+ *
+ * Keyed by chain+limit so differing callers cannot read each other's result.
+ * In-process only, like analysisCache: it resets on restart, which is fine for
+ * something re-fetched seconds later anyway.
+ */
+const poolCache = new Map<string, { at: number; mints: string[] }>();
+
+/** Exposed so tests can assert cold-cache behaviour deterministically. */
+export function clearNewPoolCache(): void {
+  poolCache.clear();
+}
+
+/**
  * Mint addresses of pools recently created on `chain`, newest first (the
  * order the API itself returns), deduped, capped at `limit`.
  */
 export async function fetchNewPoolMints(chain = "solana", limit = 20, timeoutMs = 8000): Promise<string[]> {
+  const key = `${chain}:${limit}`;
+  const ttlMs = CONFIG.geckoterminalCacheSeconds * 1000;
+  const hit = poolCache.get(key);
+  if (hit && ttlMs > 0 && Date.now() - hit.at < ttlMs) return hit.mints;
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -62,11 +87,16 @@ export async function fetchNewPoolMints(chain = "solana", limit = 20, timeoutMs 
       `${GECKOTERMINAL_API}/networks/${encodeURIComponent(chain)}/new_pools?page=1&include=base_token`,
       { signal: controller.signal, headers: { accept: "application/json" } }
     );
-    if (!res.ok) return [];
+    // A rate-limited or failed call serves the last good list if one is still
+    // held, rather than reporting "no new pools" and blinding the scanner for
+    // a cycle. Only a cold cache yields an empty result.
+    if (!res.ok) return hit?.mints ?? [];
     const j = (await res.json()) as GtResponse;
-    return extractMints(j, limit);
+    const mints = extractMints(j, limit);
+    poolCache.set(key, { at: Date.now(), mints });
+    return mints;
   } catch {
-    return [];
+    return hit?.mints ?? [];
   } finally {
     clearTimeout(timer);
   }

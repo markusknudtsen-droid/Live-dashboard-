@@ -85,6 +85,14 @@ function sanitizeRestoredState(state: BotState): BotState {
       if (!entry || typeof entry !== "object") return entry;
       return { ...entry, symbol: sanitizeIfString(entry.symbol) };
     }),
+    // Same reasoning as above: canReenter() builds its block reason from this
+    // symbol and index.ts logs that reason verbatim, so a restored entry
+    // reaches a log line without passing through the open-position path that
+    // normally sanitizes. Absent field stays absent.
+    recentExits: state.recentExits?.map((exit) => {
+      if (!exit || typeof exit !== "object") return exit;
+      return { ...exit, tokenSymbol: sanitizeIfString(exit.tokenSymbol) };
+    }),
   };
 }
 
@@ -94,6 +102,14 @@ function parseStateFile(raw: string): BotState {
     activePositions: Array.isArray(parsed.activePositions) ? parsed.activePositions : [],
     tradeHistory: Array.isArray(parsed.tradeHistory) ? parsed.tradeHistory : [],
     firstTradeValidated: typeof parsed.firstTradeValidated === "boolean" ? parsed.firstTradeValidated : null,
+    // Omitting this here silently discarded every re-entry block on restart:
+    // saveState() wrote recentExits faithfully, but rebuilding the object
+    // without the field meant loadState() always returned undefined, so
+    // index.ts fell back to an empty list. A coin that had just rugged became
+    // buyable again seconds after a restart — 2026-09-17, Schrodinger: exited
+    // at a loss 08:36, blocked correctly until the 08:48 restart, re-bought
+    // 08:57, closed -98%.
+    recentExits: Array.isArray(parsed.recentExits) ? parsed.recentExits : [],
   });
 }
 

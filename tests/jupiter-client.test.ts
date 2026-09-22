@@ -60,6 +60,7 @@ process.env.HTTP_MAX_RETRIES = "0";
 const { getJupiterQuote, executeJupiterSwap, SOL_MINT, isValidSolanaMint } = await import(
   "../src/services/jupiter-client.js"
 );
+const { CONFIG } = await import("../src/config.js");
 
 const MINT = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263";
 const TAKER = "11111111111111111111111111111111";
@@ -104,5 +105,44 @@ after(async () => {
   for (const [key, value] of Object.entries(previousEnv)) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
+  }
+});
+
+test("a buy and a sell are quoted with their own slippage, not one shared value", async () => {
+  received.length = 0;
+  // Buy: SOL -> token.
+  await getJupiterQuote(SOL_MINT, MINT, 1_000_000, TAKER);
+  // Sell: token -> SOL. The mock echoes buy-shaped mints so the order itself is
+  // rejected, but the request it sent is still what this asserts on.
+  await getJupiterQuote(MINT, SOL_MINT, 1_000_000, TAKER);
+
+  assert.equal(received.length, 2);
+  const buyBps = Math.round(CONFIG.buySlippagePercent * 100);
+  const sellBps = Math.round(CONFIG.sellSlippagePercent * 100);
+
+  assert.ok(
+    received[0].path.includes("slippageBps=" + buyBps),
+    "buy should send slippageBps=" + buyBps + ", got " + received[0].path
+  );
+  assert.ok(
+    received[1].path.includes("slippageBps=" + sellBps),
+    "sell should send slippageBps=" + sellBps + ", got " + received[1].path
+  );
+  // The whole point of the split: the exit is given more room than the entry.
+  assert.ok(sellBps > buyBps, "sell slippage must exceed buy slippage");
+});
+
+test("the configured priority fee budget is sent, in lamports", async () => {
+  received.length = 0;
+  await getJupiterQuote(SOL_MINT, MINT, 1_000_000, TAKER);
+
+  const lamports = Math.round(CONFIG.priorityFeeSol * 1_000_000_000);
+  if (CONFIG.priorityFeeSol > 0) {
+    assert.ok(
+      received[0].path.includes("priorityFeeLamports=" + lamports),
+      "expected priorityFeeLamports=" + lamports + ", got " + received[0].path
+    );
+  } else {
+    assert.ok(!received[0].path.includes("priorityFeeLamports"), "zero fee should send no param");
   }
 });

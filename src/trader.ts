@@ -11,12 +11,17 @@ import {
 import bs58 from "bs58";
 import { randomBytes } from "node:crypto";
 import { CONFIG } from "./config.js";
+import { shouldExitOnLiquidityDrop, updatePeakLiquidity, DEFAULT_RUG_EXIT } from "./rug-exit.js";
 import { updateTrailingStop } from "./trailing-stop.js";
 import { decideSweep } from "./profit-sweep.js";
 import { TradeSignal } from "./analyze.js";
 import { logger } from "./logger.js";
 import { httpGet } from "./http.js";
-import { executeJupiterSwap, getJupiterQuote, isValidSolanaMint, SOL_MINT } from "./services/jupiter-client.js";
+import { getJupiterQuote, isValidSolanaMint, SOL_MINT } from "./services/jupiter-client.js";
+import { forcePriorityFee } from "./services/priority-fee.js";
+import { nextLadderRung } from "./take-profit-ladder.js";
+import { fetchLivePrice } from "./live-price.js";
+import { confirmOrRecoverSwap, deriveTransactionSignature } from "./services/swap-confirmation.js";
 
 export interface TradeResult {
   success: boolean;
@@ -49,6 +54,28 @@ export interface ActivePosition {
    * seeded from entryPrice on first evaluation.
    */
   peakPrice?: number;
+  /**
+   * Highest pool liquidity (USD) seen since entry, used by the rug exit.
+   * Optional so positions persisted before rug detection existed still
+   * rehydrate; it is seeded from the first valid reading.
+   */
+  peakLiquidityUsd?: number;
+  /**
+   * Raw base-unit quantity of the token actually received at buy time, from
+   * the Jupiter swap's own outAmount. Every sell caps at min(wallet balance,
+   * this value) instead of sweeping the wallet's whole balance of the mint.
+   *
+   * 2026-09-17: a manually-bought $SOF position shared the bot's wallet with
+   * the bot's own $SOF position. The bot's stop-loss/partial-take-profit read
+   * getTokenAccountsByOwner and sold the ENTIRE wallet balance of the mint,
+   * taking the operator's manually-held tokens along with its own. Recording
+   * what THIS position actually bought, and never selling more than that, is
+   * the fix. Optional: a position restored from state persisted before this
+   * field existed falls back to the old whole-wallet-balance behaviour.
+   */
+  tokenAmountRaw?: string;
+  /** Set once this position has taken its one allowed add-on buy. */
+  addOnTaken?: boolean;
   /** Set once the deferral message has been logged, to keep it to one line. */
   takeProfitDeferredLogged?: boolean;
   /**
@@ -67,10 +94,88 @@ export interface ActivePosition {
    * as "not yet taken".
    */
   partialTakeProfitTaken?: boolean;
+  /**
+   * How many TAKE_PROFIT_LADDER rungs this position has already banked.
+   * Separate from partialTakeProfitTaken so the single-shot behaviour is
+   * untouched when no ladder is configured.
+   */
+  ladderRungsTaken?: number;
 }
 
 interface DexPairPrice {
   priceUsd?: string | number;
+  /**
+   * DexScreener has always sent this on the same payload monitorPositions()
+   * already fetches; it simply was not read. Watching it is what lets a drain
+   * be seen as it happens instead of inferred from price afterwards.
+   */
+  liquidity?: { usd?: string | number };
+}
+
+/**
+ * The raw base-unit amount to sell for a position: never more than the
+ * wallet actually holds, and never more than this position itself recorded
+ * having bought. Exported so the cap can be exercised without a live RPC
+ * connection or Jupiter round-trip - see tokenAmountRaw's doc comment for
+ * the failure ($SOF, 2026-09-17) this replaces.
+ */
+/**
+ * Positions already warned about an inert rug exit, so the warning is emitted
+ * once per position instead of on every monitoring cycle. Cleared for a token
+ * as soon as a valid liquidity reading arrives, so a feed that recovers and
+ * then fails again warns again.
+ */
+const rugExitInertWarned = new Set<string>();
+
+export function capSellAmount(walletRaw: bigint, positionRaw: bigint | undefined): bigint {
+  // FAILS CLOSED. Without a recorded buy quantity there is no way to tell which
+  // part of the wallet's balance belongs to the bot, and this wallet is also
+  // traded by hand — returning walletRaw here is exactly how the operator's own
+  // $SOF was liquidated on 2026-09-17.
+  //
+  // The cost of this choice is that a position with no recorded quantity cannot
+  // be sold automatically at all, including by the stop-loss. That is the
+  // deliberate trade: an unsellable position is visible, loud, and fixable by
+  // hand, whereas selling someone else's coins is neither. Every live buy
+  // records tokenAmountRaw, so this only affects legacy or desynced state.
+  if (positionRaw === undefined) return 0n;
+  return positionRaw < walletRaw ? positionRaw : walletRaw;
+}
+
+/**
+ * The amount to sell on a FULL exit, where the intent is to end up holding
+ * none of the coin.
+ *
+ * capSellAmount deliberately sells no more than the position recorded buying,
+ * and that leaves a crumb behind: the recorded figure is Jupiter's QUOTED
+ * outAmount, while the wallet receives whatever the route actually filled.
+ * When the fill lands slightly above the quote, the difference is stranded.
+ * Observed 2026-09-21: COPPERCAT was bought and stopped out three times and
+ * left 6.07 tokens — $0.0016, about 0.008% of the position — sitting in a
+ * token account whose rent costs more than the dust is worth.
+ *
+ * So a full exit sweeps the whole wallet balance, EXCEPT when that balance is
+ * far more than this position ever bought. That gap is the signal that
+ * someone bought the same coin by hand into the same wallet, which is the
+ * failure capSellAmount exists to prevent ($SOF, 2026-09-17). Rounding dust is
+ * a fraction of a percent; a manual holding is not, so one tolerance separates
+ * them cleanly.
+ *
+ * Partial sells keep the strict cap — there the remainder is the point.
+ */
+export function fullExitSellAmount(
+  walletRaw: bigint,
+  positionRaw: bigint | undefined,
+  tolerancePercent: number
+): bigint {
+  // Same fail-closed rule as capSellAmount: with no recorded quantity there is
+  // nothing to measure the wallet against, so nothing is sold.
+  if (positionRaw === undefined) return 0n;
+  if (walletRaw <= positionRaw) return walletRaw;
+
+  // Basis points, so a fractional tolerance percent survives integer maths.
+  const ceiling = positionRaw + (positionRaw * BigInt(Math.max(0, Math.round(tolerancePercent * 100)))) / 10_000n;
+  return walletRaw <= ceiling ? walletRaw : positionRaw;
 }
 
 /**
@@ -221,7 +326,33 @@ function findPositionIndex(position: ActivePosition): number {
  * reached the activation gain, so the stop is now trailing rather than sitting
  * at the original level.
  */
-function trailIsArmed(position: ActivePosition): boolean {
+/**
+ * Force CONFIG.priorityFeeSol onto a Jupiter-assembled swap, before signing.
+ *
+ * Jupiter's /order sets its own prioritizationFeeLamports (~0.0002 SOL) and
+ * ignores the fee parameters we send, so the only way to control what the
+ * trade actually pays to land is to rewrite the ComputeBudget instruction
+ * here. Verified against a live order: 193952 lamports in, 1000000 out.
+ *
+ * Logged either way — if Jupiter ever changes the transaction shape and the
+ * rewrite stops finding its instruction, that must be visible rather than
+ * silently reverting to their fee.
+ */
+function applyPriorityFee(tx: VersionedTransaction, label: string): void {
+  if (CONFIG.priorityFeeSol <= 0) return;
+  const target = Math.round(CONFIG.priorityFeeSol * LAMPORTS_PER_SOL);
+  const result = forcePriorityFee(tx, target);
+  if (result.applied) {
+    logger.info(
+      `⚡ ${label}: priority fee forced to ${CONFIG.priorityFeeSol} SOL ` +
+        `(${result.microLamportsPerCu} µlamports/CU over ${result.computeUnitLimit} CU)`
+    );
+  } else {
+    logger.warn(`⚡ ${label}: priority fee NOT applied — ${result.reason}`);
+  }
+}
+
+export function trailIsArmed(position: ActivePosition): boolean {
   if (!Number.isFinite(position.entryPrice) || position.entryPrice <= 0) return false;
   const peak = position.peakPrice ?? position.entryPrice;
   const peakGainPercent = ((peak - position.entryPrice) / position.entryPrice) * 100;
@@ -347,20 +478,203 @@ async function executeSweepLocked(): Promise<SweepResult> {
 }
 
 /**
+ * Cost basis after buying `newQty` more at `newPrice`, on top of `oldQty`
+ * already held at `oldPrice`. Unit-agnostic: `oldQty`/`newQty` must use the
+ * SAME unit as each other (raw token base units, or a SOL-implied quantity),
+ * but the two calls in executeAddOnLocked never mix units within one call.
+ */
+export function weightedAverageEntryPrice(oldQty: number, oldPrice: number, newQty: number, newPrice: number): number {
+  const totalQty = oldQty + newQty;
+  if (!(totalQty > 0)) return oldPrice;
+  return (oldQty * oldPrice + newQty * newPrice) / totalQty;
+}
+
+/**
  * Execute a buy trade using Jupiter aggregator
  */
 export async function executeBuy(signal: TradeSignal): Promise<TradeResult> {
   return withTraderLock(buyQueue, () => executeBuyLocked(signal));
 }
 
+/**
+ * Add to a position the bot already holds. Before this existed, "Already in
+ * position for X, skipping." was unconditional: no signal, however bullish,
+ * could ever top up a held position. Distinct from executeBuy - this mutates
+ * the EXISTING position in place rather than opening a new one, so it does
+ * not consume a MAX_CONCURRENT_POSITIONS slot.
+ *
+ * The one-shot cap (position.addOnTaken) is enforced by the caller in
+ * index.ts, which is where the dip-percent and re-analysis-confidence gates
+ * live too - this function's job is only the mechanics of the top-up once the
+ * caller has decided one is warranted.
+ */
+export async function executeAddOn(position: ActivePosition, signal: TradeSignal, addOnSol: number): Promise<TradeResult> {
+  return withTraderLock(buyQueue, () => executeAddOnLocked(position, signal, addOnSol));
+}
+
+async function executeAddOnLocked(position: ActivePosition, signal: TradeSignal, addOnSol: number): Promise<TradeResult> {
+  const { token } = signal;
+  const failure = (error: string): TradeResult => ({
+    success: false,
+    entryPrice: position.entryPrice,
+    amountSol: addOnSol,
+    tokenAddress: token.address,
+    tokenSymbol: token.symbol,
+    timestamp: Date.now(),
+    error,
+  });
+
+  // A position closed (sold out, rugged) while this was queued must not be
+  // topped up - same stale-reference guard executeSellLocked already uses.
+  if (findPositionIndex(position) === -1) return failure("Position already closed");
+  if (position.addOnTaken) return failure("Add-on already used for this position");
+
+  const balance = await getBalance();
+  const feeBufferSol = CONFIG.dryRun ? 0 : 0.01;
+  if (balance < addOnSol + feeBufferSol) {
+    const need = CONFIG.dryRun ? addOnSol.toFixed(4) : `${addOnSol.toFixed(4)} + fees`;
+    return failure(`Insufficient balance: ${balance.toFixed(4)} SOL (need ${need})`);
+  }
+
+  logger.info(`➕ Adding to ${token.symbol}: +${addOnSol.toFixed(4)} SOL at $${token.priceUsd.toFixed(10)}`);
+
+  /**
+   * Re-derive stopLoss/takeProfit from the NEW blended entry using the
+   * bot's configured percentages - never carry forward the old position's
+   * absolute levels, which were anchored to a now-outdated entry price. Same
+   * philosophy as executeBuyLocked's fill-price re-anchoring: an absolute
+   * price level is only meaningful relative to the basis it was derived from.
+   */
+  function applyAddOn(newEntryPrice: number): void {
+    position.amountSol += addOnSol;
+    position.entryPrice = newEntryPrice;
+    position.stopLoss = newEntryPrice * (1 - CONFIG.stopLossPercent / 100);
+    position.takeProfit = newEntryPrice * (1 + CONFIG.takeProfitPercent / 100);
+    position.addOnTaken = true;
+  }
+
+  if (CONFIG.dryRun) {
+    const txSignature = generateDryRunTxSignature();
+    paperBalanceSol -= addOnSol;
+
+    // No real quote exists in DRY_RUN, so token quantity is only implied by
+    // SOL spent - fine for a paper weighted average, not exact accounting.
+    const oldQty = position.amountSol / position.entryPrice;
+    const newQty = addOnSol / token.priceUsd;
+    applyAddOn(weightedAverageEntryPrice(oldQty, position.entryPrice, newQty, token.priceUsd));
+
+    logger.info(`🧪 [DRY RUN] Add-on executed. New avg entry: $${position.entryPrice.toFixed(10)}. Fake TX: ${txSignature}`);
+    emitTrade({
+      type: "BUY",
+      symbol: token.symbol,
+      tokenAddress: token.address,
+      chainId: token.chainId,
+      amountSol: addOnSol,
+      price: token.priceUsd,
+      paper: true,
+      txSignature,
+      timestamp: Date.now(),
+      confidence: signal.confidence,
+    });
+    return {
+      success: true,
+      txSignature,
+      entryPrice: position.entryPrice,
+      amountSol: addOnSol,
+      tokenAddress: token.address,
+      tokenSymbol: token.symbol,
+      timestamp: Date.now(),
+    };
+  }
+
+  const amountLamports = Math.floor(addOnSol * LAMPORTS_PER_SOL);
+  const order = await getJupiterQuote(SOL_MINT, token.address, amountLamports, wallet.publicKey.toBase58());
+  if (!order?.transaction || !order.requestId) return failure("No valid Jupiter Swap V2 order found");
+
+  const transaction = VersionedTransaction.deserialize(Buffer.from(order.transaction, "base64"));
+  applyPriorityFee(transaction, "ADD-ON");
+  transaction.sign([wallet]);
+  const signedTransaction = Buffer.from(transaction.serialize()).toString("base64");
+  const ownSignature = deriveTransactionSignature(transaction);
+  const execution = await confirmOrRecoverSwap(connection, order, signedTransaction, ownSignature);
+  if (!execution.success || !execution.signature) {
+    return failure(execution.error ?? "Jupiter execution failed");
+  }
+
+  // getJupiterQuote() itself already rejects a response with no outAmount
+  // before returning it (same invariant executeBuyLocked relies on) — this is
+  // a belt-and-suspenders type guard, not an expected runtime path.
+  if (!order.outAmount) return failure("Jupiter order settled with no outAmount");
+
+  // Raw base-unit quantities as weights - decimals cancel in the ratio, and
+  // this is the same quantity capSellAmount relies on for sell-sizing, so the
+  // combined total must be exact (BigInt), not a float approximation.
+  const oldRaw = position.tokenAmountRaw ? BigInt(position.tokenAmountRaw) : 0n;
+  const newRaw = BigInt(order.outAmount);
+  position.tokenAmountRaw = (oldRaw + newRaw).toString();
+  applyAddOn(weightedAverageEntryPrice(Number(oldRaw), position.entryPrice, Number(newRaw), token.priceUsd));
+
+  logger.info(`✅ Add-on executed! New avg entry: $${position.entryPrice.toFixed(10)}. TX: ${execution.signature}`);
+  emitTrade({
+    type: "BUY",
+    symbol: token.symbol,
+    tokenAddress: token.address,
+    chainId: token.chainId,
+    amountSol: addOnSol,
+    price: token.priceUsd,
+    paper: false,
+    txSignature: execution.signature,
+    timestamp: Date.now(),
+    confidence: signal.confidence,
+  });
+  return {
+    success: true,
+    txSignature: execution.signature,
+    entryPrice: position.entryPrice,
+    amountSol: addOnSol,
+    tokenAddress: token.address,
+    tokenSymbol: token.symbol,
+    timestamp: Date.now(),
+  };
+}
+
 async function executeBuyLocked(signal: TradeSignal): Promise<TradeResult> {
-  const { token, positionSizeSol, stopLoss, takeProfit } = signal;
+  const { token, positionSizeSol } = signal;
+
+  // Re-anchor the exit levels to the price we are ACTUALLY entering at.
+  //
+  // signal.stopLoss/takeProfit were computed against signal.entryPrice when
+  // the model analysed the token. On a fast mover the price has moved by the
+  // time the buy executes, and the position then stores a fresh entryPrice
+  // (token.priceUsd) alongside stale levels - so the levels no longer mean
+  // what their percentages claim.
+  //
+  // Observed live 2026-09-19, LAUNCH: analysed at $0.00008301, filled at
+  // $0.0001741. The "+50%" take-profit landed at $0.0001245 - BELOW the entry
+  // - so it fired on the first price tick for +0.00%, and the "-33%" stop sat
+  // at $0.0000556, a real -68% from entry. Double the intended risk, and a
+  // take-profit that could never be a profit.
+  //
+  // Preserve the RATIOS (the recommended percentages) and re-apply them to the
+  // real fill price. Falls back to the signal's own levels only when the
+  // signal's entry price is unusable, which is what the old code always did.
+  const anchor = Number.isFinite(signal.entryPrice) && signal.entryPrice > 0 ? signal.entryPrice : 0;
+  const stopLoss = anchor > 0 ? token.priceUsd * (signal.stopLoss / anchor) : signal.stopLoss;
+  const takeProfit = anchor > 0 ? token.priceUsd * (signal.takeProfit / anchor) : signal.takeProfit;
 
   logger.info(`🛒 Executing BUY: ${token.symbol}`);
   logger.info(`Amount: ${positionSizeSol.toFixed(4)} SOL`);
   logger.info(`Entry: $${token.priceUsd.toFixed(10)}`);
   logger.info(`Stop Loss: $${stopLoss.toFixed(10)} (-${CONFIG.stopLossPercent}%)`);
   logger.info(`Take Profit: $${takeProfit.toFixed(10)} (+${CONFIG.takeProfitPercent}%)`);
+  // A big gap here is the signature of the bug above, so make it visible
+  // rather than silently correcting it.
+  if (anchor > 0 && Math.abs(token.priceUsd / anchor - 1) > 0.1) {
+    logger.warn(
+      `⚠️  ${token.symbol}: price moved ${(((token.priceUsd - anchor) / anchor) * 100).toFixed(1)}% between analysis ` +
+        `($${anchor.toFixed(10)}) and fill ($${token.priceUsd.toFixed(10)}) — exit levels re-anchored to the fill price.`
+    );
+  }
 
   try {
     const tokenValidation = isTradeSignalSafe(signal);
@@ -477,19 +791,25 @@ async function executeBuyLocked(signal: TradeSignal): Promise<TradeResult> {
     }
 
     const transaction = VersionedTransaction.deserialize(Buffer.from(order.transaction, "base64"));
+    applyPriorityFee(transaction, "BUY");
     transaction.sign([wallet]);
     const signedTransaction = Buffer.from(transaction.serialize()).toString("base64");
-    const execution = await executeJupiterSwap(order, signedTransaction);
-    if (!execution || execution.status !== "Success" || !execution.signature) {
+    // Derived BEFORE calling Jupiter: this is the transaction's own signature,
+    // known locally regardless of whether Jupiter ever answers — see
+    // swap-confirmation.ts for why an unanswered /execute is not the same as
+    // "this did not happen".
+    const ownSignature = deriveTransactionSignature(transaction);
+    const execution = await confirmOrRecoverSwap(connection, order, signedTransaction, ownSignature);
+    if (!execution.success || !execution.signature) {
       return {
         success: false,
-        txSignature: execution?.signature,
+        txSignature: execution.signature,
         entryPrice: token.priceUsd,
         amountSol: positionSizeSol,
         tokenAddress: token.address,
         tokenSymbol: token.symbol,
         timestamp: Date.now(),
-        error: `Jupiter execution failed${execution?.error ? `: ${execution.error}` : ""}`,
+        error: execution.error ?? "Jupiter execution failed",
       };
     }
 
@@ -507,6 +827,9 @@ async function executeBuyLocked(signal: TradeSignal): Promise<TradeResult> {
       entryTime: Date.now(),
       pnlPercent: 0,
       txSignature,
+      // The quote is already validated (outAmount present, > 0) before this
+      // point is reached - see getJupiterQuote's own checks.
+      tokenAmountRaw: order.outAmount,
       enteredAsNewCoin: token.marketCap < CONFIG.newCoinSlotMaxMarketCapUsd,
     });
 
@@ -666,9 +989,21 @@ async function executeSellPartialLocked(
     const tokenAccounts = await connection.getParsedTokenAccountsByOwner(wallet.publicKey, { mint: tokenMint });
     if (tokenAccounts.value.length === 0) return failure("No token balance found");
 
-    // Raw base units. Floor rather than round, so the quote can never ask for
-    // more than the wallet actually holds.
-    const rawBalance = BigInt(tokenAccounts.value[0].account.data.parsed.info.tokenAmount.amount);
+    // Raw base units, capped at this position's own recorded amount (see
+    // tokenAmountRaw's doc comment) rather than the wallet's whole balance of
+    // the mint - the same fix as the full sell path. Floor rather than round,
+    // so the quote can never ask for more than is actually available.
+    const walletRawBalance = BigInt(tokenAccounts.value[0].account.data.parsed.info.tokenAmount.amount);
+    // Same fail-closed rule as the full-sell path: with no recorded buy
+    // quantity, a fraction of the WHOLE wallet balance would take a slice of
+    // any manually-held tokens of the same mint, so nothing is sold.
+    if (!position.tokenAmountRaw) {
+      logger.error(
+        `⛔ ${position.tokenSymbol}: no recorded buy quantity — REFUSING to take profit, because the bot cannot ` +
+          `tell its own tokens from any you hold manually. Sell this position by hand.`
+      );
+    }
+    const rawBalance = capSellAmount(walletRawBalance, position.tokenAmountRaw ? BigInt(position.tokenAmountRaw) : undefined);
     const rawToSell = (rawBalance * BigInt(Math.round(fraction * 10_000))) / 10_000n;
     if (rawToSell <= 0n) return failure("Partial sell amount rounds to zero");
 
@@ -681,11 +1016,13 @@ async function executeSellPartialLocked(
     if (!order?.transaction || !order.requestId) return failure("No valid Jupiter Swap V2 partial sell order found");
 
     const transaction = VersionedTransaction.deserialize(Buffer.from(order.transaction, "base64"));
+    applyPriorityFee(transaction, "PARTIAL SELL");
     transaction.sign([wallet]);
     const signedTransaction = Buffer.from(transaction.serialize()).toString("base64");
-    const execution = await executeJupiterSwap(order, signedTransaction);
-    if (!execution || execution.status !== "Success" || !execution.signature) {
-      throw new Error(`Jupiter partial sell failed${execution?.error ? `: ${execution.error}` : ""}`);
+    const ownSignature = deriveTransactionSignature(transaction);
+    const execution = await confirmOrRecoverSwap(connection, order, signedTransaction, ownSignature);
+    if (!execution.success || !execution.signature) {
+      throw new Error(execution.error ?? "Jupiter partial sell failed");
     }
 
     // Only mutate the position after the swap has actually settled, so a
@@ -693,6 +1030,13 @@ async function executeSellPartialLocked(
     // fire again on a later tick.
     position.amountSol -= soldSol;
     position.partialTakeProfitTaken = true;
+    // Shrink the recorded amount by exactly what was sold, so a later full
+    // sell of the remainder is still capped against what THIS position
+    // actually has left, not the wallet's whole balance of the mint.
+    if (position.tokenAmountRaw) {
+      const remaining = BigInt(position.tokenAmountRaw) - rawToSell;
+      position.tokenAmountRaw = (remaining > 0n ? remaining : 0n).toString();
+    }
 
     logger.info(`✅ Banked ${soldSol.toFixed(4)} SOL of ${position.tokenSymbol}! TX: ${execution.signature}`);
     logger.info(`   ${position.amountSol.toFixed(4)} SOL still running in ${position.tokenSymbol}.`);
@@ -838,7 +1182,42 @@ async function executeSellLocked(position: ActivePosition, reason: string, markP
       };
     }
 
-    const tokenBalance = tokenAccounts.value[0].account.data.parsed.info.tokenAmount.amount;
+    // Cap at this position's own recorded amount, never the whole wallet
+    // This is the FULL exit, so it sweeps the wallet balance rather than
+    // stopping at the recorded buy quantity — otherwise the quote-vs-fill
+    // difference is stranded as dust (COPPERCAT, 6.07 tokens). The sweep is
+    // still bounded: a balance far above what this position bought means
+    // manually-held coins, and those are left alone. See fullExitSellAmount.
+    const walletRaw = BigInt(tokenAccounts.value[0].account.data.parsed.info.tokenAmount.amount);
+    if (!position.tokenAmountRaw) {
+      logger.error(
+        `⛔ ${position.tokenSymbol}: no recorded buy quantity — REFUSING to sell, because the bot cannot tell ` +
+          `its own tokens from any you hold manually. Sell this position by hand.`
+      );
+    }
+    const recordedRaw = position.tokenAmountRaw ? BigInt(position.tokenAmountRaw) : undefined;
+    const sellRaw = fullExitSellAmount(walletRaw, recordedRaw, CONFIG.fullExitSweepTolerancePercent);
+    if (recordedRaw !== undefined && walletRaw > recordedRaw && sellRaw === recordedRaw) {
+      // The sweep was declined — say so, because the leftover is intentional
+      // here rather than the rounding crumb this change exists to remove.
+      logger.warn(
+        `⚠️  ${position.tokenSymbol}: wallet holds more than this position bought ` +
+          `(${walletRaw} vs ${recordedRaw}) — selling only the position's share and leaving the rest, ` +
+          `which looks like coins you bought yourself.`
+      );
+    }
+    if (sellRaw <= 0n) {
+      return {
+        success: false,
+        entryPrice: position.entryPrice,
+        amountSol: position.amountSol,
+        tokenAddress: position.tokenAddress,
+        tokenSymbol: position.tokenSymbol,
+        timestamp: Date.now(),
+        error: "Recorded position amount is zero or the wallet holds none of this mint",
+      };
+    }
+    const tokenBalance = sellRaw.toString();
     const order = await getJupiterQuote(position.tokenAddress, SOL_MINT, tokenBalance, wallet.publicKey.toBase58());
     if (!order?.transaction || !order.requestId) {
       return {
@@ -853,11 +1232,13 @@ async function executeSellLocked(position: ActivePosition, reason: string, markP
     }
 
     const transaction = VersionedTransaction.deserialize(Buffer.from(order.transaction, "base64"));
+    applyPriorityFee(transaction, "SELL");
     transaction.sign([wallet]);
     const signedTransaction = Buffer.from(transaction.serialize()).toString("base64");
-    const execution = await executeJupiterSwap(order, signedTransaction);
-    if (!execution || execution.status !== "Success" || !execution.signature) {
-      throw new Error(`Jupiter sell execution failed${execution?.error ? `: ${execution.error}` : ""}`);
+    const ownSignature = deriveTransactionSignature(transaction);
+    const execution = await confirmOrRecoverSwap(connection, order, signedTransaction, ownSignature);
+    if (!execution.success || !execution.signature) {
+      throw new Error(execution.error ?? "Jupiter sell execution failed");
     }
 
     const txSignature = execution.signature;
@@ -1001,13 +1382,17 @@ export async function monitorPositions(): Promise<void> {
 
   for (const position of [...activePositions]) {
     try {
-      const pairs = await httpGet<DexPairPrice[]>(
-        `${CONFIG.dexScreenerApiUrl}/tokens/v1/${position.chainId}/${position.tokenAddress}`
-      );
-      if (!pairs.length) continue;
+      // Jupiter first, DexScreener as fallback — see live-price.ts for the
+      // measured staleness that motivated the switch. Skipping the tick on a
+      // total failure is deliberate: acting on a price neither source could
+      // supply is worse than waiting for the next poll.
+      const live = await fetchLivePrice(position.tokenAddress, position.chainId);
+      if (!live) continue;
 
-      const currentPrice = Number(pairs[0].priceUsd || 0);
-      await evaluatePositionAtPrice(position, currentPrice);
+      // liquidityUsd stays undefined when unreported — the rug check needs to
+      // tell "unreadable" from "the pool is actually gone", and coercing it to
+      // 0 would panic-sell every position on any partial API response.
+      await evaluatePositionAtPrice(position, live.priceUsd, live.liquidityUsd);
 
       await new Promise((r) => setTimeout(r, 500));
     } catch {
@@ -1022,7 +1407,11 @@ export async function monitorPositions(): Promise<void> {
  * DexScreener price fetch in monitorPositions so the exit logic can be exercised
  * without any network access (used by the paper-trading simulation and tests).
  */
-export async function evaluatePositionAtPrice(position: ActivePosition, currentPrice: number): Promise<void> {
+export async function evaluatePositionAtPrice(
+  position: ActivePosition,
+  currentPrice: number,
+  currentLiquidityUsd?: number
+): Promise<void> {
   if (!Number.isFinite(currentPrice) || currentPrice <= 0) {
     logger.warn(`Skipping invalid price for ${position.tokenSymbol}`);
     return;
@@ -1042,6 +1431,46 @@ export async function evaluatePositionAtPrice(position: ActivePosition, currentP
   logger.info(
     `${position.tokenSymbol}: $${currentPrice.toFixed(10)} (${position.pnlPercent >= 0 ? "+" : ""}${position.pnlPercent.toFixed(2)}%)`
   );
+
+  // A draining pool outranks every other exit. Stop-loss, take-profit and the
+  // partial all reason about price, and during a rug the price is the last
+  // thing to tell the truth — the pool empties first and whatever is left to
+  // sell into disappears with it. This runs before the trailing-stop update so
+  // no ratchet logic can defer it, and it never consults the model: the 5-15s
+  // AI round-trip is exactly what turned Schrodinger into -98.28%.
+  if (CONFIG.rugExitEnabled) {
+    // A rug exit that can never fire looks exactly like a rug that never
+    // happened: both are silence. If the feed gives us no liquidity for this
+    // position, the drain check below is inert for it and the operator has no
+    // way to know their protection is off. Say so once per position — once,
+    // because monitoring re-evaluates every cycle and this would otherwise
+    // repeat every few seconds for the life of the position.
+    if (typeof currentLiquidityUsd !== "number" || !Number.isFinite(currentLiquidityUsd)) {
+      if (!rugExitInertWarned.has(position.tokenAddress)) {
+        rugExitInertWarned.add(position.tokenAddress);
+        logger.warn(
+          `⚠️  ${position.tokenSymbol}: no liquidity reading from the price feed — rug exit is INERT for this ` +
+            `position (stop-loss and trailing stop still apply).`
+        );
+      }
+    } else {
+      rugExitInertWarned.delete(position.tokenAddress);
+    }
+
+    position.peakLiquidityUsd = updatePeakLiquidity(position.peakLiquidityUsd, currentLiquidityUsd);
+
+    const rug = shouldExitOnLiquidityDrop(position.peakLiquidityUsd, currentLiquidityUsd, {
+      liquidityDropPercent: CONFIG.rugExitLiquidityDropPercent,
+      minTrackedLiquidityUsd: DEFAULT_RUG_EXIT.minTrackedLiquidityUsd,
+    });
+
+    if (rug.exit) {
+      logger.warn(`🚨 RUG EXIT for ${position.tokenSymbol}: ${rug.reason} — selling now, no model call.`);
+      const rugResult = await executeSell(position, "LIQUIDITY_DRAIN", currentPrice);
+      if (rugResult.success) resetFailedSellCount(position.tokenAddress);
+      return;
+    }
+  }
 
   // Pass this call's own currentPrice through as executeSell's markPriceUsd
   // rather than relying on the position.currentPrice/pnlPercent just written
@@ -1107,8 +1536,30 @@ export async function evaluatePositionAtPrice(position: ActivePosition, currentP
   // whole position makes a partial sale pointless. Computed from currentPrice
   // rather than position.pnlPercent so it cannot act on a stale value.
   const gainPercent = ((currentPrice - position.entryPrice) / position.entryPrice) * 100;
+
+  // Ladder first, when one is configured: it supersedes the single-shot
+  // partial below rather than stacking with it, so a position cannot be
+  // scaled out of twice for the same gain.
+  if (!exitReason && CONFIG.takeProfitLadder.length > 0) {
+    const step = nextLadderRung(gainPercent, CONFIG.takeProfitLadder, position.ladderRungsTaken ?? 0);
+    if (step) {
+      logger.info(
+        `🪜 LADDER RUNG ${step.rungsConsumed}/${CONFIG.takeProfitLadder.length} for ${position.tokenSymbol} ` +
+          `at +${gainPercent.toFixed(2)}% (rung +${step.rung.gainPercent}%): selling ` +
+          `${Math.round(step.rung.sellFraction * 100)}% of what is left.`
+      );
+      // Marked BEFORE the sell: a failed sale must not leave the rung armed to
+      // retry every tick, which is how a transient RPC error turns into a
+      // stream of partial sales.
+      position.ladderRungsTaken = step.rungsConsumed;
+      await executeSellPartial(position, step.rung.sellFraction, "PARTIAL_TAKE_PROFIT", currentPrice);
+      return;
+    }
+  }
+
   if (
     !exitReason &&
+    CONFIG.takeProfitLadder.length === 0 &&
     CONFIG.partialTakeProfitPercent > 0 &&
     !position.partialTakeProfitTaken &&
     Number.isFinite(gainPercent) &&

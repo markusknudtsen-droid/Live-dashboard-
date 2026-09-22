@@ -480,27 +480,50 @@ Provide your trading analysis. Remember: only recommend BUY if confidence is gen
  * Batch analyze multiple candidates and return sorted by confidence
  */
 export async function batchAnalyze(candidates: TokenCandidate[]): Promise<TradeSignal[]> {
-  const signals: TradeSignal[] = [];
+  // Analysed with CONFIG.analysisConcurrency workers rather than one at a
+  // time. Sequentially, a 10-candidate batch spent ~60s in model calls before
+  // the caller could act on ANY of them, so a BUY decided on candidate 1 sat
+  // idle while candidates 2..10 were judged. Measured on 2026-09-21: a BUY
+  // logged at 18:02:08 did not execute until 18:05:36.
+  //
+  // Workers pull from a shared cursor. `next++` needs no lock: there is no
+  // await between reading and incrementing it, so a worker cannot be preempted
+  // mid-claim and two workers cannot take the same index.
+  const signals: (TradeSignal | undefined)[] = new Array(candidates.length);
+  let next = 0;
 
-  for (const [index, candidate] of candidates.entries()) {
-    logger.info(`🧠 Analyzing ${candidate.symbol}...`);
-    const signal = await analyzeToken(candidate);
-    signals.push(signal);
+  async function worker(): Promise<void> {
+    for (;;) {
+      const index = next++;
+      if (index >= candidates.length) return;
+      const candidate = candidates[index];
 
-    const emoji = signal.action === "BUY" ? "🟢" : signal.action === "WATCH" ? "🟡" : "🔴";
-    // reasoning is already sanitized (analysis-normalizer.ts), but a plain
-    // .slice() here truncates by UTF-16 code unit, not code point — it can
-    // still split a supplementary-plane character (most emoji, among
-    // others) at the 60-unit boundary into an invalid lone surrogate,
-    // corrupting this log line. sanitizeDisplayText truncates by code point.
-    logger.info(`${emoji} ${signal.token.symbol}: ${signal.action} (${signal.confidence}%) - ${sanitizeDisplayText(signal.reasoning, 60)}`);
-    // Only sleep between requests, not after the last one — there's no
-    // following request left to rate-limit, so sleeping here just delays
-    // returning (and any resulting BUY executing) by a second for nothing.
-    if (index < candidates.length - 1) {
-      await new Promise((r) => setTimeout(r, 1000));
+      logger.info(`🧠 Analyzing ${candidate.symbol}...`);
+      let signal: TradeSignal;
+      try {
+        signal = await analyzeToken(candidate);
+      } catch (error) {
+        // One unanalysable token must not abort the batch and cost the cycle
+        // every other candidate — it is simply not considered this time.
+        logger.warn(
+          `Analysis failed for ${candidate.symbol}: ${error instanceof Error ? error.message : String(error)}`
+        );
+        continue;
+      }
+      signals[index] = signal;
+
+      const emoji = signal.action === "BUY" ? "🟢" : signal.action === "WATCH" ? "🟡" : "🔴";
+      // reasoning is already sanitized (analysis-normalizer.ts), but a plain
+      // .slice() here truncates by UTF-16 code unit, not code point — it can
+      // still split a supplementary-plane character (most emoji, among
+      // others) at the 60-unit boundary into an invalid lone surrogate,
+      // corrupting this log line. sanitizeDisplayText truncates by code point.
+      logger.info(`${emoji} ${signal.token.symbol}: ${signal.action} (${signal.confidence}%) - ${sanitizeDisplayText(signal.reasoning, 60)}`);
     }
   }
 
-  return signals.sort((a, b) => b.confidence - a.confidence);
+  const workerCount = Math.max(1, Math.min(CONFIG.analysisConcurrency, candidates.length));
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+  return signals.filter((s): s is TradeSignal => s !== undefined).sort((a, b) => b.confidence - a.confidence);
 }
