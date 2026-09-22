@@ -1,4 +1,5 @@
 import { Router } from "express";
+import type { EntryFeatures } from "../../src/entry-features.js";
 import { loadState } from "../../src/persistence.js";
 import { loadReportedTrades, ReportedTrade } from "../reportedTrades.js";
 
@@ -16,6 +17,8 @@ interface TradeLogItem {
   confidence: number | undefined;
   outcome: string;
   tx_signature?: string;
+  /** Entry snapshot on BUY rows; absent on SELLs and on legacy trades. */
+  features?: EntryFeatures;
 }
 
 function reportedToItem(trade: ReportedTrade, index: number): TradeLogItem {
@@ -40,6 +43,7 @@ function reportedToItem(trade: ReportedTrade, index: number): TradeLogItem {
     confidence: trade.confidence,
     outcome,
     tx_signature: trade.tx_signature || undefined,
+    features: trade.features,
   };
 }
 
