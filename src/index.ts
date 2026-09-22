@@ -37,6 +37,7 @@ import {
 } from "./first-trade-gate.js";
 import type { FirstTradeValidation } from "./first-trade-gate.js";
 import { adjustConfidence, checkRugGates, qualifiesForInstantBuy } from "./entry-score.js";
+import { recordConfidenceBonus } from "./entry-features.js";
 import { recallVerdict, rememberVerdict, type AnalysisCache } from "./analysis-cache.js";
 import { fetchRugCheckReport } from "./rugcheck.js";
 import { fetchNewPoolMints } from "./geckoterminal.js";
@@ -300,6 +301,9 @@ function buildFreshLaunchSignal(fresh: FreshLaunchCandidate): TradeSignal {
     momentum: "unknown",
     riskLevel: "high",
     narrative: "fresh-launch",
+    // confidence 100 here is a hardcoded constant, not a model verdict; the
+    // gate label is what tells the two apart in the trade history.
+    entryContext: { gate: "fresh-launch", source: "fresh-launch", confidenceBeforeModifiers: 100 },
   };
 }
 
@@ -318,6 +322,9 @@ function buildInstantBuySignal(token: TokenCandidate): TradeSignal {
     momentum: "unknown",
     riskLevel: "high",
     narrative: "boost-triggered",
+    // Same as fresh-launch: confidence 100 is a constant, and this path is the
+    // one deliberate RugCheck exemption, so features.rugCheck stays absent.
+    entryContext: { gate: "instant-buy", confidenceBeforeModifiers: 100 },
   };
 }
 let cycleInProgress = false;
@@ -586,6 +593,16 @@ async function runCycle(): Promise<void> {
   logger.info("📡 Scanning for candidates...");
   let candidates = await scanForCandidates();
 
+  // Which feed surfaced each mint. Recorded on the trade so the history can
+  // later answer "which discovery source actually produces winners?" — the
+  // feeds differ enough (popularity-biased vs. creation-time-ordered) that
+  // pooling them hides the answer. Discovery-only, never a trading input.
+  const sourceByAddress = new Map<string, string>();
+  const tagSource = (found: TokenCandidate[], source: string): void => {
+    for (const c of found) if (!sourceByAddress.has(c.address)) sourceByAddress.set(c.address, source);
+  };
+  tagSource(candidates, "dexscreener");
+
   // Telegram is a candidate source: it surfaces coins the DexScreener feeds
   // never show. Resolved candidates still pass isWorthAnalysing() inside
   // resolveMintsToCandidates(), so a mention cannot bypass the liquidity/age
@@ -595,6 +612,7 @@ async function runCycle(): Promise<void> {
       .filter((m) => !candidates.some((c) => c.address === m));
     if (mentioned.length > 0) {
       const resolved = await resolveMintsToCandidates(mentioned);
+      tagSource(resolved, "telegram");
       candidates = [...candidates, ...resolved];
     }
   }
@@ -616,6 +634,7 @@ async function runCycle(): Promise<void> {
       if (resolved.length > 0) {
         logger.info(`🦎 GeckoTerminal: ${resolved.length} new pool(s) resolved to candidates`);
       }
+      tagSource(resolved, "geckoterminal");
       candidates = [...candidates, ...resolved];
     }
   }
@@ -635,6 +654,7 @@ async function runCycle(): Promise<void> {
       if (resolved.length > 0) {
         logger.info(`💊 pump.fun: ${resolved.length} new mint(s) resolved to candidates`);
       }
+      tagSource(resolved, "pumpfun");
       candidates = [...candidates, ...resolved];
     }
   }
@@ -757,6 +777,9 @@ async function runCycle(): Promise<void> {
 
       logger.info(`⚡ INSTANT BUY: ${candidate.symbol} — ${verdict.reason}`);
       const instantSignal = buildInstantBuySignal(candidate);
+      if (instantSignal.entryContext) {
+        instantSignal.entryContext.source = sourceByAddress.get(candidate.address);
+      }
       const result = await executeBuy(instantSignal);
       tradeHistory.push({
         timestamp: Date.now(),
@@ -805,6 +828,19 @@ async function runCycle(): Promise<void> {
   for (const sig of analysed) rememberVerdict(analysisCache, sig, nowMs);
   const signals = [...analysed, ...reused];
 
+  // Open a fresh entry context per cycle, before any modifier runs, so the
+  // baseline is the model's own verdict rather than anything the modifiers
+  // have already added. analysisCache stores and returns verdicts by value
+  // (see analysis-cache.ts), so a reused signal starts from the same untouched
+  // number a freshly analysed one does.
+  for (const s of signals) {
+    s.entryContext = {
+      confidenceBeforeModifiers: s.confidence,
+      gate: "ai",
+      source: sourceByAddress.get(s.token.address),
+    };
+  }
+
   // Modifiers adjust the model's confidence using cheap-to-fake marketing
   // signals (boost, socials) and hard-to-fake ones (age). The bonus cap in
   // entry-score.ts keeps marketing alone from carrying a coin over the line.
@@ -821,6 +857,7 @@ async function runCycle(): Promise<void> {
         logger.info(
           `⚖️  ${s.token.symbol}: ${s.confidence}% → ${adj.adjustedConfidence}% (${adj.reasons.join(", ")})`
         );
+        recordConfidenceBonus(s, "entryScore", adj.adjustedConfidence - s.confidence);
         s.confidence = adj.adjustedConfidence;
       }
     }
@@ -848,6 +885,7 @@ async function runCycle(): Promise<void> {
         if (bonus > 0) {
           const before = s.confidence;
           s.confidence = Math.min(100, s.confidence + bonus);
+          recordConfidenceBonus(s, "devReputation", s.confidence - before);
           logger.info(`👤 ${s.token.symbol}: ${before}% → ${s.confidence}% (${reason})`);
         }
       } catch (error) {
@@ -869,6 +907,7 @@ async function runCycle(): Promise<void> {
       if (sig) {
         const before = s.confidence;
         s.confidence = Math.min(100, s.confidence + CONFIG.telegramMentionBonus);
+        recordConfidenceBonus(s, "telegram", s.confidence - before);
         logger.info(
           `📡 ${s.token.symbol}: ${before}% → ${s.confidence}% (+${CONFIG.telegramMentionBonus} mentioned in ${sig.channel})`
         );
@@ -888,6 +927,7 @@ async function runCycle(): Promise<void> {
       if (bonus > 0) {
         const before = s.confidence;
         s.confidence = Math.min(100, s.confidence + bonus);
+        recordConfidenceBonus(s, "narrativeTrend", s.confidence - before);
         logger.info(`📈 ${s.token.symbol}: ${before}% → ${s.confidence}% (${reason})`);
       }
     }
@@ -1046,6 +1086,10 @@ async function runCycle(): Promise<void> {
       // is the fresh-boost instant buy above, which trades that screening for
       // speed and keeps just the liquidity floor.
       const rc = await fetchRugCheckReport(signal.token.address);
+      // Keep the report on the signal even when the gate then rejects it: on a
+      // pass this is what gets recorded with the buy, and a rejected coin never
+      // reaches a trade record anyway.
+      if (signal.entryContext) signal.entryContext.rugCheck = rc;
       const gate = checkSmallCapGate(
         {
           marketCapUsd: signal.token.marketCap,

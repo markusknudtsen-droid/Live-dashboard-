@@ -1,4 +1,9 @@
 import { Router } from "express";
+import {
+  isEntryGate,
+  type EntryFeatures,
+  type EntryRugCheck,
+} from "../../src/entry-features.js";
 import { appendReportedTrade, ReportedTrade } from "../reportedTrades.js";
 
 const router = Router();
@@ -14,6 +19,91 @@ function asFiniteNumber(value: unknown): number | undefined {
     return Number.isFinite(n) ? n : undefined;
   }
   return undefined;
+}
+
+/** Only plain objects — arrays and null would otherwise pass a typeof check. */
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function num(value: unknown): number {
+  return asFiniteNumber(value) ?? 0;
+}
+
+function str(value: unknown, max: number): string {
+  return typeof value === "string" ? value.slice(0, max) : "";
+}
+
+/** Bonus maps arrive attacker-shaped, so bound both the key count and their length. */
+const MAX_BONUS_KEYS = 12;
+
+function sanitiseBonuses(value: unknown): Record<string, number> | undefined {
+  const raw = asRecord(value);
+  if (!raw) return undefined;
+  const out: Record<string, number> = {};
+  for (const [key, entry] of Object.entries(raw).slice(0, MAX_BONUS_KEYS)) {
+    const n = asFiniteNumber(entry);
+    if (n !== undefined) out[key.slice(0, 32)] = n;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function sanitiseRugCheck(value: unknown): EntryRugCheck | undefined {
+  const raw = asRecord(value);
+  if (!raw) return undefined;
+  return {
+    scoreRaw: num(raw.scoreRaw),
+    scoreNormalised: num(raw.scoreNormalised),
+    rugged: Boolean(raw.rugged),
+    dangerRiskCount: num(raw.dangerRiskCount),
+    mintAuthorityDisabled: Boolean(raw.mintAuthorityDisabled),
+    freezeAuthorityDisabled: Boolean(raw.freezeAuthorityDisabled),
+    hasHolderData: Boolean(raw.hasHolderData),
+    totalHolders: num(raw.totalHolders),
+    devHoldingPct: num(raw.devHoldingPct),
+    insiderHoldingPct: num(raw.insiderHoldingPct),
+    bundlerHoldingPct: num(raw.bundlerHoldingPct),
+  };
+}
+
+/**
+ * Validate the entry snapshot off the wire. Unrecognised gates become
+ * "unknown" rather than being folded into "ai": mislabelling the path that
+ * authorised a buy would quietly corrupt the one grouping this field exists
+ * for. Absent or non-object input yields undefined, never a partial record.
+ */
+function sanitiseFeatures(value: unknown): EntryFeatures | undefined {
+  const raw = asRecord(value);
+  if (!raw) return undefined;
+
+  return {
+    marketCapUsd: num(raw.marketCapUsd),
+    liquidityUsd: num(raw.liquidityUsd),
+    volume24h: num(raw.volume24h),
+    ageHours: num(raw.ageHours),
+    buyToSellRatio: num(raw.buyToSellRatio),
+    priceChange5m: num(raw.priceChange5m),
+    priceChange1h: num(raw.priceChange1h),
+    boostAmount: num(raw.boostAmount),
+    hasXSocial: Boolean(raw.hasXSocial),
+    hasOtherSocial: Boolean(raw.hasOtherSocial),
+    hasPaidDexInfo: Boolean(raw.hasPaidDexInfo),
+
+    trendStrength: str(raw.trendStrength, 32),
+    momentum: str(raw.momentum, 32),
+    riskLevel: str(raw.riskLevel, 32),
+    narrative: str(raw.narrative, 64),
+
+    finalConfidence: num(raw.finalConfidence),
+    confidenceBeforeModifiers: asFiniteNumber(raw.confidenceBeforeModifiers),
+    confidenceBonuses: sanitiseBonuses(raw.confidenceBonuses),
+
+    gate: isEntryGate(raw.gate) ? raw.gate : "unknown",
+    source: typeof raw.source === "string" ? raw.source.slice(0, 32) : undefined,
+    rugCheck: sanitiseRugCheck(raw.rugCheck),
+  };
 }
 
 /**
@@ -62,6 +152,10 @@ router.post("/", async (req, res) => {
     confidence: asFiniteNumber(body.confidence),
     pnl_percent: asFiniteNumber(body.pnl_percent),
     reason: typeof body.reason === "string" ? body.reason.slice(0, 48) : undefined,
+    // Entry snapshots describe a buy decision, so they are only meaningful on
+    // BUY rows; dropping them from SELLs keeps the store free of junk a client
+    // could otherwise attach to any trade.
+    features: type === "BUY" ? sanitiseFeatures(body.features) : undefined,
     received_at: Date.now(),
   };
 
