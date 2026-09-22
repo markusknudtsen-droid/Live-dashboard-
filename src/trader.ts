@@ -55,6 +55,14 @@ export interface ActivePosition {
    */
   peakPrice?: number;
   /**
+   * Rolling record of the last few bearish-exit re-analyses, newest last.
+   * The model-opinion exit needs 3 bearish reads out of the last 4 rather
+   * than closing on any single one — see momentum-guard.ts. Optional so
+   * positions persisted before this existed still rehydrate, and so a
+   * restart simply starts the tally over rather than inheriting a stale one.
+   */
+  recentBearishReads?: boolean[];
+  /**
    * Highest pool liquidity (USD) seen since entry, used by the rug exit.
    * Optional so positions persisted before rug detection existed still
    * rehydrate; it is seeded from the first valid reading.
