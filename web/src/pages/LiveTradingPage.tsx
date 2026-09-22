@@ -15,6 +15,16 @@ function formatUsdPrice(value: number): string {
   return value.toFixed(decimals);
 }
 
+/**
+ * DexScreener chart for a token. Trending rows get a `url` straight from the
+ * scanner, but positions are built from the bot's own ActivePosition, which
+ * never stored one — so build it from the address, the same way mcp-server.ts
+ * does. A coin you hold is the one you most want to click through to.
+ */
+function dexScreenerUrl(chainId: string, tokenAddress: string): string {
+  return `https://dexscreener.com/${chainId || "solana"}/${tokenAddress}`;
+}
+
 export function LiveTradingPage() {
   const portfolio = usePolling<PortfolioResponse>(() => api.get("/portfolio"), 6000);
   const trending = usePolling<TrendingToken[]>(() => api.get("/market/trending"), 20000);
@@ -47,7 +57,15 @@ export function LiveTradingPage() {
             {portfolio.data?.positions.length ? (
               portfolio.data.positions.map((position) => (
                 <tr key={position.token_address}>
-                  <td>{position.symbol}</td>
+                  <td>
+                    <a
+                      href={dexScreenerUrl(position.chain_id, position.token_address)}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      {position.symbol}
+                    </a>
+                  </td>
                   <td>${formatUsdPrice(position.entry_price)}</td>
                   <td>${formatUsdPrice(position.current_price)}</td>
                   <td className={position.pnl_percent >= 0 ? "stat-card__value--positive" : "stat-card__value--negative"}>
