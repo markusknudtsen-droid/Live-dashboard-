@@ -65,10 +65,15 @@ export interface EntryFeatures {
   /** What actually cleared MIN_CONFIDENCE. */
   finalConfidence: number;
   /**
-   * Confidence before this cycle's modifier passes ran. NOT necessarily the
-   * model's raw verdict: a signal reused from analysisCache carries the
-   * confidence it was left with last cycle. Compare against finalConfidence to
-   * see how much of an entry was model judgement vs. stacked bonuses.
+   * The model's own verdict, before any modifier pass ran. Compare against
+   * finalConfidence to see how much of an entry was model judgement versus
+   * stacked bonuses.
+   *
+   * Trustworthy as of the analysis-cache fix: the cache stores and returns
+   * verdicts by value, so a signal reused from it starts from the same
+   * untouched number a freshly analysed one does. Before that fix the cache
+   * held the already-boosted figure, and this baseline would have been
+   * inflated for any reused coin.
    */
   confidenceBeforeModifiers?: number;
   /** Per-modifier contribution, e.g. { entryScore: 8, devReputation: 15 }. */

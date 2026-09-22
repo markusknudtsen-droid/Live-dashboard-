@@ -17,7 +17,13 @@ import {
   getHeldTokens,
   MAX_CONCURRENT_POSITIONS,
 } from "./trader.js";
-import { isBearishSignal, shouldCloseHeldPosition } from "./momentum-guard.js";
+import {
+  BEARISH_READS_TO_CLOSE,
+  isBearishRead,
+  isBearishSignal,
+  recordBearishRead,
+  shouldCloseHeldPosition,
+} from "./momentum-guard.js";
 import { findFreshLaunches, type FreshLaunchCandidate } from "./fresh-launch.js";
 import { sizeForConfidence } from "./position-sizing.js";
 import { logger } from "./logger.js";
@@ -32,6 +38,7 @@ import {
 import type { FirstTradeValidation } from "./first-trade-gate.js";
 import { adjustConfidence, checkRugGates, qualifiesForInstantBuy } from "./entry-score.js";
 import { recordConfidenceBonus } from "./entry-features.js";
+import { recallVerdict, rememberVerdict, type AnalysisCache } from "./analysis-cache.js";
 import { fetchRugCheckReport } from "./rugcheck.js";
 import { fetchNewPoolMints } from "./geckoterminal.js";
 import { checkSmallCapGate } from "./small-cap-gate.js";
@@ -71,8 +78,12 @@ const tradeHistory: TradeHistoryItem[] = [];
  * Recent model verdicts, keyed by token address. The scan sources return a
  * stable set, so without this the bot pays to re-analyse unchanged tokens every
  * cycle instead of spending that budget on ones it has not seen.
+ *
+ * Stored and returned BY VALUE — see analysis-cache.ts. Handing out the live
+ * object let the confidence modifiers boost the cached verdict in place, so
+ * every reuse inside the TTL applied those bonuses a second time.
  */
-const analysisCache = new Map<string, { at: number; signal: TradeSignal }>();
+const analysisCache: AnalysisCache = new Map();
 
 /**
  * When each held position was last re-analysed for a bearish exit. Separate
@@ -452,7 +463,29 @@ async function checkHeldPositionsForBearishExit(): Promise<void> {
     // call above was in flight.
     const position = getActivePositions().find((p) => p.tokenAddress === signal.token.address);
     if (!position) continue;
-    if (!shouldCloseHeldPosition(signal.trendStrength, signal.momentum, signal.confidence, CONFIG.holdExitConfidenceThreshold)) {
+
+    // Record this read, then decide on the accumulated history rather than on
+    // this single call. One bearish sample no longer closes a position: it
+    // takes 3 of the last 4 (so "B B B" or "B B U B"), which is what stops a
+    // lone noisy re-analysis from cutting a coin mid-recovery — KCAT, sold at
+    // roughly breakeven on one "reversing" read minutes before it pumped.
+    const bearish = isBearishRead(
+      signal.trendStrength,
+      signal.momentum,
+      signal.confidence,
+      CONFIG.holdExitConfidenceThreshold
+    );
+    position.recentBearishReads = recordBearishRead(position.recentBearishReads, bearish);
+
+    if (!shouldCloseHeldPosition(position.recentBearishReads)) {
+      if (bearish) {
+        const tally = position.recentBearishReads.filter(Boolean).length;
+        logger.info(
+          `⏳ ${position.tokenSymbol}: bearish read ${tally}/${BEARISH_READS_TO_CLOSE} ` +
+            `(trend=${signal.trendStrength} momentum=${signal.momentum} conf=${signal.confidence}%) — ` +
+            `holding until it is confirmed.`
+        );
+      }
       continue;
     }
 
@@ -775,11 +808,11 @@ async function runCycle(): Promise<void> {
   const fresh: typeof candidates = [];
   const reused: TradeSignal[] = [];
   for (const c of candidates) {
-    const hit = analysisCache.get(c.address);
-    if (analysisTtlMs > 0 && hit && nowMs - hit.at < analysisTtlMs) {
+    const hit = recallVerdict(analysisCache, c.address, nowMs, analysisTtlMs);
+    if (hit) {
       // Re-point the cached verdict at the current candidate so price-derived
       // fields downstream are current, even though the model's judgement is not.
-      reused.push({ ...hit.signal, token: c });
+      reused.push({ ...hit, token: c });
     } else {
       fresh.push(c);
     }
@@ -792,13 +825,14 @@ async function runCycle(): Promise<void> {
       ` of ${candidates.length} found...`
   );
   const analysed = await batchAnalyze(toAnalyse);
-  for (const sig of analysed) analysisCache.set(sig.token.address, { at: nowMs, signal: sig });
+  for (const sig of analysed) rememberVerdict(analysisCache, sig, nowMs);
   const signals = [...analysed, ...reused];
 
-  // Open a fresh entry context per cycle, before any modifier runs. A reused
-  // signal arrives carrying last cycle's adjusted confidence, so this baseline
-  // is "confidence entering THIS cycle's modifiers", not the model's raw
-  // verdict — recorded under a name that says so.
+  // Open a fresh entry context per cycle, before any modifier runs, so the
+  // baseline is the model's own verdict rather than anything the modifiers
+  // have already added. analysisCache stores and returns verdicts by value
+  // (see analysis-cache.ts), so a reused signal starts from the same untouched
+  // number a freshly analysed one does.
   for (const s of signals) {
     s.entryContext = {
       confidenceBeforeModifiers: s.confidence,
