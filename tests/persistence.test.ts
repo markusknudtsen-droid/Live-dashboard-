@@ -293,7 +293,12 @@ test("saveState leaves no stray temp files behind, even under concurrent writes"
 
   const { readdir } = await import("node:fs/promises");
   const entries = await readdir(tmpDir);
-  assert.deepEqual(entries, ["state.json"], "no leftover .tmp-* files after the writes settle");
+  assert.deepEqual(
+    entries.filter((e) => e.includes(".tmp-")),
+    [],
+    "no leftover .tmp-* files after the writes settle"
+  );
+  assert.ok(entries.includes("state.json"), "the state file itself is still there");
 });
 
 // saveState() runs every cycle, so if a persistent failure (a full disk, a
@@ -310,11 +315,86 @@ test("saveState cleans up its temp file when the write/rename fails", async () =
     await assert.rejects(() => saveState({ activePositions: [], tradeHistory: [], firstTradeValidated: null }));
     const entries = await readdir(tmpDir);
     assert.deepEqual(
-      entries.filter((e) => e !== "state.json"),
+      entries.filter((e) => e.includes(".tmp-")),
       [],
       "no leftover .tmp-* file after a failed save"
     );
   } finally {
     await rmFs(process.env.BOT_STATE_FILE!, { recursive: true, force: true });
   }
+});
+
+// The 2026-09-22 data loss: a hard power-off left state.json unreadable,
+// loadState() fell back to empty state, and the first save of the new run
+// renamed a fresh file over the only record of a live 0.15 SOL position.
+// Failing open is still correct — a broken file must not block trading — but
+// the bytes have to survive so the position can be recovered by hand.
+test("loadState preserves an unreadable state file instead of letting it be overwritten", async () => {
+  const { readdir, readFile: readFileFs, rm: rmFs } = await import("node:fs/promises");
+  const statePath = process.env.BOT_STATE_FILE!;
+
+  // Earlier tests in this file also feed loadState a corrupt file, so clear any
+  // preserved copies they left before asserting on how many this one makes.
+  for (const stale of (await readdir(tmpDir)).filter((e) => e.includes(".corrupt-"))) {
+    await rmFs(path.join(tmpDir, stale), { force: true });
+  }
+
+  // Truncated mid-object, the shape a non-durable write leaves behind.
+  const corrupt = '{"activePositions":[{"tokenSymbol":"FIBONACCI","amountSol":0.15';
+  await writeFile(statePath, corrupt, "utf-8");
+
+  const state = await loadState();
+  assert.deepEqual(state.activePositions, [], "fails open so trading is never blocked");
+
+  const quarantined = (await readdir(tmpDir)).filter((e) => e.includes(".corrupt-"));
+  assert.equal(quarantined.length, 1, "exactly one quarantine copy was made");
+  assert.equal(
+    await readFileFs(path.join(tmpDir, quarantined[0]), "utf-8"),
+    corrupt,
+    "the original bytes are preserved verbatim for manual recovery"
+  );
+
+  // And the save that follows startup can no longer destroy it.
+  await saveState({ activePositions: [], tradeHistory: [], firstTradeValidated: null });
+  assert.equal(
+    await readFileFs(path.join(tmpDir, quarantined[0]), "utf-8"),
+    corrupt,
+    "the preserved copy survives the next saveState"
+  );
+
+  for (const name of quarantined) await rmFs(path.join(tmpDir, name), { force: true });
+  await rmFs(statePath, { force: true });
+});
+
+test("loadState does not quarantine when there is simply no state file yet", async () => {
+  const { readdir, rm: rmFs } = await import("node:fs/promises");
+  await rmFs(process.env.BOT_STATE_FILE!, { force: true });
+
+  const state = await loadState();
+  assert.deepEqual(state.activePositions, []);
+  assert.equal(
+    (await readdir(tmpDir)).filter((e) => e.includes(".corrupt-")).length,
+    0,
+    "a first run is not an error and must not litter quarantine files"
+  );
+});
+
+test("a valid state file is loaded normally and never quarantined", async () => {
+  const { readdir, rm: rmFs } = await import("node:fs/promises");
+  await saveState({
+    activePositions: [position("real-sig-1")],
+    tradeHistory: [],
+    firstTradeValidated: true,
+  });
+
+  const state = await loadState();
+  assert.equal(state.activePositions.length, 1, "the position round-trips");
+  assert.equal(state.firstTradeValidated, true);
+  assert.equal(
+    (await readdir(tmpDir)).filter((e) => e.includes(".corrupt-")).length,
+    0,
+    "a healthy file is left alone"
+  );
+
+  await rmFs(process.env.BOT_STATE_FILE!, { force: true });
 });

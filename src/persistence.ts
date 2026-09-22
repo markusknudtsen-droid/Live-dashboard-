@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { CONFIG } from "./config.js";
 import { logger } from "./logger.js";
@@ -113,11 +113,77 @@ function parseStateFile(raw: string): BotState {
   });
 }
 
-export async function loadState(): Promise<BotState> {
+/**
+ * Move an unreadable state file aside instead of leaving it to be overwritten.
+ *
+ * loadState() deliberately fails open so a broken file can't block trading,
+ * but on its own that silently DESTROYS the record: the bot starts with an
+ * empty state, the first saveState() of the run renames a fresh temp file over
+ * the bad one, and any position it held becomes invisible — still on-chain,
+ * still real money, but no longer monitored, stop-lossed or exited.
+ *
+ * Observed 2026-09-22: a hard power-off left the file unreadable, startup
+ * logged "Recovered state: 0 active positions, 0 history entries", and a
+ * 0.15 SOL position plus 61 history entries were overwritten minutes later.
+ *
+ * Preserving the bytes keeps that recoverable by hand. Best-effort by design —
+ * if the rename itself fails there is nothing further to do but say so, and
+ * failing to quarantine must still never block startup.
+ */
+async function preserveUnreadableState(raw: string | undefined, reason: unknown): Promise<void> {
+  const fullPath = path.resolve(CONFIG.stateFilePath);
+  const why = reason instanceof Error ? reason.message : String(reason);
+
+  // Copy rather than rename, deliberately. Renaming would leave the original
+  // path missing, which silently changes what every OTHER reader sees: the
+  // dashboard's loadStateStrict() exists precisely to tell "no state yet"
+  // apart from "state unreadable", and moving the file turns the second into
+  // the first. Copying preserves the bytes without rewriting that signal.
+  if (raw === undefined) {
+    // The read itself failed (permissions, I/O), so there are no bytes to
+    // save. Nothing to preserve, but the operator still needs to know.
+    logger.error(
+      `⚠️  State file at ${fullPath} could not be READ (${why}) and could not be preserved. ` +
+        `Starting with EMPTY state — inspect the wallet for open positions now.`
+    );
+    return;
+  }
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const preservedPath = `${fullPath}.corrupt-${stamp}`;
   try {
-    const raw = await readFile(CONFIG.stateFilePath, "utf-8");
+    await writeFile(preservedPath, raw, "utf-8");
+    logger.error(
+      `⚠️  State file at ${fullPath} could not be parsed (${why}). Its contents were preserved ` +
+        `as ${preservedPath} and the bot is starting with EMPTY state — any position it held is ` +
+        `no longer being monitored. Check the wallet for open positions before trading further.`
+    );
+  } catch (writeError: unknown) {
+    const message = writeError instanceof Error ? writeError.message : String(writeError);
+    logger.error(
+      `⚠️  State file at ${fullPath} could not be parsed (${why}) AND its contents could not be ` +
+        `preserved (${message}). Starting with EMPTY state — inspect the wallet now.`
+    );
+  }
+}
+
+export async function loadState(): Promise<BotState> {
+  let raw: string;
+  try {
+    raw = await readFile(CONFIG.stateFilePath, "utf-8");
+  } catch (error: unknown) {
+    // A missing file is the ordinary first run — nothing to preserve, nothing
+    // to warn about. Anything else means a file exists but cannot be read.
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") await preserveUnreadableState(undefined, error);
+    return DEFAULT_STATE;
+  }
+
+  try {
     return parseStateFile(raw);
-  } catch {
+  } catch (error: unknown) {
+    // Readable but not parseable — the classic post-power-loss shape, where
+    // the rename landed but the data blocks never made it to disk.
+    await preserveUnreadableState(raw, error);
     return DEFAULT_STATE;
   }
 }
@@ -233,7 +299,21 @@ export function saveState(state: BotState): Promise<void> {
     // colliding on the same temp name.
     const tmpPath = `${fullPath}.tmp-${process.pid}-${Date.now()}`;
     try {
-      await writeFile(tmpPath, JSON.stringify(state, null, 2), "utf-8");
+      // fsync the temp file before the rename publishes it. rename() is atomic
+      // with respect to VISIBILITY, but not DURABILITY: without this, a hard
+      // power loss can leave the filesystem having recorded the rename while
+      // the file's data blocks were still only in the page cache, so the
+      // "atomically replaced" state file comes back zero-length or torn. That
+      // is exactly what happened on 2026-09-22 — the bot then read the
+      // unreadable file, fell back to empty state, and lost a live position.
+      // writeFile() alone cannot express this, so open the handle explicitly.
+      const handle = await open(tmpPath, "w");
+      try {
+        await handle.writeFile(JSON.stringify(state, null, 2), "utf-8");
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
       await rename(tmpPath, fullPath);
     } catch (error) {
       // This runs every cycle, so a persistent failure (a full disk, a
