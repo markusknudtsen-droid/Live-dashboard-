@@ -17,7 +17,13 @@ import {
   getHeldTokens,
   MAX_CONCURRENT_POSITIONS,
 } from "./trader.js";
-import { isBearishSignal, shouldCloseHeldPosition } from "./momentum-guard.js";
+import {
+  BEARISH_READS_TO_CLOSE,
+  isBearishRead,
+  isBearishSignal,
+  recordBearishRead,
+  shouldCloseHeldPosition,
+} from "./momentum-guard.js";
 import { findFreshLaunches, type FreshLaunchCandidate } from "./fresh-launch.js";
 import { sizeForConfidence } from "./position-sizing.js";
 import { logger } from "./logger.js";
@@ -450,7 +456,29 @@ async function checkHeldPositionsForBearishExit(): Promise<void> {
     // call above was in flight.
     const position = getActivePositions().find((p) => p.tokenAddress === signal.token.address);
     if (!position) continue;
-    if (!shouldCloseHeldPosition(signal.trendStrength, signal.momentum, signal.confidence, CONFIG.holdExitConfidenceThreshold)) {
+
+    // Record this read, then decide on the accumulated history rather than on
+    // this single call. One bearish sample no longer closes a position: it
+    // takes 3 of the last 4 (so "B B B" or "B B U B"), which is what stops a
+    // lone noisy re-analysis from cutting a coin mid-recovery — KCAT, sold at
+    // roughly breakeven on one "reversing" read minutes before it pumped.
+    const bearish = isBearishRead(
+      signal.trendStrength,
+      signal.momentum,
+      signal.confidence,
+      CONFIG.holdExitConfidenceThreshold
+    );
+    position.recentBearishReads = recordBearishRead(position.recentBearishReads, bearish);
+
+    if (!shouldCloseHeldPosition(position.recentBearishReads)) {
+      if (bearish) {
+        const tally = position.recentBearishReads.filter(Boolean).length;
+        logger.info(
+          `⏳ ${position.tokenSymbol}: bearish read ${tally}/${BEARISH_READS_TO_CLOSE} ` +
+            `(trend=${signal.trendStrength} momentum=${signal.momentum} conf=${signal.confidence}%) — ` +
+            `holding until it is confirmed.`
+        );
+      }
       continue;
     }
 
