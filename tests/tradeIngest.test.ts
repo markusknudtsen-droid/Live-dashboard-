@@ -122,3 +122,100 @@ test("ingestion is disabled (503) when no ingest key is configured", async () =>
     SERVER_CONFIG.ingestApiKey = original;
   }
 });
+
+test("a BUY's entry features round-trip through the store", async () => {
+  const res = await fetch(`${base}/api/trades/ingest`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-api-key": "shared-bot-key" },
+    body: JSON.stringify({
+      ...sampleTrade,
+      tx_signature: "DRYRUN-features-ok",
+      features: {
+        marketCapUsd: 48_000,
+        liquidityUsd: 12_500,
+        ageHours: 3.2,
+        gate: "ai",
+        source: "geckoterminal",
+        finalConfidence: 88,
+        confidenceBeforeModifiers: 62,
+        confidenceBonuses: { entryScore: 8, devReputation: 15 },
+        rugCheck: { scoreRaw: 10_001, scoreNormalised: 50, dangerRiskCount: 1, hasHolderData: true },
+      },
+    }),
+  });
+  assert.equal(res.status, 201);
+
+  const { loadReportedTrades } = await import("../server/reportedTrades.js");
+  const stored = (await loadReportedTrades()).find((t) => t.tx_signature === "DRYRUN-features-ok");
+  assert.ok(stored, "the trade was stored");
+  assert.equal(stored.features?.gate, "ai");
+  assert.equal(stored.features?.source, "geckoterminal");
+  assert.equal(stored.features?.marketCapUsd, 48_000);
+  assert.equal(stored.features?.confidenceBeforeModifiers, 62);
+  assert.deepEqual(stored.features?.confidenceBonuses, { entryScore: 8, devReputation: 15 });
+  assert.equal(stored.features?.rugCheck?.scoreRaw, 10_001, "the raw score is kept, not just normalised");
+});
+
+test("hostile entry features are sanitised rather than stored verbatim", async () => {
+  const bonuses: Record<string, unknown> = { ["x".repeat(200)]: 3, notANumber: "boom" };
+  for (let i = 0; i < 50; i++) bonuses[`pad${i}`] = i;
+
+  const res = await fetch(`${base}/api/trades/ingest`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-api-key": "shared-bot-key" },
+    body: JSON.stringify({
+      ...sampleTrade,
+      tx_signature: "DRYRUN-features-hostile",
+      features: {
+        marketCapUsd: "not-a-number",
+        ageHours: "Infinity",
+        gate: "__proto__",
+        source: "s".repeat(500),
+        trendStrength: "t".repeat(500),
+        confidenceBonuses: bonuses,
+        rugCheck: "not-an-object",
+      },
+    }),
+  });
+  assert.equal(res.status, 201, "a junk features block does not fail the trade itself");
+
+  const { loadReportedTrades } = await import("../server/reportedTrades.js");
+  const stored = (await loadReportedTrades()).find((t) => t.tx_signature === "DRYRUN-features-hostile");
+  const f = stored?.features;
+  assert.ok(f, "the trade was still stored");
+  assert.equal(f.gate, "unknown", "an unrecognised gate is not silently relabelled 'ai'");
+  assert.equal(f.marketCapUsd, 0, "an unparseable number degrades to 0");
+  assert.equal(f.ageHours, 0, "a non-finite number degrades to 0");
+  assert.equal(f.source?.length, 32, "strings are bounded");
+  assert.equal(f.trendStrength.length, 32);
+  assert.equal(f.rugCheck, undefined, "a non-object rugCheck is dropped, not coerced");
+  assert.ok(Object.keys(f.confidenceBonuses ?? {}).length <= 12, "the bonus map is bounded");
+  assert.ok(
+    Object.keys(f.confidenceBonuses ?? {}).every((k) => k.length <= 32),
+    "bonus keys are bounded"
+  );
+  assert.ok(
+    Object.values(f.confidenceBonuses ?? {}).every((v) => Number.isFinite(v)),
+    "non-numeric bonuses are dropped"
+  );
+});
+
+test("entry features are dropped from SELL rows", async () => {
+  const res = await fetch(`${base}/api/trades/ingest`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-api-key": "shared-bot-key" },
+    body: JSON.stringify({
+      ...sampleTrade,
+      type: "SELL",
+      tx_signature: "DRYRUN-features-on-sell",
+      pnl_percent: -33,
+      features: { gate: "ai", marketCapUsd: 1 },
+    }),
+  });
+  assert.equal(res.status, 201);
+
+  const { loadReportedTrades } = await import("../server/reportedTrades.js");
+  const stored = (await loadReportedTrades()).find((t) => t.tx_signature === "DRYRUN-features-on-sell");
+  assert.ok(stored, "the SELL was stored");
+  assert.equal(stored.features, undefined, "an entry snapshot only belongs on a BUY");
+});

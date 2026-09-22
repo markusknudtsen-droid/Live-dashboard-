@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { CONFIG } from "../src/config.js";
+import type { EntryFeatures } from "../src/entry-features.js";
 
 /**
  * A trade pushed to the dashboard by the bot (POST /api/trades/ingest).
@@ -20,6 +21,11 @@ export interface ReportedTrade {
   confidence?: number;
   pnl_percent?: number;
   reason?: string;
+  /**
+   * What the coin looked like at the buy decision, on BUY rows only. Join a
+   * SELL back to its entry on token_address to pair features with the outcome.
+   */
+  features?: EntryFeatures;
   /** When the dashboard received it (server clock). */
   received_at: number;
 }

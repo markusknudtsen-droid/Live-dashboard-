@@ -1,6 +1,7 @@
 import { CONFIG } from "./config.js";
 import { httpPost } from "./http.js";
 import { logger } from "./logger.js";
+import type { EntryFeatures } from "./entry-features.js";
 import type { TradeEvent } from "./trader.js";
 
 /**
@@ -20,6 +21,8 @@ export interface DashboardTradePayload {
   confidence?: number;
   pnl_percent?: number;
   reason?: string;
+  /** Entry snapshot, on BUY payloads only. Nested, so it stays camelCased. */
+  features?: EntryFeatures;
 }
 
 function toPayload(event: TradeEvent): DashboardTradePayload {
@@ -36,6 +39,7 @@ function toPayload(event: TradeEvent): DashboardTradePayload {
     confidence: event.confidence,
     pnl_percent: event.pnlPercent,
     reason: event.reason,
+    features: event.features,
   };
 }
 

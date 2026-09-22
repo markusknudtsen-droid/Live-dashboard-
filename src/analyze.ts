@@ -1,5 +1,6 @@
 import { LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { CONFIG } from "./config.js";
+import type { EntryContext } from "./entry-features.js";
 import { TokenCandidate } from "./scanner.js";
 import { httpPost } from "./http.js";
 import { logger } from "./logger.js";
@@ -20,6 +21,12 @@ export interface TradeSignal {
   momentum: string;
   riskLevel: string;
   narrative: string;
+  /**
+   * Entry-side bookkeeping filled in by the trading loop as the signal moves
+   * through the gates and confidence modifiers, and folded into the recorded
+   * trade at buy time. Type-only import, so this adds no runtime dependency.
+   */
+  entryContext?: EntryContext;
 }
 
 interface OpenRouterResponse {

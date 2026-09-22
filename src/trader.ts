@@ -15,6 +15,7 @@ import { shouldExitOnLiquidityDrop, updatePeakLiquidity, DEFAULT_RUG_EXIT } from
 import { updateTrailingStop } from "./trailing-stop.js";
 import { decideSweep } from "./profit-sweep.js";
 import { TradeSignal } from "./analyze.js";
+import { buildEntryFeatures, type EntryFeatures } from "./entry-features.js";
 import { logger } from "./logger.js";
 import { httpGet } from "./http.js";
 import { getJupiterQuote, isValidSolanaMint, SOL_MINT } from "./services/jupiter-client.js";
@@ -196,6 +197,11 @@ export interface TradeEvent {
   confidence?: number;
   pnlPercent?: number;
   reason?: string;
+  /**
+   * What the coin looked like at the buy decision. BUY events only — join a
+   * SELL back to its entry on tokenAddress.
+   */
+  features?: EntryFeatures;
 }
 
 type TradeListener = (event: TradeEvent) => void | Promise<void>;
@@ -575,6 +581,7 @@ async function executeAddOnLocked(position: ActivePosition, signal: TradeSignal,
       txSignature,
       timestamp: Date.now(),
       confidence: signal.confidence,
+      features: buildEntryFeatures(signal, "add-on"),
     });
     return {
       success: true,
@@ -626,6 +633,7 @@ async function executeAddOnLocked(position: ActivePosition, signal: TradeSignal,
     txSignature: execution.signature,
     timestamp: Date.now(),
     confidence: signal.confidence,
+    features: buildEntryFeatures(signal, "add-on"),
   });
   return {
     success: true,
@@ -762,6 +770,7 @@ async function executeBuyLocked(signal: TradeSignal): Promise<TradeResult> {
         txSignature,
         timestamp: Date.now(),
         confidence: signal.confidence,
+        features: buildEntryFeatures(signal),
       });
 
       return {
@@ -847,6 +856,7 @@ async function executeBuyLocked(signal: TradeSignal): Promise<TradeResult> {
       txSignature,
       timestamp: Date.now(),
       confidence: signal.confidence,
+      features: buildEntryFeatures(signal),
     });
 
     return {
