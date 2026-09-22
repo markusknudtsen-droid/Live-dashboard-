@@ -77,8 +77,8 @@ test("confidence does not compound across cycles of reuse", () => {
   rememberVerdict(cache, signal(62), 0);
 
   // Five cycles of the same coin resurfacing and being re-modified. Before the
-  // fix each cycle reused the previous cycle's boosted number as its baseline,
-  // so this climbed 62 -> 85 -> 100 and stuck there.
+  // fix the cache held the already-boosted 85, so every one of these reuses
+  // started from 85 and applied the bonuses a second time, landing on 100.
   let last = 0;
   for (let cycle = 1; cycle <= 5; cycle++) {
     const reused = recallVerdict(cache, ADDRESS, cycle * 1_000, 60_000);

@@ -11,10 +11,15 @@ export type AnalysisCache = Map<string, { at: number; signal: TradeSignal }>;
  * reputation, Telegram, narrative trend) and the position-size tiering all
  * assign straight onto the signal. So a freshly analysed verdict was cached,
  * then boosted in place, and the cache silently held the BOOSTED number as if
- * it were the model's judgement. On the next cycle that inflated value was
- * reused as the new baseline and the same modifiers stacked on top of it
- * again, compounding toward 100 for as long as the TTL held — turning a
- * 62%-confidence coin into a "90%+" one purely by being seen repeatedly.
+ * it were the model's judgement. Every reuse inside the TTL then took that
+ * inflated value as its baseline and applied the same modifiers a SECOND
+ * time, so a coin the model scored 62 was judged at 62 + 2x its bonuses.
+ *
+ * It does not run away past that: reused signals are never written back to
+ * the cache (only freshly analysed ones are), so the corruption is a double
+ * application per TTL window, reset each time the coin is re-analysed — not
+ * an unbounded climb across cycles. Still enough to clear MIN_CONFIDENCE on
+ * repetition rather than conviction.
  *
  * Copying on the way in freezes what the model actually said. A shallow copy
  * suffices: every mutation the loop performs is a top-level scalar assignment,

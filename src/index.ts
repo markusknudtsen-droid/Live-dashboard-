@@ -73,8 +73,8 @@ const tradeHistory: TradeHistoryItem[] = [];
  * cycle instead of spending that budget on ones it has not seen.
  *
  * Stored and returned BY VALUE — see analysis-cache.ts. Handing out the live
- * object let the confidence modifiers boost the cached verdict in place, so it
- * compounded every time the coin resurfaced.
+ * object let the confidence modifiers boost the cached verdict in place, so
+ * every reuse inside the TTL applied those bonuses a second time.
  */
 const analysisCache: AnalysisCache = new Map();
 
