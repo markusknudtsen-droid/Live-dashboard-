@@ -19,6 +19,7 @@ import {
 } from "./trader.js";
 import { isBearishSignal, shouldCloseHeldPosition } from "./momentum-guard.js";
 import { findFreshLaunches, type FreshLaunchCandidate } from "./fresh-launch.js";
+import { sizeForConfidence } from "./position-sizing.js";
 import { logger } from "./logger.js";
 import { filterRestorablePositions, loadState, saveState, TradeHistoryItem } from "./persistence.js";
 import { isDashboardReportingEnabled, reportTrade } from "./dashboard-reporter.js";
@@ -1045,6 +1046,23 @@ async function runCycle(): Promise<void> {
       `Confidence=${signal.confidence}% Trend=${signal.trendStrength} Momentum=${signal.momentum} Risk=${signal.riskLevel}`
     );
     logger.info(`Reasoning=${signal.reasoning}`);
+
+    // Size by conviction, using the FINAL confidence — the same number the
+    // filter above used, after every modifier. analyze.ts set a flat size from
+    // MAX_POSITION_SOL before any of those modifiers existed, so this is the
+    // only place the two can agree. Untiered config leaves the original size
+    // untouched, and the instant-buy and fresh-launch paths keep their own
+    // deliberate stakes.
+    if (CONFIG.positionSizeTiers.length > 0) {
+      const tiered = sizeForConfidence(signal.confidence, CONFIG.positionSizeTiers, signal.positionSizeSol);
+      if (tiered !== signal.positionSizeSol) {
+        logger.info(
+          `🎚️  ${signal.token.symbol}: ${signal.confidence}% confidence → staking ${tiered} SOL ` +
+            `(was ${signal.positionSizeSol}).`
+        );
+        signal.positionSizeSol = tiered;
+      }
+    }
 
     const result = await executeBuy(signal);
 

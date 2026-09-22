@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { PublicKey } from "@solana/web3.js";
 import { parseLadder, describeLadder, type LadderRung } from "./take-profit-ladder.js";
+import { parsePositionTiers, describeTiers, type PositionTier } from "./position-sizing.js";
 
 export interface AppConfig {
   openRouterApiKey: string;
@@ -235,6 +236,13 @@ export interface AppConfig {
    * $SOF protection. 0 restores the old strict cap.
    */
   fullExitSweepTolerancePercent: number;
+  /**
+   * Confidence-tiered stake, e.g. "65:0.1,80:0.15" — at 65%+ final confidence
+   * stake 0.1 SOL, at 80%+ stake 0.15. Empty keeps the flat MAX_POSITION_SOL
+   * sizing. MIN_CONFIDENCE still decides whether a trade happens at all; this
+   * only decides how much once it has.
+   */
+  positionSizeTiers: PositionTier[];
   /** A second, creation-time-sorted candidate source, alongside DexScreener. */
   geckoTerminalEnabled: boolean;
   geckoTerminalNewPoolsLimit: number;
@@ -509,6 +517,7 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     partialTakeProfitFraction: parseNumberInRange("PARTIAL_TAKE_PROFIT_FRACTION", env.PARTIAL_TAKE_PROFIT_FRACTION, 0.5, 0.01, 0.99),
     takeProfitLadder: parseLadder(env.TAKE_PROFIT_LADDER),
     useJupiterPriceFeed: parseBoolean(env.USE_JUPITER_PRICE_FEED, true),
+    positionSizeTiers: parsePositionTiers(env.POSITION_SIZE_TIERS),
     fullExitSweepTolerancePercent: parseNumberInRange(
       "FULL_EXIT_SWEEP_TOLERANCE_PERCENT",
       env.FULL_EXIT_SWEEP_TOLERANCE_PERCENT,
@@ -699,6 +708,12 @@ export function validateConfig(config: AppConfig = CONFIG): void {
   }
   if (config.entryScoringEnabled) {
     console.log("   ⚖️  ENTRY_SCORING enabled: age/boost/social modifiers, bonuses capped at +15.");
+  }
+  if (config.positionSizeTiers.length > 0) {
+    console.log(
+      `   🎚️  POSITION_SIZE_TIERS: ${describeTiers(config.positionSizeTiers)} ` +
+        `(final confidence sets the stake; MIN_CONFIDENCE still gates the trade).`
+    );
   }
   if (config.useFixedPositionSize) {
     console.log(
