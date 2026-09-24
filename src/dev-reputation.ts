@@ -95,8 +95,28 @@ const PUMP_API = "https://frontend-api-v3.pump.fun";
 const cache = new Map<string, { at: number; rep: DevReputation | undefined }>();
 const CACHE_TTL_MS = 30 * 60 * 1000;
 
+/**
+ * How long a FAILED lookup is remembered. Measured 2026-09-24: pump.fun
+ * answers HTTP 429 to 2 of 5 back-to-back calls, so most misses are a rate
+ * limit, not a missing creator. Holding one for the full 30 minutes withheld
+ * the bonus for half an hour over a momentary limit; this still keeps a dead
+ * endpoint from being hammered every cycle.
+ */
+const MISS_TTL_MS = 2 * 60 * 1000;
+
+/**
+ * mint -> creator. A coin's creator never changes, so a found one is kept for
+ * the run. Before this, every signal re-fetched it every cycle, which is what
+ * spent the rate limit in the first place.
+ *
+ * ponytail: unbounded for the life of the process (a few hundred bytes per
+ * mint seen); prune it if the bot starts running for weeks at a time.
+ */
+const creatorCache = new Map<string, { at: number; creator: string | undefined }>();
+
 export function clearDevReputationCache(): void {
   cache.clear();
+  creatorCache.clear();
 }
 
 /** pump.fun refuses requests without a browser user-agent. */
@@ -116,7 +136,7 @@ export async function fetchDevReputation(
   if (!creatorWallet) return undefined;
 
   const hit = cache.get(creatorWallet);
-  if (hit && now - hit.at < CACHE_TTL_MS) return hit.rep;
+  if (hit && now - hit.at < (hit.rep ? CACHE_TTL_MS : MISS_TTL_MS)) return hit.rep;
 
   const [userRaw, coinsRaw] = await Promise.all([
     getJson(`${PUMP_API}/users/${encodeURIComponent(creatorWallet)}`, timeoutMs),
@@ -130,8 +150,8 @@ export async function fetchDevReputation(
   const migratedTokens = coins ? coins.filter((c) => c?.complete === true).length : undefined;
 
   if (followers === undefined || migratedTokens === undefined) {
-    // Cache the miss too: a broken endpoint should not be retried on every
-    // candidate of every cycle.
+    // Cache the miss too, briefly (MISS_TTL_MS): a broken endpoint should not
+    // be retried on every candidate of every cycle.
     cache.set(creatorWallet, { at: now, rep: undefined });
     return undefined;
   }
@@ -178,9 +198,18 @@ export async function fetchNewPumpMints(limit = 20, timeoutMs = 6000): Promise<s
  * Resolve the creator wallet for a mint. Only pump.fun mints have one; anything
  * else returns undefined and simply gets no dev bonus.
  */
-export async function fetchCreatorWallet(mint: string, timeoutMs = 6000): Promise<string | undefined> {
+export async function fetchCreatorWallet(
+  mint: string,
+  timeoutMs = 6000,
+  now: number = Date.now()
+): Promise<string | undefined> {
   if (!mint) return undefined;
+  const hit = creatorCache.get(mint);
+  if (hit && (hit.creator !== undefined || now - hit.at < MISS_TTL_MS)) return hit.creator;
+
   const raw = await getJson(`${PUMP_API}/coins/${encodeURIComponent(mint)}`, timeoutMs);
   const coin = (raw ?? undefined) as PumpCoin | undefined;
-  return typeof coin?.creator === "string" && coin.creator.length > 0 ? coin.creator : undefined;
+  const creator = typeof coin?.creator === "string" && coin.creator.length > 0 ? coin.creator : undefined;
+  creatorCache.set(mint, { at: now, creator });
+  return creator;
 }

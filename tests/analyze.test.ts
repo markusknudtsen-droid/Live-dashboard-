@@ -196,11 +196,13 @@ test("analyzeToken: an empty/malformed response falls back to a safe zero-confid
 
 test("analyzeToken: an HTTP error response also falls back to a safe SKIP", async () => {
   mockResponse = { status: 500, body: { error: "server exploded" } };
+  // (analysisFailed is asserted below: a failed call must never read as a verdict.)
 
   const signal = await analyzeToken(CANDIDATE);
 
   assert.equal(signal.action, "SKIP");
   assert.equal(signal.confidence, 0);
+  assert.equal(signal.analysisFailed, true);
 });
 
 // A schema-valid response can still be useless: positionSizePercent only has

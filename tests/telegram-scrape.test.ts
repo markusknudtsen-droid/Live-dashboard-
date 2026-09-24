@@ -73,3 +73,19 @@ test("the fixture's real mint-bearing message resolves to the mint, not a wallet
   assert.ok(hit, "fixture must still contain the captured message");
   assert.equal(pickPrimaryMint(hit!.text), REAL_MINT);
 });
+
+test("the first poll of a channel records its backlog as seen, not as fresh mentions", async () => {
+  const { pollPublicChannel } = await import("../src/telegram-scrape.js");
+  const { recentMentionedMints, clearMentions } = await import("../src/telegram-signals.js");
+  clearMentions();
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(FIXTURE, { status: 200 })) as typeof fetch;
+  try {
+    assert.equal(await pollPublicChannel("first-poll-test"), 0);
+    assert.deepEqual(recentMentionedMints(Date.now(), 30), [], "startup backlog must not become live mentions");
+    assert.equal(await pollPublicChannel("first-poll-test"), 0, "the same page again has nothing new");
+  } finally {
+    globalThis.fetch = realFetch;
+    clearMentions();
+  }
+});

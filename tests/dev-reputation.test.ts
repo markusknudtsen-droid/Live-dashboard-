@@ -66,3 +66,35 @@ test("the feature is off unless explicitly enabled", () => {
   assert.equal(buildConfig({}).devMinFollowers, 2000);
   assert.equal(buildConfig({ DEV_MIN_FOLLOWERS: "10000" }).devMinFollowers, 10_000);
 });
+
+test("a coin's creator is looked up once, and a rate-limited reputation lookup is retried within minutes", async () => {
+  const { fetchCreatorWallet, fetchDevReputation, clearDevReputationCache } = await import("../src/dev-reputation.js");
+  clearDevReputationCache();
+  const realFetch = globalThis.fetch;
+  let calls = 0;
+  let rateLimited = true;
+  globalThis.fetch = (async (url: string | URL | Request) => {
+    calls++;
+    const u = String(url);
+    if (u.includes("/coins/MINT1")) return new Response(JSON.stringify({ creator: "CREATOR1" }), { status: 200 });
+    if (rateLimited) return new Response("{}", { status: 429 });
+    if (u.includes("/users/")) return new Response(JSON.stringify({ followers: 5000 }), { status: 200 });
+    return new Response(JSON.stringify([{ complete: true }, { complete: true }, { complete: true }]), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const t0 = 1_000_000;
+    assert.equal(await fetchCreatorWallet("MINT1", 1000, t0), "CREATOR1");
+    assert.equal(await fetchCreatorWallet("MINT1", 1000, t0 + 60 * 60_000), "CREATOR1");
+    assert.equal(calls, 1, "a found creator is never fetched twice");
+
+    assert.equal(await fetchDevReputation("CREATOR1", 1000, t0), undefined, "429 yields no bonus");
+    rateLimited = false;
+    assert.equal(await fetchDevReputation("CREATOR1", 1000, t0 + 60_000), undefined, "still inside the short miss window");
+    const rep = await fetchDevReputation("CREATOR1", 1000, t0 + 3 * 60_000);
+    assert.equal(rep?.followers, 5000, "retried after the miss window, not 30 minutes later");
+    assert.equal(rep?.migratedTokens, 3);
+  } finally {
+    globalThis.fetch = realFetch;
+    clearDevReputationCache();
+  }
+});

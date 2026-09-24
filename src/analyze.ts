@@ -28,6 +28,12 @@ export interface TradeSignal {
    * trade at buy time. Type-only import, so this adds no runtime dependency.
    */
   entryContext?: EntryContext;
+  /**
+   * True when the model call itself failed (network, unparseable or unusable
+   * reply) and this is the fail-safe SKIP, not the model's judgement. Callers
+   * must not read it as an opinion about the coin.
+   */
+  analysisFailed?: boolean;
 }
 
 interface OpenRouterResponse {
@@ -339,6 +345,7 @@ function skipSignal(candidate: TokenCandidate, reasoning: string): TradeSignal {
     momentum: "steady",
     riskLevel: "extreme",
     narrative: "unknown",
+    analysisFailed: true,
   };
 }
 

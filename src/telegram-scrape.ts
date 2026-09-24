@@ -123,6 +123,11 @@ export async function pollPublicChannel(channelRef: string, timeoutMs = 10_000):
   }
 
   const messages = parsePreviewPage(html);
+  // The first poll of a channel only records the high-water mark: the page's
+  // backlog is not news. Recording it as fresh mentions gave hours-old calls
+  // the same bonus as live ones, and pulled them in as candidates, on every
+  // restart.
+  const firstPoll = !lastSeenSeq.has(channel);
   const sinceSeq = lastSeenSeq.get(channel) ?? 0;
   let maxSeq = sinceSeq;
   let found = 0;
@@ -133,7 +138,7 @@ export async function pollPublicChannel(channelRef: string, timeoutMs = 10_000):
     if (seq <= sinceSeq) continue;
     if (seq > maxSeq) maxSeq = seq;
 
-    const mint = pickPrimaryMint(msg.text);
+    const mint = firstPoll ? undefined : pickPrimaryMint(msg.text);
     if (mint) {
       recordMention(mint, channel, now);
       found++;
@@ -141,9 +146,6 @@ export async function pollPublicChannel(channelRef: string, timeoutMs = 10_000):
     }
   }
 
-  // First poll of a channel: record the current high-water mark without
-  // treating the whole existing history as new. An empty cursor must not look
-  // like every past post just arrived.
   lastSeenSeq.set(channel, maxSeq);
-  return sinceSeq === 0 ? 0 : found;
+  return found;
 }

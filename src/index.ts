@@ -464,6 +464,14 @@ async function checkHeldPositionsForBearishExit(): Promise<void> {
     const position = getActivePositions().find((p) => p.tokenAddress === signal.token.address);
     if (!position) continue;
 
+    // A failed model call says nothing about the coin. Counting its 0% as a
+    // bearish vote closed Crypt on 2026-09-24 with a failed parse as the third
+    // of three "bearish" reads. Unknown is not bearish; wait for a real read.
+    if (signal.analysisFailed) {
+      logger.info(`⏭️  ${position.tokenSymbol}: re-analysis failed — not counted as a read.`);
+      continue;
+    }
+
     // Record this read, then decide on the accumulated history rather than on
     // this single call. One bearish sample no longer closes a position: it
     // takes 3 of the last 4 (so "B B B" or "B B U B"), which is what stops a
@@ -767,7 +775,9 @@ async function runCycle(): Promise<void> {
       ` of ${candidates.length} found...`
   );
   const analysed = await batchAnalyze(toAnalyse);
-  for (const sig of analysed) rememberVerdict(analysisCache, sig, nowMs);
+  // A failed analysis is not a verdict: caching it would sit the coin out
+  // for the whole TTL on one flaky model call.
+  for (const sig of analysed) if (!sig.analysisFailed) rememberVerdict(analysisCache, sig, nowMs);
   const signals = [...analysed, ...reused];
 
   // Open a fresh entry context per cycle, before any modifier runs, so the
