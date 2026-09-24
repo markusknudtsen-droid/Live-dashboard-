@@ -7,29 +7,15 @@ import type { RugCheckReport } from "./rugcheck.js";
  * so when asking later which entries actually worked, this is the first field
  * to group by.
  */
-export type EntryGate = "ai" | "instant-buy" | "fresh-launch" | "add-on" | "unknown";
-
-/** Runtime membership test for EntryGate, for validating data off the wire. */
-export const ENTRY_GATES: readonly EntryGate[] = ["ai", "instant-buy", "fresh-launch", "add-on", "unknown"];
+export const ENTRY_GATES = ["ai", "instant-buy", "fresh-launch", "add-on", "unknown"] as const;
+export type EntryGate = (typeof ENTRY_GATES)[number];
 
 export function isEntryGate(value: unknown): value is EntryGate {
   return typeof value === "string" && (ENTRY_GATES as readonly string[]).includes(value);
 }
 
-/** The RugCheck fields worth keeping per trade, flattened for easy grouping. */
-export interface EntryRugCheck {
-  scoreRaw: number;
-  scoreNormalised: number;
-  rugged: boolean;
-  dangerRiskCount: number;
-  mintAuthorityDisabled: boolean;
-  freezeAuthorityDisabled: boolean;
-  hasHolderData: boolean;
-  totalHolders: number;
-  devHoldingPct: number;
-  insiderHoldingPct: number;
-  bundlerHoldingPct: number;
-}
+/** The RugCheck fields worth keeping per trade: the risk list is reduced to a count. */
+export type EntryRugCheck = Omit<RugCheckReport, "dangerRisks"> & { dangerRiskCount: number };
 
 /**
  * What a coin looked like at the moment the bot decided to buy it.
@@ -105,22 +91,11 @@ export interface EntryContext {
 
 /** Flatten a full RugCheck report down to the fields kept per trade. */
 export function summariseRugCheck(report: RugCheckReport): EntryRugCheck {
-  return {
-    scoreRaw: report.scoreRaw,
-    scoreNormalised: report.scoreNormalised,
-    rugged: report.rugged,
-    // Optional-chained deliberately: this runs as an argument to emitTrade,
-    // i.e. AFTER the swap has settled. A throw here would crash the trade path
-    // with the money already spent, so the snapshot degrades instead.
-    dangerRiskCount: report.dangerRisks?.length ?? 0,
-    mintAuthorityDisabled: report.mintAuthorityDisabled,
-    freezeAuthorityDisabled: report.freezeAuthorityDisabled,
-    hasHolderData: report.hasHolderData,
-    totalHolders: report.totalHolders,
-    devHoldingPct: report.devHoldingPct,
-    insiderHoldingPct: report.insiderHoldingPct,
-    bundlerHoldingPct: report.bundlerHoldingPct,
-  };
+  // Optional-chained deliberately: this runs as an argument to emitTrade,
+  // i.e. AFTER the swap has settled. A throw here would crash the trade path
+  // with the money already spent, so the snapshot degrades instead.
+  const { dangerRisks, ...rest } = report;
+  return { ...rest, dangerRiskCount: dangerRisks?.length ?? 0 };
 }
 
 /**

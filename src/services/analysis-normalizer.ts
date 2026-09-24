@@ -14,16 +14,10 @@ export interface RawAiAnalysis {
   narrative: string;
 }
 
-const validActions = new Set<RawAiAnalysis["action"]>(["BUY", "SKIP", "WATCH"]);
-const validTrend = new Set<RawAiAnalysis["trendStrength"]>([
-  "strong_up",
-  "moderate_up",
-  "neutral",
-  "moderate_down",
-  "strong_down",
-]);
-const validMomentum = new Set<RawAiAnalysis["momentum"]>(["accelerating", "steady", "decelerating", "reversing"]);
-const validRisk = new Set<RawAiAnalysis["riskLevel"]>(["low", "medium", "high", "extreme"]);
+/** `value` when it is one of `allowed`, otherwise `fallback`. */
+function pick<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
+  return allowed.includes(value as T) ? (value as T) : fallback;
+}
 
 function asFiniteNumber(value: unknown, fallback: number): number {
   const numeric = Number(value);
@@ -36,14 +30,10 @@ function clamp(value: number, min: number, max: number): number {
 
 export function normalizeAiAnalysis(raw: unknown): RawAiAnalysis {
   const source = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
-  const actionCandidate = String(source.action || "SKIP").toUpperCase() as RawAiAnalysis["action"];
-  const trendCandidate = String(source.trendStrength || "neutral") as RawAiAnalysis["trendStrength"];
-  const momentumCandidate = String(source.momentum || "steady") as RawAiAnalysis["momentum"];
-  const riskCandidate = String(source.riskLevel || "high") as RawAiAnalysis["riskLevel"];
 
   return {
     confidence: clamp(asFiniteNumber(source.confidence, 0), 0, 100),
-    action: validActions.has(actionCandidate) ? actionCandidate : "SKIP",
+    action: pick(String(source.action ?? "").toUpperCase(), ["BUY", "SKIP", "WATCH"], "SKIP"),
     // reasoning/narrative are model-generated, but the strict JSON schema
     // only guarantees they're typeof "string" — nothing rules out control
     // characters, and the model's output can itself be steered by
@@ -59,9 +49,9 @@ export function normalizeAiAnalysis(raw: unknown): RawAiAnalysis {
     takeProfitPercent: clamp(asFiniteNumber(source.takeProfitPercent, 50), 1, 1000),
     positionSizePercent: clamp(asFiniteNumber(source.positionSizePercent, 0), 0, 100),
     riskRewardRatio: clamp(asFiniteNumber(source.riskRewardRatio, 0), 0, 50),
-    trendStrength: validTrend.has(trendCandidate) ? trendCandidate : "neutral",
-    momentum: validMomentum.has(momentumCandidate) ? momentumCandidate : "steady",
-    riskLevel: validRisk.has(riskCandidate) ? riskCandidate : "high",
+    trendStrength: pick(source.trendStrength, ["strong_up", "moderate_up", "neutral", "moderate_down", "strong_down"], "neutral"),
+    momentum: pick(source.momentum, ["accelerating", "steady", "decelerating", "reversing"], "steady"),
+    riskLevel: pick(source.riskLevel, ["low", "medium", "high", "extreme"], "high"),
     narrative: sanitizeDisplayText(String(source.narrative || "unknown")),
   };
 }

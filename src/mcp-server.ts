@@ -22,7 +22,14 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { CONFIG } from "./config.js";
-import { scanForCandidates, parsePairToCandidate, passesInitialFilter, type TokenCandidate, type DexPair } from "./scanner.js";
+import {
+  scanForCandidates,
+  parsePairToCandidate,
+  passesInitialFilter,
+  type TokenCandidate,
+  type DexPair,
+  type DexTokenBoost,
+} from "./scanner.js";
 import { sanitizeDisplayText } from "./text-sanitize.js";
 import {
   initTrader,
@@ -45,13 +52,6 @@ export const SERVER_VERSION = "1.0.0";
 
 /** Cap tool responses so a large scan can't blow out the client's context. */
 const CHARACTER_LIMIT = 25000;
-
-interface DexTokenBoost {
-  chainId?: string;
-  tokenAddress?: string;
-  amount?: number;
-  totalAmount?: number;
-}
 
 let traderReady = false;
 
@@ -558,7 +558,7 @@ Returns: { "evaluated": number, "exited": [{ symbol, reason, pnl_percent }],
     async ({ prices }) => {
       ensureTrader();
       const before = getActivePositions();
-      const beforeBySig = new Map(before.map((p) => [p.txSignature, { symbol: p.tokenSymbol, sl: p.stopLoss, tp: p.takeProfit }]));
+      const beforeBySig = new Map(before.map((p) => [p.txSignature, { symbol: p.tokenSymbol, tp: p.takeProfit }]));
       let evaluated = 0;
       for (const mark of prices) {
         const position = getActivePositions().find((p) => p.tokenAddress === mark.token_address);

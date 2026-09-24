@@ -117,6 +117,5 @@ export async function executeJupiterSwap(
     { headers: jupiterAuthHeaders() }
   );
 
-  if (!data || data.status !== "Success" || !data.signature) return data;
   return data;
 }

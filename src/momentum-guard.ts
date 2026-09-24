@@ -87,28 +87,20 @@ export function recordBearishRead(history: boolean[] | undefined, bearish: boole
 }
 
 /**
- * Whether the accumulated reads justify closing.
- *
- * The point of requiring several is that the bot re-analyses a held position
- * every BEARISH_EXIT_RECHECK_MINUTES — at the configured 0.1 that is roughly
- * 360 independent model calls an hour, and closing on any one of them meant a
- * position survived only if EVERY call came back clean. That is not measuring
- * a reversal, it is sampling model noise until it produces a sell.
- */
-export function shouldCloseOnBearishHistory(history: boolean[] | undefined): boolean {
-  if (!history) return false;
-  return history.filter(Boolean).length >= BEARISH_READS_TO_CLOSE;
-}
-
-/**
  * Whether a held position should be closed on re-analysis, given the read
  * history it has accumulated so far (the newest read included by the caller
  * via recordBearishRead).
+ *
+ * The point of requiring several reads is that the bot re-analyses a held
+ * position every BEARISH_EXIT_RECHECK_MINUTES — at the configured 0.1 that is
+ * roughly 360 independent model calls an hour, and closing on any one of them
+ * meant a position survived only if EVERY call came back clean. That is not
+ * measuring a reversal, it is sampling model noise until it produces a sell.
  *
  * Price-based exits — stop loss, take-profit ladder, trailing stop, the
  * liquidity rug-exit — are unaffected and still fire immediately on their own
  * terms. This governs only the model-opinion exit.
  */
 export function shouldCloseHeldPosition(history: boolean[] | undefined): boolean {
-  return shouldCloseOnBearishHistory(history);
+  return (history ?? []).filter(Boolean).length >= BEARISH_READS_TO_CLOSE;
 }

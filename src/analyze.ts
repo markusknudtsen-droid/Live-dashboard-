@@ -138,14 +138,7 @@ export function parseAnalysisJson(content: string, isAcceptable: (value: unknown
   const fenceRegex = /```(?:\w+)?\s*([\s\S]*?)```/gi;
   let fenceMatch: RegExpExecArray | null;
   while ((fenceMatch = fenceRegex.exec(trimmed)) !== null) {
-    const fenceContent = fenceMatch[1].trim();
-    try {
-      const parsed = JSON.parse(fenceContent);
-      if (isAcceptable(parsed)) return parsed;
-    } catch {
-      // not this fence — see if it contains a balanced, acceptable object anyway
-    }
-    const extractedFromFence = extractFirstJsonObject(fenceContent, isAcceptable);
+    const extractedFromFence = extractFirstJsonObject(fenceMatch[1], isAcceptable);
     if (extractedFromFence !== NOT_FOUND) return extractedFromFence;
   }
 
@@ -387,7 +380,7 @@ export async function analyzeToken(candidate: TokenCandidate): Promise<TradeSign
     // ceiling that the model's positionSizePercent sizes down from.
     const positionSizeSol = CONFIG.useFixedPositionSize
       ? CONFIG.maxPositionSol
-      : Math.min(CONFIG.maxPositionSol * (analysis.positionSizePercent / 100), CONFIG.maxPositionSol);
+      : CONFIG.maxPositionSol * (analysis.positionSizePercent / 100);
 
     // A schema-valid response can still be unusable: positionSizePercent is
     // only required to be a finite number, so a BUY whose derived position
@@ -506,17 +499,8 @@ export async function batchAnalyze(candidates: TokenCandidate[]): Promise<TradeS
       const candidate = candidates[index];
 
       logger.info(`🧠 Analyzing ${candidate.symbol}...`);
-      let signal: TradeSignal;
-      try {
-        signal = await analyzeToken(candidate);
-      } catch (error) {
-        // One unanalysable token must not abort the batch and cost the cycle
-        // every other candidate — it is simply not considered this time.
-        logger.warn(
-          `Analysis failed for ${candidate.symbol}: ${error instanceof Error ? error.message : String(error)}`
-        );
-        continue;
-      }
+      // analyzeToken never throws: any failure comes back as a zero-confidence SKIP.
+      const signal = await analyzeToken(candidate);
       signals[index] = signal;
 
       const emoji = signal.action === "BUY" ? "🟢" : signal.action === "WATCH" ? "🟡" : "🔴";

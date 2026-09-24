@@ -58,10 +58,6 @@ export const SIZE_TIERS: Array<{ minConfidence: number; positionSizeSol: number 
   { minConfidence: 70, positionSizeSol: 0.1 },
 ];
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(Math.max(value, min), max);
-}
-
 export function positionSizeForConfidence(confidence: number): number {
   for (const tier of SIZE_TIERS) {
     if (confidence >= tier.minConfidence) return tier.positionSizeSol;
@@ -97,7 +93,7 @@ export function scoreSignal(
   const freshness = metrics.ageHours <= 24 ? 8 : metrics.ageHours <= 72 ? 4 : 0;
   const boost = (metrics.boostAmount ?? 0) > 0 ? 5 : 0;
 
-  const confidence = clamp(Math.round(50 + buyPressure + volumeLiquidity + momentum + freshness + boost), 0, 100);
+  const confidence = Math.min(Math.max(Math.round(50 + buyPressure + volumeLiquidity + momentum + freshness + boost), 0), 100);
   const action: HeuristicSignal["action"] = confidence >= 80 ? "BUY" : confidence >= 60 ? "WATCH" : "SKIP";
 
   return {

@@ -34,7 +34,7 @@ export interface TokenCandidate {
   hasPaidDexInfo: boolean;
 }
 
-interface DexTokenBoost {
+export interface DexTokenBoost {
   chainId: string;
   tokenAddress: string;
   amount?: number;
