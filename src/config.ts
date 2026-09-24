@@ -69,8 +69,6 @@ export interface AppConfig {
   rugExitLiquidityDropPercent: number;
   /** Master switch for liquidity-drain rug detection on held positions. */
   rugExitEnabled: boolean;
-  holderCheckMinMarketCapUsd: number;
-  maxTopHolderPercent: number;
   /** Confidence modifiers from age/socials/boost: off by default. */
   entryScoringEnabled: boolean;
   /** Buy a heavily boosted coin without waiting for model analysis. */
@@ -177,8 +175,6 @@ export interface AppConfig {
   blockDangerRisks: boolean;
   /** Global dead-coin floor, applied to every candidate regardless of size. */
   minMarketCapUsd: number;
-  /** Below this market cap, checkSmallCapGate() applies instead of the normal rug gate. */
-  smallCapMaxMarketCapUsd: number;
   smallCapMinHolders: number;
   smallCapMaxDevHoldingPct: number;
   smallCapMaxInsiderHoldingPct: number;
@@ -429,14 +425,6 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       5,
       99
     ),
-    holderCheckMinMarketCapUsd: parseNumberInRange(
-      "HOLDER_CHECK_MIN_MARKET_CAP_USD",
-      env.HOLDER_CHECK_MIN_MARKET_CAP_USD,
-      60000,
-      0,
-      100_000_000
-    ),
-    maxTopHolderPercent: parseNumberInRange("MAX_TOP_HOLDER_PERCENT", env.MAX_TOP_HOLDER_PERCENT, 30, 1, 100),
     entryScoringEnabled: parseBoolean(env.ENTRY_SCORING_ENABLED, false),
     instantBuyOnBoostEnabled: parseBoolean(env.INSTANT_BUY_ON_BOOST_ENABLED, false),
     instantBuyBoostThreshold: parseNumberInRange(
@@ -494,7 +482,6 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     maxRugCheckScoreRaw: parseNumberInRange("MAX_RUGCHECK_SCORE_RAW", env.MAX_RUGCHECK_SCORE_RAW, 5000, 0, 10_000_000),
     blockDangerRisks: parseBoolean(env.BLOCK_DANGER_RISKS, true),
     minMarketCapUsd: parseNumberInRange("MIN_MARKET_CAP_USD", env.MIN_MARKET_CAP_USD, 7000, 0, 100_000_000),
-    smallCapMaxMarketCapUsd: parseNumberInRange("SMALL_CAP_MAX_MARKET_CAP_USD", env.SMALL_CAP_MAX_MARKET_CAP_USD, 40_000, 0, 100_000_000),
     smallCapMinHolders: parseNumberInRange("SMALL_CAP_MIN_HOLDERS", env.SMALL_CAP_MIN_HOLDERS, 60, 0, 1_000_000),
     smallCapMaxDevHoldingPct: parseNumberInRange("SMALL_CAP_MAX_DEV_HOLDING_PCT", env.SMALL_CAP_MAX_DEV_HOLDING_PCT, 8, 0, 100),
     smallCapMaxInsiderHoldingPct: parseNumberInRange("SMALL_CAP_MAX_INSIDER_HOLDING_PCT", env.SMALL_CAP_MAX_INSIDER_HOLDING_PCT, 22, 0, 100),
@@ -611,8 +598,9 @@ export function validateConfig(config: AppConfig = CONFIG): void {
   }
   if (config.rugGatesEnabled) {
     console.log(
-      `   🛡️  RUG_GATES enabled: min liquidity $${config.minLiquidityUsd}, max top-holder ` +
-        `${config.maxTopHolderPercent}% above $${config.holderCheckMinMarketCapUsd} MC.`
+      `   🛡️  RUG_GATES enabled: min liquidity ${config.minLiquidityUsd}; every analysed buy needs RugCheck ` +
+        `Good (score<=${config.smallCapMaxRugCheckScore}), ${config.smallCapMinHolders}+ holders, dev<=${config.smallCapMaxDevHoldingPct}%, ` +
+        `insiders<=${config.smallCapMaxInsiderHoldingPct}%, bundlers<=${config.smallCapMaxBundlerHoldingPct}%, mint/freeze auth disabled.`
     );
   }
   if (config.maxMarketCapUsd > 0) {
@@ -633,11 +621,6 @@ export function validateConfig(config: AppConfig = CONFIG): void {
   if (config.minMarketCapUsd > 0) {
     console.log(`   📉 MIN_MARKET_CAP_USD: skipping coins below $${config.minMarketCapUsd.toLocaleString("en-US")}.`);
   }
-  console.log(
-    `   🔬 SMALL_CAP_GATE: coins under $${config.smallCapMaxMarketCapUsd.toLocaleString("en-US")} need RugCheck ` +
-      `Good (score<=${config.smallCapMaxRugCheckScore}), ${config.smallCapMinHolders}+ holders, dev<=${config.smallCapMaxDevHoldingPct}%, ` +
-      `insiders<=${config.smallCapMaxInsiderHoldingPct}%, bundlers<=${config.smallCapMaxBundlerHoldingPct}%, mint/freeze auth disabled.`
-  );
   if (config.bearishBuyGuardEnabled) {
     console.log("   📉 BEARISH_BUY_GUARD: a BUY is skipped when the model's own trend/momentum reads bearish.");
   }

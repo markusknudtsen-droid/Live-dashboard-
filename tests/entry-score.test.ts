@@ -6,7 +6,6 @@ import {
   checkRugGates,
   qualifiesForInstantBuy,
   DEFAULT_SCORE_WEIGHTS,
-  DEFAULT_RUG_GATES,
 } from "../src/entry-score.js";
 
 /* ------------------------------- trailing stop ------------------------------ */
@@ -188,38 +187,15 @@ test("confidence is clamped to the 0..100 range", () => {
 /* -------------------------------- rug gates -------------------------------- */
 
 test("thin liquidity fails the gate outright", () => {
-  const r = checkRugGates({ liquidityUsd: 4200, marketCapUsd: 20000, topHolderPercent: 5 });
+  const r = checkRugGates({ liquidityUsd: 4200, marketCapUsd: 20000 });
   assert.equal(r.pass, false);
   assert.match(r.reason ?? "", /liquidity/);
-});
-
-test("concentration is only enforced at or above the market cap threshold", () => {
-  const small = checkRugGates({ liquidityUsd: 9000, marketCapUsd: 20000, topHolderPercent: 80 });
-  assert.equal(small.pass, true, "below the MC threshold the check does not apply");
-  const big = checkRugGates({ liquidityUsd: 9000, marketCapUsd: 90000, topHolderPercent: 80 });
-  assert.equal(big.pass, false);
-  assert.match(big.reason ?? "", /top holders/);
-});
-
-test("a healthy distribution above the threshold passes", () => {
-  const r = checkRugGates({ liquidityUsd: 9000, marketCapUsd: 90000, topHolderPercent: 22 });
-  assert.equal(r.pass, true);
-});
-
-test("unknown holder data fails closed by default, and can be opted out of", () => {
-  const strict = checkRugGates({ liquidityUsd: 9000, marketCapUsd: 90000, topHolderPercent: undefined });
-  assert.equal(strict.pass, false);
-  const lenient = checkRugGates(
-    { liquidityUsd: 9000, marketCapUsd: 90000, topHolderPercent: undefined },
-    { ...DEFAULT_RUG_GATES, requireHolderData: false }
-  );
-  assert.equal(lenient.pass, true);
 });
 
 /* ------------------------------- instant buy ------------------------------- */
 
 const instantOn = { enabled: true, boostThreshold: 500 };
-const healthy = { liquidityUsd: 9000, marketCapUsd: 20000, topHolderPercent: 5 };
+const healthy = { liquidityUsd: 9000, marketCapUsd: 20000 };
 
 test("a 500 boost on a healthy pair triggers the instant buy", () => {
   const r = qualifiesForInstantBuy({ ...healthy, boostAmount: 500 }, instantOn);
@@ -240,17 +216,11 @@ test("instant buy is off unless explicitly enabled", () => {
 
 test("a huge boost still cannot buy through a failing rug gate", () => {
   const thin = qualifiesForInstantBuy(
-    { liquidityUsd: 900, marketCapUsd: 20000, topHolderPercent: 5, boostAmount: 5000 },
+    { liquidityUsd: 900, marketCapUsd: 20000, boostAmount: 5000 },
     instantOn
   );
   assert.equal(thin.buy, false, "thin liquidity must veto even a 5000 boost");
   assert.match(thin.reason, /rug gate blocked it/);
-
-  const concentrated = qualifiesForInstantBuy(
-    { liquidityUsd: 9000, marketCapUsd: 90000, topHolderPercent: 71, boostAmount: 5000 },
-    instantOn
-  );
-  assert.equal(concentrated.buy, false, "a whale-held coin must veto even a 5000 boost");
 });
 
 test("the threshold is configurable", () => {
@@ -258,10 +228,8 @@ test("the threshold is configurable", () => {
   assert.equal(at100.buy, true);
 });
 
-test("exactly at the boundaries: liquidity floor and holder ceiling", () => {
-  assert.equal(checkRugGates({ liquidityUsd: 5000, marketCapUsd: 10000, topHolderPercent: 1 }).pass, true);
-  assert.equal(checkRugGates({ liquidityUsd: 9000, marketCapUsd: 60000, topHolderPercent: 30 }).pass, true);
-  assert.equal(checkRugGates({ liquidityUsd: 9000, marketCapUsd: 60000, topHolderPercent: 30.1 }).pass, false);
+test("exactly at the liquidity floor passes", () => {
+  assert.equal(checkRugGates({ liquidityUsd: 5000, marketCapUsd: 10000 }).pass, true);
 });
 
 /* ------------------------------ boost tiers ------------------------------- */

@@ -161,8 +161,8 @@ export interface InstantBuyResult {
  * promotion, which is a spending signal rather than a quality one — a
  * well-funded rug buys boosts too. Skipping the model is a speed decision, not
  * a licence to skip the checks that test whether the coin can actually be sold
- * again, so liquidity and holder concentration are enforced exactly as they are
- * on an analysed buy.
+ * again, so the liquidity floor and market-cap ceiling are enforced exactly as
+ * they are on an analysed buy.
  */
 export function qualifiesForInstantBuy(
   input: RugGateInputs & { boostAmount: number },
@@ -186,15 +186,13 @@ export function qualifiesForInstantBuy(
   return { buy: true, reason: `boost ${input.boostAmount} >= ${instant.boostThreshold} and rug gates passed` };
 }
 
+/**
+ * Holder distribution is not checked here: RugCheck (small-cap-gate.ts) owns
+ * it for every analysed buy, and the instant-buy path is deliberately exempt.
+ */
 export interface RugGateInputs {
   liquidityUsd: number;
   marketCapUsd: number;
-  /**
-   * Share of supply held by the largest non-pool holders, 0..100. Undefined
-   * when the check could not run (RPC failure) — an unknown distribution is not
-   * a safe one, so requireHolderData decides whether that fails the gate.
-   */
-  topHolderPercent: number | undefined;
 }
 
 export interface RugGateConfig {
@@ -206,18 +204,11 @@ export interface RugGateConfig {
    * it. 0 disables the ceiling.
    */
   maxMarketCapUsd: number;
-  /** Concentration check applies at or above this market cap. */
-  holderCheckMinMarketCapUsd: number;
-  maxTopHolderPercent: number;
-  requireHolderData: boolean;
 }
 
 export const DEFAULT_RUG_GATES: RugGateConfig = {
   minLiquidityUsd: 5000,
   maxMarketCapUsd: 0,
-  holderCheckMinMarketCapUsd: 60000,
-  maxTopHolderPercent: 30,
-  requireHolderData: true,
 };
 
 export interface RugGateResult {
@@ -245,24 +236,6 @@ export function checkRugGates(input: RugGateInputs, config: RugGateConfig = DEFA
     return {
       pass: false,
       reason: `market cap $${Math.round(input.marketCapUsd).toLocaleString("en-US")} above the $${config.maxMarketCapUsd.toLocaleString("en-US")} ceiling`,
-    };
-  }
-
-  const concentrationApplies =
-    Number.isFinite(input.marketCapUsd) && input.marketCapUsd >= config.holderCheckMinMarketCapUsd;
-
-  if (!concentrationApplies) return { pass: true };
-
-  if (input.topHolderPercent === undefined || !Number.isFinite(input.topHolderPercent)) {
-    return config.requireHolderData
-      ? { pass: false, reason: "holder concentration unknown (RPC failed) and requireHolderData is on" }
-      : { pass: true };
-  }
-
-  if (input.topHolderPercent > config.maxTopHolderPercent) {
-    return {
-      pass: false,
-      reason: `top holders hold ${input.topHolderPercent.toFixed(1)}% (max ${config.maxTopHolderPercent}%)`,
     };
   }
 

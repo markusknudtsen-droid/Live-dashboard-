@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { checkSmallCapGate, isSmallCap, DEFAULT_SMALL_CAP_GATE } from "../src/small-cap-gate.js";
+import { checkSmallCapGate, DEFAULT_SMALL_CAP_GATE } from "../src/small-cap-gate.js";
 import { buildConfig } from "../src/config.js";
 import type { RugCheckReport } from "../src/rugcheck.js";
 
@@ -31,12 +31,6 @@ const baseInput = {
   hasAnySocial: true,
   rugCheck: goodReport(),
 };
-
-test("isSmallCap gates purely on market cap, below the threshold only", () => {
-  assert.equal(isSmallCap(39_999), true);
-  assert.equal(isSmallCap(40_000), false, "the threshold itself belongs to the normal path");
-  assert.equal(isSmallCap(100), true);
-});
 
 test("a coin clearing every bar passes", () => {
   assert.equal(checkSmallCapGate(baseInput).pass, true);
@@ -112,7 +106,6 @@ test("missing RugCheck data can be opted to pass instead, explicitly", () => {
 test("defaults match the operator's spec exactly", () => {
   const c = buildConfig({});
   assert.equal(c.minMarketCapUsd, 7000);
-  assert.equal(c.smallCapMaxMarketCapUsd, 40_000);
   assert.equal(c.smallCapMinHolders, 60);
   assert.equal(c.smallCapMaxDevHoldingPct, 8);
   assert.equal(c.smallCapMaxInsiderHoldingPct, 22);
@@ -124,12 +117,10 @@ test("defaults match the operator's spec exactly", () => {
 test("every threshold is independently configurable", () => {
   const c = buildConfig({
     MIN_MARKET_CAP_USD: "10000",
-    SMALL_CAP_MAX_MARKET_CAP_USD: "50000",
     SMALL_CAP_MIN_HOLDERS: "100",
     NEW_COIN_COOLDOWN_EXEMPT: "true",
   });
   assert.equal(c.minMarketCapUsd, 10_000);
-  assert.equal(c.smallCapMaxMarketCapUsd, 50_000);
   assert.equal(c.smallCapMinHolders, 100);
   assert.equal(c.newCoinCooldownExempt, true);
 });

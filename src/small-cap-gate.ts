@@ -1,8 +1,7 @@
 /**
- * The operator's stricter entry checklist for coins under a market-cap
- * threshold (default $40,000). Established coins keep using the existing
- * checkRugGates() in entry-score.ts unchanged; this is an ADDITIONAL, harder
- * bar for the riskiest segment — young, small, easy to fake.
+ * The operator's RugCheck-backed entry checklist. Runs on EVERY analysed buy,
+ * after checkRugGates() in entry-score.ts; only the fresh-boost instant buy is
+ * exempt.
  *
  * Pure and synchronous: the RugCheck fetch happens in rugcheck.ts, and the
  * caller passes its result in. That split is what makes this testable without
@@ -10,7 +9,6 @@
  */
 
 export interface SmallCapGateInputs {
-  marketCapUsd: number;
   liquidityUsd: number;
   volume24h: number;
   hasAnySocial: boolean;
@@ -19,8 +17,6 @@ export interface SmallCapGateInputs {
 }
 
 export interface SmallCapGateConfig {
-  /** This gate only applies below this market cap. */
-  maxMarketCapUsd: number;
   minLiquidityUsd: number;
   minHolders: number;
   maxDevHoldingPct: number;
@@ -43,7 +39,6 @@ export interface SmallCapGateConfig {
 }
 
 export const DEFAULT_SMALL_CAP_GATE: SmallCapGateConfig = {
-  maxMarketCapUsd: 40_000,
   minLiquidityUsd: 5000,
   minHolders: 60,
   maxDevHoldingPct: 8,
@@ -59,11 +54,6 @@ export const DEFAULT_SMALL_CAP_GATE: SmallCapGateConfig = {
 export interface SmallCapGateResult {
   pass: boolean;
   reason?: string;
-}
-
-/** Whether this gate applies at all — the caller decides which gate a candidate goes through. */
-export function isSmallCap(marketCapUsd: number, config: SmallCapGateConfig = DEFAULT_SMALL_CAP_GATE): boolean {
-  return Number.isFinite(marketCapUsd) && marketCapUsd < config.maxMarketCapUsd;
 }
 
 export function checkSmallCapGate(

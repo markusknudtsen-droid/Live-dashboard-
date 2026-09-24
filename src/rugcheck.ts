@@ -5,8 +5,7 @@
  * pump.fun this IS a documented public product, but it is still a third party
  * with no uptime contract with this bot — every failure resolves to
  * "unknown", never a guessed pass. checkSmallCapGate() then fails closed on
- * unknown data, matching this project's rug-gate policy elsewhere (see
- * entry-score.ts's requireHolderData).
+ * unknown data, matching this project's rug-gate policy.
  *
  * RugCheck's own site shows a Good/Warning/Danger badge, but the API returns
  * no such field directly — only risks[] and score_normalised (0-100, higher

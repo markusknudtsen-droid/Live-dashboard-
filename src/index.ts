@@ -74,6 +74,9 @@ import { pollPublicChannel } from "./telegram-scrape.js";
 
 const tradeHistory: TradeHistoryItem[] = [];
 
+/** Liquidity floor and market-cap ceiling, shared by the instant-buy and analysed paths. */
+const RUG_GATE_CONFIG = { minLiquidityUsd: CONFIG.minLiquidityUsd, maxMarketCapUsd: CONFIG.maxMarketCapUsd };
+
 /**
  * Recent model verdicts, keyed by token address. The scan sources return a
  * stable set, so without this the bot pays to re-analyse unchanged tokens every
@@ -699,13 +702,6 @@ async function runCycle(): Promise<void> {
       enabled: true,
       boostThreshold: CONFIG.instantBuyBoostThreshold,
     };
-    const gateConfig = {
-      minLiquidityUsd: CONFIG.minLiquidityUsd,
-      maxMarketCapUsd: CONFIG.maxMarketCapUsd,
-      holderCheckMinMarketCapUsd: CONFIG.holderCheckMinMarketCapUsd,
-      maxTopHolderPercent: CONFIG.maxTopHolderPercent,
-      requireHolderData: false,
-    };
 
     for (const candidate of candidates) {
       if (getActivePositions().length >= MAX_CONCURRENT_POSITIONS) break;
@@ -760,10 +756,9 @@ async function runCycle(): Promise<void> {
           boostAmount: candidate.boostAmount ?? 0,
           liquidityUsd: candidate.liquidityUsd,
           marketCapUsd: candidate.marketCap,
-          topHolderPercent: undefined,
         },
         instantConfig,
-        gateConfig
+        RUG_GATE_CONFIG
       );
 
       if (!verdict.buy) {
@@ -1052,26 +1047,12 @@ async function runCycle(): Promise<void> {
     }
 
     // Hard gates run last, immediately before the buy: they cannot be
-    // outvoted by confidence, however high the score. Below the small-cap
-    // threshold the operator's stricter RugCheck-backed checklist applies
-    // instead of the normal rug gate — a harder bar for the segment that is
-    // cheapest to fake.
+    // outvoted by confidence, however high the score.
     if (CONFIG.rugGatesEnabled) {
       // Cheap, network-free bounds first: liquidity floor and market-cap ceiling.
       const basic = checkRugGates(
-        {
-          liquidityUsd: signal.token.liquidityUsd,
-          marketCapUsd: signal.token.marketCap,
-          topHolderPercent: undefined,
-        },
-        {
-          minLiquidityUsd: CONFIG.minLiquidityUsd,
-          maxMarketCapUsd: CONFIG.maxMarketCapUsd,
-          holderCheckMinMarketCapUsd: CONFIG.holderCheckMinMarketCapUsd,
-          maxTopHolderPercent: CONFIG.maxTopHolderPercent,
-          // Concentration comes from RugCheck below now, not from this gate.
-          requireHolderData: false,
-        }
+        { liquidityUsd: signal.token.liquidityUsd, marketCapUsd: signal.token.marketCap },
+        RUG_GATE_CONFIG
       );
       if (!basic.pass) {
         logger.warn(`⛔ ${signal.token.symbol} rejected by rug gate: ${basic.reason}`);
@@ -1092,14 +1073,12 @@ async function runCycle(): Promise<void> {
       if (signal.entryContext) signal.entryContext.rugCheck = rc;
       const gate = checkSmallCapGate(
         {
-          marketCapUsd: signal.token.marketCap,
           liquidityUsd: signal.token.liquidityUsd,
           volume24h: signal.token.volume24h,
           hasAnySocial: signal.token.hasXSocial || signal.token.hasOtherSocial,
           rugCheck: rc,
         },
         {
-          maxMarketCapUsd: CONFIG.smallCapMaxMarketCapUsd,
           minLiquidityUsd: CONFIG.minLiquidityUsd,
           minHolders: CONFIG.smallCapMinHolders,
           maxDevHoldingPct: CONFIG.smallCapMaxDevHoldingPct,

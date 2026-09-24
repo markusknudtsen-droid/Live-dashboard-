@@ -100,14 +100,14 @@ test("pruneSightings bounds the map without dropping usable entries", () => {
 const gates = { ...DEFAULT_RUG_GATES, maxMarketCapUsd: 1_500_000 };
 
 test("a coin above the market cap ceiling is rejected", () => {
-  const r = checkRugGates({ liquidityUsd: 50_000, marketCapUsd: 2_400_000, topHolderPercent: 5 }, gates);
+  const r = checkRugGates({ liquidityUsd: 50_000, marketCapUsd: 2_400_000 }, gates);
   assert.equal(r.pass, false);
   assert.match(r.reason ?? "", /market cap/);
 });
 
 test("a coin at or below the ceiling passes", () => {
   assert.equal(
-    checkRugGates({ liquidityUsd: 50_000, marketCapUsd: 1_500_000, topHolderPercent: 5 }, gates).pass,
+    checkRugGates({ liquidityUsd: 50_000, marketCapUsd: 1_500_000 }, gates).pass,
     true
   );
 });
@@ -115,7 +115,7 @@ test("a coin at or below the ceiling passes", () => {
 test("a zero ceiling disables the check, preserving prior behaviour", () => {
   const off = { ...DEFAULT_RUG_GATES, maxMarketCapUsd: 0 };
   assert.equal(
-    checkRugGates({ liquidityUsd: 50_000, marketCapUsd: 900_000_000, topHolderPercent: 5 }, off).pass,
+    checkRugGates({ liquidityUsd: 50_000, marketCapUsd: 900_000_000 }, off).pass,
     true
   );
 });
