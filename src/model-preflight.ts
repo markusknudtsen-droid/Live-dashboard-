@@ -243,6 +243,16 @@ export function formatModelCheck(result: ModelCheckResult, configuredModel: stri
   return lines.join("\n");
 }
 
+/** A preflight verdict that blocks new entries. */
+function broken(error: string): ModelCheckResult {
+  return { ok: false, errors: [error], warnings: [], suggestions: [] };
+}
+
+/** A preflight that could not decide, so it fails open with a warning. */
+function inconclusive(warning: string): ModelCheckResult {
+  return { ok: true, errors: [], warnings: [warning], suggestions: [] };
+}
+
 function isValidHttpUrl(value: string): boolean {
   try {
     const url = new URL(value);
@@ -288,14 +298,7 @@ export async function checkAnalysisModel(
   // circuits before the network call: every analysis request would get a
   // 401 anyway, no catalogue fetch is needed to know that in advance.
   if (!CONFIG.openRouterApiKey) {
-    return {
-      ok: false,
-      errors: [
-        "OPENROUTER_API_KEY is not set. Every analysis request will be rejected, so no new positions can be opened.",
-      ],
-      warnings: [],
-      suggestions: [],
-    };
+    return broken("OPENROUTER_API_KEY is not set. Every analysis request will be rejected, so no new positions can be opened.");
   }
   // Same reasoning for a malformed OPENROUTER_API_URL: it's a deterministic
   // configuration error, not a transient network condition, so it must not
@@ -310,25 +313,15 @@ export async function checkAnalysisModel(
   // whole preflight exists to catch, just reached through a different
   // misconfiguration.
   if (!isValidHttpUrl(CONFIG.openRouterApiUrl)) {
-    return {
-      ok: false,
-      errors: [
-        `OPENROUTER_API_URL ("${CONFIG.openRouterApiUrl}") is not a valid http:// or https:// URL. Every analysis request built from it would fail the same way.`,
-      ],
-      warnings: [],
-      suggestions: [],
-    };
+    return broken(
+      `OPENROUTER_API_URL ("${CONFIG.openRouterApiUrl}") is not a valid http:// or https:// URL. Every analysis request built from it would fail the same way.`
+    );
   }
   try {
     const response = await fetchModels();
     const models = response?.data;
     if (!Array.isArray(models) || models.length === 0) {
-      return {
-        ok: true,
-        errors: [],
-        warnings: ["Could not read OpenRouter's model list; skipping model preflight."],
-        suggestions: [],
-      };
+      return inconclusive("Could not read OpenRouter's model list; skipping model preflight.");
     }
     return evaluateModelCatalogue(models, CONFIG.openRouterModel);
   } catch (error: unknown) {
@@ -353,21 +346,11 @@ export async function checkAnalysisModel(
         status === 401 || status === 403
           ? `this looks like a bad or insufficiently-permissioned OPENROUTER_API_KEY`
           : `this looks like a configuration problem (wrong path or host)`;
-      return {
-        ok: false,
-        errors: [
-          `Model preflight got HTTP ${status} from OPENROUTER_API_URL ` +
-            `("${CONFIG.openRouterApiUrl}") — ${diagnosis}, not a transient outage. ${message}`,
-        ],
-        warnings: [],
-        suggestions: [],
-      };
+      return broken(
+        `Model preflight got HTTP ${status} from OPENROUTER_API_URL ` +
+          `("${CONFIG.openRouterApiUrl}") — ${diagnosis}, not a transient outage. ${message}`
+      );
     }
-    return {
-      ok: true,
-      errors: [],
-      warnings: [`Model preflight could not reach OpenRouter (${message}); continuing.`],
-      suggestions: [],
-    };
+    return inconclusive(`Model preflight could not reach OpenRouter (${message}); continuing.`);
   }
 }
