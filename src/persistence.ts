@@ -57,10 +57,10 @@ function sanitizeIfString<T>(value: T): T {
  * restored from state.json (written by a previous run, possibly an older
  * bot version predating that sanitization, or hand-edited) skips that step
  * entirely: loadState() hands it straight to trader.ts, which logs it
- * verbatim in several places, and loadStateStrict() hands it straight to
- * the positions API's JSON response. Sanitizing every string metadata
- * field here, at deserialization, closes that gap for both consumers
- * regardless of which bot version originally wrote the file.
+ * verbatim in several places, and to the dashboard server's routes.
+ * Sanitizing every string metadata field here, at deserialization, closes
+ * that gap for every consumer regardless of which bot version originally
+ * wrote the file.
  */
 function sanitizeRestoredState(state: BotState): BotState {
   return {
@@ -69,11 +69,10 @@ function sanitizeRestoredState(state: BotState): BotState {
     // a stray primitive, anything isRestorablePosition below is specifically
     // built to individually reject — the array itself is only shape-checked
     // (Array.isArray) above, not its elements. Accessing .tokenSymbol on a
-    // non-object entry would throw here, and since parseStateFile's callers
-    // don't distinguish "one bad entry" from "totally broken file",
-    // loadState() would discard every position (fail open to the empty
-    // default) and loadStateStrict() would fail the whole read (fail
-    // closed as a 500) — either way losing every OTHER, valid position too.
+    // non-object entry would throw here, and since loadState() doesn't
+    // distinguish "one bad entry" from "totally broken file", it would
+    // discard every position (fail open to the empty default) — losing every
+    // OTHER, valid position too.
     // Pass a non-object entry through untouched so the existing downstream
     // validator still gets to reject it individually, same as before this
     // sanitization step existed.
@@ -135,10 +134,9 @@ async function preserveUnreadableState(raw: string | undefined, reason: unknown)
   const why = reason instanceof Error ? reason.message : String(reason);
 
   // Copy rather than rename, deliberately. Renaming would leave the original
-  // path missing, which silently changes what every OTHER reader sees: the
-  // dashboard's loadStateStrict() exists precisely to tell "no state yet"
-  // apart from "state unreadable", and moving the file turns the second into
-  // the first. Copying preserves the bytes without rewriting that signal.
+  // path missing, which turns "state unreadable" into "no state yet" for
+  // every OTHER reader. Copying preserves the bytes without rewriting that
+  // signal.
   if (raw === undefined) {
     // The read itself failed (permissions, I/O), so there are no bytes to
     // save. Nothing to preserve, but the operator still needs to know.
@@ -189,28 +187,6 @@ export async function loadState(): Promise<BotState> {
 }
 
 /**
- * Like loadState(), but only treats a missing file (first run — nothing has
- * ever been persisted) as "no state yet"; any other failure (corrupt JSON, a
- * permissions error, a read racing a concurrent write) is rethrown instead
- * of silently degrading to an empty state. loadState()'s fail-open behavior
- * is correct for the main bot process — a broken state file at startup must
- * never block trading — but a caller that needs to tell "genuinely no
- * positions" apart from "couldn't read state" (the read-only positions API
- * in api.ts) needs this instead, so a real failure surfaces as an error
- * response rather than a misleading empty list.
- */
-export async function loadStateStrict(): Promise<BotState> {
-  let raw: string;
-  try {
-    raw = await readFile(CONFIG.stateFilePath, "utf-8");
-  } catch (error: unknown) {
-    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return DEFAULT_STATE;
-    throw error;
-  }
-  return parseStateFile(raw);
-}
-
-/**
  * Which persisted positions may be restored into the current run.
  *
  * - DRY_RUN: none. Each dry-run session starts a fresh ephemeral paper wallet
@@ -236,17 +212,6 @@ function isNonEmptyString(value: unknown): value is string {
  * pnlPercent). The state file only guarantees activePositions is an array;
  * individual entries may be malformed (hand-edited/corrupted), and restoring
  * an incomplete one would crash or corrupt trading math later.
- *
- * Also reused by api.ts's positions route as a shape check before mapping
- * to the dashboard's response shape: parseStateFile() deliberately lets a
- * null/non-object array entry through untouched (see sanitizeRestoredState
- * above) rather than dropping it, and a shallow "is it a non-null object"
- * check alone would still let a malformed-but-object-shaped entry (an
- * empty `{}`, or one missing fields) through into the response as a record
- * full of `undefined`s. Unlike filterRestorablePositions, this alone does
- * NOT exclude DRYRUN- paper positions — the API should list every
- * currently open position, paper or real, not just ones eligible to
- * survive a restart.
  */
 export function isRestorablePosition(value: unknown): value is ActivePosition {
   if (!value || typeof value !== "object") return false;
@@ -289,8 +254,8 @@ export function saveState(state: BotState): Promise<void> {
     // Write to a temp file in the same directory, then rename over the real
     // path, instead of writing fullPath directly. writeFile() truncates
     // before writing, so a direct write leaves a window where a concurrent
-    // reader — e.g. the separate `npm run api` process, which is a
-    // different OS process the writeQueue above can't serialize against —
+    // reader — e.g. the dashboard server, which is a different OS process
+    // the writeQueue above can't serialize against —
     // could observe a truncated/partial file. rename() within the same
     // directory is atomic on POSIX and Windows, so a concurrent read always
     // sees either the complete old snapshot or the complete new one, never

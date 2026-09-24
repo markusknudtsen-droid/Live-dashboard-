@@ -16,7 +16,6 @@
     "mcp": "tsx src/mcp-server.ts",
     "mcp:start": "node dist/mcp-server.js",
     "trade": "tsx src/index.ts",
-    "api": "tsx src/api.ts",
     "check-key": "tsx src/check-openrouter-key.ts",
     "test": "tsx --test tests/*.test.ts",
     "server:dev": "tsx watch server/index.ts",
@@ -39,7 +38,6 @@
     "dotenv": "^16.4.0",
     "express": "^5.2.1",
     "express-rate-limit": "^8.5.2",
-    "ipaddr.js": "^2.5.0",
     "jsonwebtoken": "^9.0.3",
     "telegram": "^2.26.22",
     "zod": "^4.4.3"
