@@ -66,7 +66,6 @@ settings before risking real SOL. Always start here before switching to `DRY_RUN
 | `npm run trade` | Start the full bot (scan → analyze → trade loop). Set `DRY_RUN=true` in `.env` to simulate trades with fake SOL first |
 | `npm run scan` | Scan only - find candidates without trading |
 | `npm run analyze` | Scan + analyze - see signals without executing |
-| `npm run inspect-web -- <url>` | Inspect a published MemeScope web page and print details + improvement suggestions |
 | `npm run dev` | Development mode with hot reload |
 | `npm run check` | Type-check project without emitting files |
 | `npm run lint` | Lint alias (currently runs type-check rules) |
@@ -175,26 +174,6 @@ The plugin will:
 - Show live positions in the Wallet page
 - Allow configuration changes from the web UI
 - Display performance analytics
-
-You can also inspect a published dashboard page directly from the CLI:
-
-```bash
-# Inspect a specific deployment
-npm run inspect-web -- https://memescope-command-center.lovable.app
-
-# Or set a default URL in .env
-DASHBOARD_WEB_URL=https://memescope-command-center.lovable.app
-npm run inspect-web
-
-# Get machine-readable output
-npm run inspect-web -- https://memescope-command-center.lovable.app --json
-```
-
-The inspection command reports:
-- Page metadata (title, description, canonical, Open Graph)
-- Basic structure (H1/H2/H3 headings, forms, buttons, links)
-- Accessibility hints (missing `lang`, missing image `alt` text)
-- Framework hints and high-level improvement suggestions
 
 ## Live Dashboard (Command Center)
 

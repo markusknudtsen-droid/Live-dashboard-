@@ -41,7 +41,6 @@ export interface AppConfig {
   scanChains: string[];
   dashboardApiUrl: string;
   dashboardApiKey: string;
-  dashboardWebUrl: string;
   allowSkipPreflight: boolean;
   httpTimeoutMs: number;
   httpMaxRetries: number;
@@ -380,7 +379,6 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     scanChains: parseScanChains(env.SCAN_CHAINS),
     dashboardApiUrl: env.DASHBOARD_API_URL || "",
     dashboardApiKey: env.DASHBOARD_API_KEY || "",
-    dashboardWebUrl: env.DASHBOARD_WEB_URL || "",
     allowSkipPreflight: parseBoolean(env.ALLOW_SKIP_PREFLIGHT, false),
     httpTimeoutMs: parseIntegerInRange("HTTP_TIMEOUT_MS", env.HTTP_TIMEOUT_MS, 10000, 1000, 120000),
     httpMaxRetries: parseIntegerInRange("HTTP_MAX_RETRIES", env.HTTP_MAX_RETRIES, 3, 0, 10),
