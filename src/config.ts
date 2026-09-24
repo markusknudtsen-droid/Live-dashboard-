@@ -306,16 +306,12 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env) {
     addOnSol: parseNumberInRange("ADD_ON_SOL", env.ADD_ON_SOL, 0.05, 0, 100),
     /** Position must be down at least this many percent to qualify for an add-on. */
     addOnTriggerDipPercent: parseNumberInRange("ADD_ON_TRIGGER_DIP_PERCENT", env.ADD_ON_TRIGGER_DIP_PERCENT, 15, 0.1, 100),
-    /** Gain at which a slice of the position is banked. 0 disables partial take-profit. */
-    partialTakeProfitPercent: parseNumberInRange("PARTIAL_TAKE_PROFIT_PERCENT", env.PARTIAL_TAKE_PROFIT_PERCENT, 100, 0, 100_000),
-    /** Fraction of the position sold when that gain is reached, 0..1. */
-    partialTakeProfitFraction: parseNumberInRange("PARTIAL_TAKE_PROFIT_FRACTION", env.PARTIAL_TAKE_PROFIT_FRACTION, 0.5, 0.01, 0.99),
     /**
      * Multi-stage scale-out, e.g. "40:50,100:50,250:50" — at +40% sell 50% of the
-     * position, at +100% sell 50% of what is left, and so on. Empty falls back to
-     * the single-shot partialTakeProfit above, which is the existing behaviour.
+     * position, at +100% sell 50% of what is left, and so on. Unset defaults to
+     * one rung, "100:50": bank half at +100%. Set it empty to disable.
      */
-    takeProfitLadder: parseLadder(env.TAKE_PROFIT_LADDER),
+    takeProfitLadder: parseLadder(env.TAKE_PROFIT_LADDER ?? "100:50"),
     /**
      * Read held-position price and liquidity from Jupiter instead of
      * DexScreener. Measured 2026-09-21: over one minute on an actively traded
@@ -508,12 +504,7 @@ export function validateConfig(config: AppConfig = CONFIG): void {
   if (config.takeProfitLadder.length > 0) {
     console.log(
       `   🪜 TAKE_PROFIT_LADDER: ${describeLadder(config.takeProfitLadder)} ` +
-        `(each sells that share of what REMAINS; supersedes PARTIAL_TAKE_PROFIT).`
-    );
-  } else if (config.partialTakeProfitPercent > 0) {
-    console.log(
-      `   💰 PARTIAL_TAKE_PROFIT: at +${config.partialTakeProfitPercent}%, ` +
-        `${Math.round(config.partialTakeProfitFraction * 100)}% of the position is banked; the rest runs on.`
+        `(each sells that share of what REMAINS).`
     );
   }
   if (config.reservedNewCoinSlots > 0) {

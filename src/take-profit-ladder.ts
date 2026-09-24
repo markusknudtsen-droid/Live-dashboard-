@@ -1,10 +1,10 @@
 /**
  * Multi-stage take-profit: scale out of a winner in rungs instead of one exit.
  *
- * The single PARTIAL_TAKE_PROFIT_PERCENT banks one slice and then never acts
- * again, so a position that keeps climbing rides the whole rest of the way on
- * the trailing stop alone. A ladder banks progressively — lock the principal
- * early, keep selling into strength, leave a runner.
+ * A single exit banks one slice and then never acts again, so a position
+ * that keeps climbing rides the whole rest of the way on the trailing stop
+ * alone. A ladder banks progressively — lock the principal early, keep
+ * selling into strength, leave a runner.
  *
  * Pure: the caller supplies the gain and how many rungs are already taken.
  */

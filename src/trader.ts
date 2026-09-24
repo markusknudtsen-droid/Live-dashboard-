@@ -97,16 +97,8 @@ export interface ActivePosition {
    */
   enteredAsNewCoin?: boolean;
   /**
-   * Set once PARTIAL_TAKE_PROFIT has banked its slice, so it fires exactly
-   * once per position rather than on every monitoring tick above the
-   * threshold. Optional so positions persisted before this existed rehydrate
-   * as "not yet taken".
-   */
-  partialTakeProfitTaken?: boolean;
-  /**
-   * How many TAKE_PROFIT_LADDER rungs this position has already banked.
-   * Separate from partialTakeProfitTaken so the single-shot behaviour is
-   * untouched when no ladder is configured.
+   * How many TAKE_PROFIT_LADDER rungs this position has already banked, so
+   * each rung fires once rather than on every monitoring tick above it.
    */
   ladderRungsTaken?: number;
 }
@@ -958,7 +950,6 @@ async function sellLocked(
     // failed swap leaves it exactly as it was and the trigger can fire again.
     if (partial) {
       position.amountSol -= soldSol;
-      position.partialTakeProfitTaken = true;
     } else {
       removePosition(position);
     }
@@ -1252,9 +1243,6 @@ export async function evaluatePositionAtPrice(
   // rather than position.pnlPercent so it cannot act on a stale value.
   const gainPercent = ((currentPrice - position.entryPrice) / position.entryPrice) * 100;
 
-  // Ladder first, when one is configured: it supersedes the single-shot
-  // partial below rather than stacking with it, so a position cannot be
-  // scaled out of twice for the same gain.
   if (!exitReason && CONFIG.takeProfitLadder.length > 0) {
     const step = nextLadderRung(gainPercent, CONFIG.takeProfitLadder, position.ladderRungsTaken ?? 0);
     if (step) {
@@ -1270,22 +1258,6 @@ export async function evaluatePositionAtPrice(
       await executeSellPartial(position, step.rung.sellFraction, "PARTIAL_TAKE_PROFIT", currentPrice);
       return;
     }
-  }
-
-  if (
-    !exitReason &&
-    CONFIG.takeProfitLadder.length === 0 &&
-    CONFIG.partialTakeProfitPercent > 0 &&
-    !position.partialTakeProfitTaken &&
-    Number.isFinite(gainPercent) &&
-    gainPercent >= CONFIG.partialTakeProfitPercent
-  ) {
-    logger.info(
-      `💰 PARTIAL TAKE PROFIT for ${position.tokenSymbol} at +${gainPercent.toFixed(2)}% ` +
-        `(threshold +${CONFIG.partialTakeProfitPercent}%)`
-    );
-    await executeSellPartial(position, CONFIG.partialTakeProfitFraction, "PARTIAL_TAKE_PROFIT", currentPrice);
-    return;
   }
 
   if (!exitReason) return;

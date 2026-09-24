@@ -82,7 +82,7 @@ test("a spike past the threshold banks half and leaves the rest running", async 
   assert.equal(getActivePositions().length, 1, "position must stay open after a partial sale");
   const still = getActivePositions()[0];
   assert.ok(Math.abs(still.amountSol - 0.1) < 1e-9, "half the SOL still at risk");
-  assert.equal(still.partialTakeProfitTaken, true);
+  assert.equal(still.ladderRungsTaken, 1);
   assert.equal(still.entryPrice, position.entryPrice, "cost basis per token unchanged by selling some");
 
   // Sold 0.1 SOL of exposure at +120% -> 0.22 SOL proceeds.
@@ -109,7 +109,7 @@ test("a gain under the threshold banks nothing", async () => {
 
   assert.equal(getActivePositions().length, 1, "still open: the trail defers the fixed take-profit");
   assert.ok(Math.abs(getActivePositions()[0].amountSol - 0.2) < 1e-9, "nothing sold");
-  assert.ok(!getActivePositions()[0].partialTakeProfitTaken);
+  assert.ok(!getActivePositions()[0].ladderRungsTaken);
   assert.ok(Math.abs((await getBalance()) - before) < 1e-9);
 });
 
