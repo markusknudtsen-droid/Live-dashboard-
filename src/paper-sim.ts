@@ -17,6 +17,9 @@
 // DRY_RUN must be set before the config module is loaded, so use dynamic imports.
 process.env.DRY_RUN = "true";
 process.env.PAPER_STARTING_BALANCE_SOL = process.env.PAPER_STARTING_BALANCE_SOL || "10";
+// The fixture pairs below are 30h and 90h old. Without this, the 24h
+// MAX_TOKEN_AGE_HOURS default filters every one out and the sim buys nothing.
+process.env.MAX_TOKEN_AGE_HOURS = process.env.MAX_TOKEN_AGE_HOURS || "168";
 
 async function main(): Promise<void> {
   const { CONFIG, validateConfig } = await import("./config.js");
@@ -120,7 +123,7 @@ async function main(): Promise<void> {
   line("2️⃣  SIGNALS — synthesized BUY signals for the candidates\n");
   const signals: TradeSignalT[] = candidates.map((token, i) => {
     const confidence = i === 0 ? 88 : 82; // both above the 80% BUY threshold
-    const positionSizeSol = Math.min(CONFIG.maxPositionSol * (confidence >= 85 ? 0.6 : 0.4), CONFIG.maxPositionSol);
+    const positionSizeSol = CONFIG.maxPositionSol * (confidence >= 85 ? 0.6 : 0.4);
     return {
       token,
       confidence,
@@ -134,7 +137,7 @@ async function main(): Promise<void> {
       trendStrength: "strong_up",
       momentum: "accelerating",
       riskLevel: "medium",
-      narrative: i === 0 ? "dog meta" : "dog meta",
+      narrative: "dog meta",
     };
   });
   for (const s of signals) {
@@ -235,8 +238,7 @@ async function main(): Promise<void> {
   const afterLoss = shouldSkipNewEntries(gate, 0);
   line(`   New entries now: skip=${afterLoss.skip} — "${afterLoss.reason}"`);
 
-  let gateAfterWin: import("./first-trade-gate.js").FirstTradeValidation = null;
-  gateAfterWin = resolveFirstTradeValidation({ type: "SELL", pnlPercent: 22 }, gateAfterWin);
+  const gateAfterWin = resolveFirstTradeValidation({ type: "SELL", pnlPercent: 22 }, null);
   line(`\n   (separate run) First trade closes at a PROFIT (+22%) → gate: ${describeGateState(gateAfterWin)}`);
   const afterWin = shouldSkipNewEntries(gateAfterWin, 0);
   line(`   New entries now: skip=${afterWin.skip}, maxNewEntries=${maxNewEntries(gateAfterWin, 3, 0)} (normal trading resumed)`);
