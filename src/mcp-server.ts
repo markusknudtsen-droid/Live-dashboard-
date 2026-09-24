@@ -43,6 +43,7 @@ import {
 } from "./trader.js";
 import { scoreSignal, type SignalMetrics, SIZE_TIERS } from "./signal-engine.js";
 import { httpGet } from "./http.js";
+import { exitLevels } from "./position-sizing.js";
 // Type-only: importing analyze.js as a runtime value would needlessly evaluate
 // it (and its dependencies) at server startup.
 import type { TradeSignal } from "./analyze.js";
@@ -161,12 +162,12 @@ Always safe to call; initialises the paper wallet on first use. Returns:
         wallet_address: getWalletAddress(),
         paper_balance_sol: await getBalance(),
         open_positions: getActivePositions().length,
-        max_concurrent_positions: 3,
+        max_concurrent_positions: MAX_CONCURRENT_POSITIONS,
         strategy: {
           min_confidence: CONFIG.minConfidence,
           stop_loss_percent: CONFIG.stopLossPercent,
           take_profit_percent: CONFIG.takeProfitPercent,
-          size_tiers: SIZE_TIERS.map((t) => ({ min_confidence: t.minConfidence, position_size_sol: t.positionSizeSol })),
+          size_tiers: SIZE_TIERS.map((t) => ({ min_confidence: t.minConfidence, position_size_sol: t.sol })),
         },
       });
     }
@@ -409,8 +410,7 @@ stop_loss_price, take_profit_price, paper_balance_after } or an error message.`,
         action: "BUY",
         reasoning: "Manual paper buy via MCP",
         entryPrice: price_usd,
-        stopLoss: price_usd * (1 - CONFIG.stopLossPercent / 100),
-        takeProfit: price_usd * (1 + CONFIG.takeProfitPercent / 100),
+        ...exitLevels(price_usd, CONFIG.stopLossPercent, CONFIG.takeProfitPercent),
         positionSizeSol: amount_sol,
         riskRewardRatio: CONFIG.takeProfitPercent / CONFIG.stopLossPercent,
         trendStrength: "neutral",

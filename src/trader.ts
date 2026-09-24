@@ -12,7 +12,7 @@ import bs58 from "bs58";
 import { randomBytes } from "node:crypto";
 import { CONFIG } from "./config.js";
 import { shouldExitOnLiquidityDrop, updatePeakLiquidity, DEFAULT_RUG_EXIT } from "./rug-exit.js";
-import { updateTrailingStop } from "./trailing-stop.js";
+import { isTrailArmed, updateTrailingStop } from "./trailing-stop.js";
 import { decideSweep } from "./profit-sweep.js";
 import { TradeSignal } from "./analyze.js";
 import { buildEntryFeatures, type EntryFeatures } from "./entry-features.js";
@@ -20,6 +20,7 @@ import { logger } from "./logger.js";
 import { getJupiterQuote, isValidSolanaMint, SOL_MINT, type JupiterOrderResponse } from "./services/jupiter-client.js";
 import { forcePriorityFee } from "./services/priority-fee.js";
 import { nextLadderRung } from "./take-profit-ladder.js";
+import { exitLevels } from "./position-sizing.js";
 import { fetchLivePrice } from "./live-price.js";
 import { confirmOrRecoverSwap, deriveTransactionSignature, type SwapConfirmResult } from "./services/swap-confirmation.js";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -367,10 +368,20 @@ async function signAndExecute(
  * at the original level.
  */
 export function trailIsArmed(position: ActivePosition): boolean {
-  if (!Number.isFinite(position.entryPrice) || position.entryPrice <= 0) return false;
-  const peak = position.peakPrice ?? position.entryPrice;
-  const peakGainPercent = ((peak - position.entryPrice) / position.entryPrice) * 100;
-  return peakGainPercent >= CONFIG.trailingStopActivatePercent;
+  return isTrailArmed(position.entryPrice, position.peakPrice ?? position.entryPrice, CONFIG.trailingStopActivatePercent);
+}
+
+/**
+ * Why the wallet cannot fund spending `amountSol`, or null when it can. Real
+ * trades reserve a small SOL buffer for the network fee; paper trades pay no
+ * on-chain fee, so no buffer is required in DRY_RUN.
+ */
+async function balanceShortfall(amountSol: number): Promise<string | null> {
+  const balance = await getBalance();
+  const feeBufferSol = CONFIG.dryRun ? 0 : 0.01;
+  if (balance >= amountSol + feeBufferSol) return null;
+  const need = CONFIG.dryRun ? amountSol.toFixed(4) : `${amountSol.toFixed(4)} + fees`;
+  return `Insufficient balance: ${balance.toFixed(4)} SOL (need ${need})`;
 }
 
 /** Remove a closed position from the active list. */
@@ -543,12 +554,8 @@ async function executeAddOnLocked(position: ActivePosition, signal: TradeSignal,
   if (findPositionIndex(position) === -1) return failure("Position already closed");
   if (position.addOnTaken) return failure("Add-on already used for this position");
 
-  const balance = await getBalance();
-  const feeBufferSol = CONFIG.dryRun ? 0 : 0.01;
-  if (balance < addOnSol + feeBufferSol) {
-    const need = CONFIG.dryRun ? addOnSol.toFixed(4) : `${addOnSol.toFixed(4)} + fees`;
-    return failure(`Insufficient balance: ${balance.toFixed(4)} SOL (need ${need})`);
-  }
+  const shortfall = await balanceShortfall(addOnSol);
+  if (shortfall) return failure(shortfall);
 
   logger.info(`➕ Adding to ${token.symbol}: +${addOnSol.toFixed(4)} SOL at $${token.priceUsd.toFixed(10)}`);
 
@@ -562,8 +569,7 @@ async function executeAddOnLocked(position: ActivePosition, signal: TradeSignal,
   function applyAddOn(newEntryPrice: number): void {
     position.amountSol += addOnSol;
     position.entryPrice = newEntryPrice;
-    position.stopLoss = newEntryPrice * (1 - CONFIG.stopLossPercent / 100);
-    position.takeProfit = newEntryPrice * (1 + CONFIG.takeProfitPercent / 100);
+    Object.assign(position, exitLevels(newEntryPrice, CONFIG.stopLossPercent, CONFIG.takeProfitPercent));
     position.addOnTaken = true;
   }
 
@@ -691,14 +697,8 @@ async function executeBuyLocked(signal: TradeSignal): Promise<TradeResult> {
       return failure(`Max concurrent positions (${MAX_CONCURRENT_POSITIONS}) reached.`);
     }
 
-    const balance = await getBalance();
-    // Real buys reserve a small SOL buffer for the network fee; simulated
-    // (paper) buys pay no on-chain fee, so no buffer is required in DRY_RUN.
-    const feeBufferSol = CONFIG.dryRun ? 0 : 0.01;
-    if (balance < positionSizeSol + feeBufferSol) {
-      const need = CONFIG.dryRun ? positionSizeSol.toFixed(4) : `${positionSizeSol.toFixed(4)} + fees`;
-      return failure(`Insufficient balance: ${balance.toFixed(4)} SOL (need ${need})`);
-    }
+    const shortfall = await balanceShortfall(positionSizeSol);
+    if (shortfall) return failure(shortfall);
 
     let txSignature: string;
     let tokenAmountRaw: string | undefined;
@@ -1047,10 +1047,6 @@ export async function getHeldTokens(): Promise<{ mint: string; amount: number }[
  */
 const failedSellCounts = new Map<string, number>();
 
-export function getFailedSellCount(tokenAddress: string): number {
-  return failedSellCounts.get(tokenAddress) ?? 0;
-}
-
 export function resetFailedSellCount(tokenAddress: string): void {
   failedSellCounts.delete(tokenAddress);
 }
@@ -1071,11 +1067,11 @@ export function setAbandonListener(listener: AbandonListener | null): void {
   abandonListener = listener;
 }
 
-/** Record a failed sell. Returns true when the position should be abandoned. */
-export function noteFailedSell(tokenAddress: string, maxAttempts: number): boolean {
+/** Record a failed sell and return how many in a row this position has now had. */
+export function noteFailedSell(tokenAddress: string): number {
   const next = (failedSellCounts.get(tokenAddress) ?? 0) + 1;
   failedSellCounts.set(tokenAddress, next);
-  return next >= maxAttempts;
+  return next;
 }
 
 /**
@@ -1276,7 +1272,8 @@ export async function evaluatePositionAtPrice(
   // this path runs every monitoring tick. Give up after a bounded number of
   // attempts rather than retrying forever (306 attempts were observed on one
   // phantom position) and say so once, loudly.
-  if (noteFailedSell(position.tokenAddress, CONFIG.maxSellAttempts)) {
+  const failures = noteFailedSell(position.tokenAddress);
+  if (failures >= CONFIG.maxSellAttempts) {
     logger.error(
       `🚨 Abandoning ${position.tokenSymbol}: ${CONFIG.maxSellAttempts} consecutive sell attempts failed ` +
         `(last error: ${result.error ?? "unknown"}). Removing it from active positions — verify the wallet manually.`
@@ -1292,7 +1289,7 @@ export async function evaluatePositionAtPrice(
     }
   } else {
     logger.warn(
-      `Sell attempt ${getFailedSellCount(position.tokenAddress)}/${CONFIG.maxSellAttempts} failed for ` +
+      `Sell attempt ${failures}/${CONFIG.maxSellAttempts} failed for ` +
         `${position.tokenSymbol}: ${result.error ?? "unknown"}`
     );
   }

@@ -70,7 +70,7 @@ test("a boost top-up counts as a fresh event", () => {
 
 test("freshness expires after the window", () => {
   const { sightings } = observeBoosts([obs("A")], new Map(), NOW, false);
-  const cfg = { freshWindowSeconds: 120 };
+  const cfg = 120;
   assert.equal(isBoostFresh("solana", "A", sightings, NOW + 60_000, cfg), true, "60s: fresh");
   assert.equal(isBoostFresh("solana", "A", sightings, NOW + 121_000, cfg), false, "121s: stale");
 });
@@ -78,7 +78,7 @@ test("freshness expires after the window", () => {
 test("the operator's scenario: a boost seen 20 minutes ago is not actionable", () => {
   const { sightings } = observeBoosts([obs("OLD")], new Map(), NOW, false);
   const twentyMinutesLater = NOW + 20 * 60_000;
-  assert.equal(isBoostFresh("solana", "OLD", sightings, twentyMinutesLater, { freshWindowSeconds: 120 }), false);
+  assert.equal(isBoostFresh("solana", "OLD", sightings, twentyMinutesLater, 120), false);
 });
 
 test("a token never observed is never fresh", () => {
@@ -90,7 +90,7 @@ test("pruneSightings bounds the map without dropping usable entries", () => {
     ["solana:new", { amount: 500, firstSeenAt: NOW - 1000 }],
     ["solana:ancient", { amount: 500, firstSeenAt: NOW - 48 * 3600 * 1000 }],
   ]);
-  const pruned = pruneSightings(s, NOW, { freshWindowSeconds: 120 });
+  const pruned = pruneSightings(s, NOW, 120);
   assert.equal(pruned.has("solana:new"), true);
   assert.equal(pruned.has("solana:ancient"), false);
 });

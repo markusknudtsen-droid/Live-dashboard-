@@ -136,17 +136,6 @@ export function adjustConfidence(
   return { adjustedConfidence: adjusted, bonusApplied: cappedBonus, penaltyApplied: penalty, reasons };
 }
 
-export interface InstantBuyConfig {
-  enabled: boolean;
-  /** Boost amount at or above which the AI analysis step is skipped. */
-  boostThreshold: number;
-}
-
-export const DEFAULT_INSTANT_BUY: InstantBuyConfig = {
-  enabled: false,
-  boostThreshold: 500,
-};
-
 export interface InstantBuyResult {
   buy: boolean;
   /** Why it did or did not qualify, for the log. */
@@ -166,15 +155,14 @@ export interface InstantBuyResult {
  */
 export function qualifiesForInstantBuy(
   input: RugGateInputs & { boostAmount: number },
-  instant: InstantBuyConfig = DEFAULT_INSTANT_BUY,
+  /** Boost amount at or above which the AI analysis step is skipped. */
+  boostThreshold = 500,
   gates: RugGateConfig = DEFAULT_RUG_GATES
 ): InstantBuyResult {
-  if (!instant.enabled) return { buy: false, reason: "instant buy disabled" };
-
-  if (!Number.isFinite(input.boostAmount) || input.boostAmount < instant.boostThreshold) {
+  if (!Number.isFinite(input.boostAmount) || input.boostAmount < boostThreshold) {
     return {
       buy: false,
-      reason: `boost ${input.boostAmount || 0} below the ${instant.boostThreshold} instant-buy threshold`,
+      reason: `boost ${input.boostAmount || 0} below the ${boostThreshold} instant-buy threshold`,
     };
   }
 
@@ -183,7 +171,7 @@ export function qualifiesForInstantBuy(
     return { buy: false, reason: `boost ${input.boostAmount} qualified but rug gate blocked it: ${gate.reason}` };
   }
 
-  return { buy: true, reason: `boost ${input.boostAmount} >= ${instant.boostThreshold} and rug gates passed` };
+  return { buy: true, reason: `boost ${input.boostAmount} >= ${boostThreshold} and rug gates passed` };
 }
 
 /**

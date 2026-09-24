@@ -25,7 +25,7 @@ import {
   shouldCloseHeldPosition,
 } from "./momentum-guard.js";
 import { findFreshLaunches, type FreshLaunchCandidate } from "./fresh-launch.js";
-import { sizeForConfidence } from "./position-sizing.js";
+import { exitLevels, sizeForConfidence } from "./position-sizing.js";
 import { logger } from "./logger.js";
 import { filterRestorablePositions, loadState, saveState, TradeHistoryItem } from "./persistence.js";
 import { isDashboardReportingEnabled, reportTrade } from "./dashboard-reporter.js";
@@ -297,8 +297,7 @@ function buildFreshLaunchSignal(fresh: FreshLaunchCandidate): TradeSignal {
       `$${fresh.buyVolume5m.toFixed(0)} 5m buy volume, ${fresh.organicBuyPercent.toFixed(1)}% organic, ` +
       `mint+freeze disabled. No model analysis.`,
     entryPrice: fresh.priceUsd,
-    stopLoss: fresh.priceUsd * (1 - CONFIG.stopLossPercent / 100),
-    takeProfit: fresh.priceUsd * (1 + CONFIG.freshLaunchTakeProfitPercent / 100),
+    ...exitLevels(fresh.priceUsd, CONFIG.stopLossPercent, CONFIG.freshLaunchTakeProfitPercent),
     positionSizeSol: CONFIG.freshLaunchPositionSol,
     riskRewardRatio: CONFIG.freshLaunchTakeProfitPercent / CONFIG.stopLossPercent,
     trendStrength: "unknown",
@@ -326,8 +325,7 @@ function buildInstantBuySignal(token: TokenCandidate): TradeSignal {
     action: "BUY",
     reasoning: `Instant buy: DexScreener boost ${token.boostAmount ?? 0} >= ${CONFIG.instantBuyBoostThreshold}. No model analysis.`,
     entryPrice: token.priceUsd,
-    stopLoss: token.priceUsd * (1 - CONFIG.stopLossPercent / 100),
-    takeProfit: token.priceUsd * (1 + CONFIG.takeProfitPercent / 100),
+    ...exitLevels(token.priceUsd, CONFIG.stopLossPercent, CONFIG.takeProfitPercent),
     positionSizeSol: CONFIG.maxPositionSol,
     riskRewardRatio: CONFIG.takeProfitPercent / CONFIG.stopLossPercent,
     trendStrength: "unknown",
@@ -644,9 +642,7 @@ async function runCycle(): Promise<void> {
     now,
     !boostBaselineTaken
   );
-  boostSightings = pruneSightings(observed.sightings, now, {
-    freshWindowSeconds: CONFIG.boostFreshWindowSeconds,
-  });
+  boostSightings = pruneSightings(observed.sightings, now, CONFIG.boostFreshWindowSeconds);
   if (!boostBaselineTaken) {
     boostBaselineTaken = true;
     logger.info(
@@ -669,10 +665,6 @@ async function runCycle(): Promise<void> {
   // spending money on promotion, which says nothing about whether the position
   // can be sold again.
   if (CONFIG.instantBuyOnBoostEnabled) {
-    const instantConfig = {
-      enabled: true,
-      boostThreshold: CONFIG.instantBuyBoostThreshold,
-    };
 
     for (const candidate of candidates) {
       if (getActivePositions().length >= MAX_CONCURRENT_POSITIONS) break;
@@ -684,9 +676,7 @@ async function runCycle(): Promise<void> {
       // The boost must be one this run actually watched arrive. Without this
       // the bot buys whatever happens to be sitting in the rolling boosts feed,
       // which may be hours stale and already rolling over.
-      if (!isBoostFresh(candidate.chainId, candidate.address, boostSightings, Date.now(), {
-        freshWindowSeconds: CONFIG.boostFreshWindowSeconds,
-      })) {
+      if (!isBoostFresh(candidate.chainId, candidate.address, boostSightings, Date.now(), CONFIG.boostFreshWindowSeconds)) {
         if ((candidate.boostAmount ?? 0) >= CONFIG.instantBuyBoostThreshold) {
           logger.info(
             `⏱️  ${candidate.symbol}: boost ${candidate.boostAmount} met the threshold but is not fresh ` +
@@ -728,7 +718,7 @@ async function runCycle(): Promise<void> {
           liquidityUsd: candidate.liquidityUsd,
           marketCapUsd: candidate.marketCap,
         },
-        instantConfig,
+        CONFIG.instantBuyBoostThreshold,
         RUG_GATE_CONFIG
       );
 
@@ -1015,7 +1005,6 @@ async function runCycle(): Promise<void> {
           maxRugCheckScore: CONFIG.smallCapMaxRugCheckScore,
           maxRugCheckScoreRaw: CONFIG.maxRugCheckScoreRaw,
           blockDangerRisks: CONFIG.blockDangerRisks,
-          requireRugCheckData: true,
         }
       );
       if (!gate.pass) {

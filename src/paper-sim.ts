@@ -24,6 +24,7 @@ process.env.MAX_TOKEN_AGE_HOURS = process.env.MAX_TOKEN_AGE_HOURS || "168";
 async function main(): Promise<void> {
   const { CONFIG, validateConfig } = await import("./config.js");
   const { parsePairToCandidate, passesInitialFilter } = await import("./scanner.js");
+  const { exitLevels } = await import("./position-sizing.js");
   const {
     initTrader,
     getBalance,
@@ -130,8 +131,7 @@ async function main(): Promise<void> {
       action: "BUY",
       reasoning: "Strong buy pressure and healthy volume/liquidity (simulated signal).",
       entryPrice: token.priceUsd,
-      stopLoss: token.priceUsd * (1 - CONFIG.stopLossPercent / 100),
-      takeProfit: token.priceUsd * (1 + CONFIG.takeProfitPercent / 100),
+      ...exitLevels(token.priceUsd, CONFIG.stopLossPercent, CONFIG.takeProfitPercent),
       positionSizeSol,
       riskRewardRatio: 3,
       trendStrength: "strong_up",

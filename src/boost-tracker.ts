@@ -53,16 +53,6 @@ export interface BoostObservation {
   boostAmount: number;
 }
 
-export interface FreshnessConfig {
-  /**
-   * How long after first sighting a boost still counts as actionable. Beyond
-   * this the opportunity is stale and the instant buy declines it.
-   */
-  freshWindowSeconds: number;
-}
-
-export const DEFAULT_FRESHNESS: FreshnessConfig = { freshWindowSeconds: 120 };
-
 export function boostKey(chainId: string, tokenAddress: string): string {
   return `${chainId}:${tokenAddress}`;
 }
@@ -118,7 +108,11 @@ export function isBoostFresh(
   tokenAddress: string,
   sightings: BoostSightings,
   now: number,
-  config: FreshnessConfig = DEFAULT_FRESHNESS
+  /**
+   * How long after first sighting a boost still counts as actionable. Beyond
+   * this the opportunity is stale and the instant buy declines it.
+   */
+  freshWindowSeconds = 120
 ): boolean {
   const seen = sightings.get(boostKey(chainId, tokenAddress));
   if (!seen) return false;
@@ -126,16 +120,16 @@ export function isBoostFresh(
   // time, so their apparent age is meaningless — never actionable.
   if (seen.baselined) return false;
   const ageSeconds = (now - seen.firstSeenAt) / 1000;
-  return ageSeconds >= 0 && ageSeconds <= config.freshWindowSeconds;
+  return ageSeconds >= 0 && ageSeconds <= freshWindowSeconds;
 }
 
 /** Drop sightings far past any usable window so the map cannot grow unbounded. */
 export function pruneSightings(
   sightings: BoostSightings,
   now: number,
-  config: FreshnessConfig = DEFAULT_FRESHNESS
+  freshWindowSeconds = 120
 ): BoostSightings {
-  const cutoffMs = Math.max(config.freshWindowSeconds * 1000 * 10, 60 * 60 * 1000);
+  const cutoffMs = Math.max(freshWindowSeconds * 1000 * 10, 60 * 60 * 1000);
   const next: BoostSightings = new Map();
   for (const [k, v] of sightings) {
     if (now - v.firstSeenAt < cutoffMs) next.set(k, v);

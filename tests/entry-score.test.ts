@@ -194,7 +194,7 @@ test("thin liquidity fails the gate outright", () => {
 
 /* ------------------------------- instant buy ------------------------------- */
 
-const instantOn = { enabled: true, boostThreshold: 500 };
+const instantOn = 500;
 const healthy = { liquidityUsd: 9000, marketCapUsd: 20000 };
 
 test("a 500 boost on a healthy pair triggers the instant buy", () => {
@@ -208,12 +208,6 @@ test("a boost below the threshold does not trigger it", () => {
   assert.equal(qualifiesForInstantBuy({ ...healthy, boostAmount: 0 }, instantOn).buy, false);
 });
 
-test("instant buy is off unless explicitly enabled", () => {
-  const r = qualifiesForInstantBuy({ ...healthy, boostAmount: 5000 });
-  assert.equal(r.buy, false);
-  assert.match(r.reason, /disabled/);
-});
-
 test("a huge boost still cannot buy through a failing rug gate", () => {
   const thin = qualifiesForInstantBuy(
     { liquidityUsd: 900, marketCapUsd: 20000, boostAmount: 5000 },
@@ -224,7 +218,7 @@ test("a huge boost still cannot buy through a failing rug gate", () => {
 });
 
 test("the threshold is configurable", () => {
-  const at100 = qualifiesForInstantBuy({ ...healthy, boostAmount: 120 }, { enabled: true, boostThreshold: 100 });
+  const at100 = qualifiesForInstantBuy({ ...healthy, boostAmount: 120 }, 100);
   assert.equal(at100.buy, true);
 });
 

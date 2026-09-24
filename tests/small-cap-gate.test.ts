@@ -96,11 +96,6 @@ test("missing RugCheck data fails closed by default", () => {
   assert.match(r.reason ?? "", /unavailable/);
 });
 
-test("missing RugCheck data can be opted to pass instead, explicitly", () => {
-  const lenient = { ...DEFAULT_SMALL_CAP_GATE, requireRugCheckData: false };
-  assert.equal(checkSmallCapGate({ ...baseInput, rugCheck: undefined }, lenient).pass, true);
-});
-
 /* --------------------------------- config -------------------------------- */
 
 test("defaults match the operator's spec exactly", () => {

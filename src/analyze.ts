@@ -5,6 +5,7 @@ import { TokenCandidate } from "./scanner.js";
 import { httpPost } from "./http.js";
 import { logger } from "./logger.js";
 import { normalizeAiAnalysis } from "./services/analysis-normalizer.js";
+import { exitLevels } from "./position-sizing.js";
 import { sanitizeDisplayText } from "./text-sanitize.js";
 
 export interface TradeSignal {
@@ -413,8 +414,7 @@ export async function analyzeToken(candidate: TokenCandidate): Promise<TradeSign
     // felt like on a given response. paper-sim.ts and mcp-server.ts already
     // compute exits from CONFIG the same way; this keeps the real trading
     // path consistent with them.
-    const stopLoss = entryPrice * (1 - CONFIG.stopLossPercent / 100);
-    const takeProfit = entryPrice * (1 + CONFIG.takeProfitPercent / 100);
+    const { stopLoss, takeProfit } = exitLevels(entryPrice, CONFIG.stopLossPercent, CONFIG.takeProfitPercent);
 
     return {
       token: candidate,

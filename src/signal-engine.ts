@@ -20,6 +20,8 @@
  * Position sizing (strict tiers): >= 85 -> 0.3 SOL, >= 80 -> 0.2, >= 70 -> 0.1.
  */
 
+import { sizeForConfidence, type PositionTier } from "./position-sizing.js";
+
 export interface SignalMetrics {
   priceUsd: number;
   volume24h: number;
@@ -51,18 +53,15 @@ export interface HeuristicSignal {
   };
 }
 
-/** Confidence tiers used for strict paper position sizing (SOL per trade). */
-export const SIZE_TIERS: Array<{ minConfidence: number; positionSizeSol: number }> = [
-  { minConfidence: 85, positionSizeSol: 0.3 },
-  { minConfidence: 80, positionSizeSol: 0.2 },
-  { minConfidence: 70, positionSizeSol: 0.1 },
+/** Confidence tiers used for strict paper position sizing (SOL per trade), ascending. */
+export const SIZE_TIERS: PositionTier[] = [
+  { minConfidence: 70, sol: 0.1 },
+  { minConfidence: 80, sol: 0.2 },
+  { minConfidence: 85, sol: 0.3 },
 ];
 
 export function positionSizeForConfidence(confidence: number): number {
-  for (const tier of SIZE_TIERS) {
-    if (confidence >= tier.minConfidence) return tier.positionSizeSol;
-  }
-  return 0;
+  return sizeForConfidence(confidence, SIZE_TIERS, 0);
 }
 
 /**

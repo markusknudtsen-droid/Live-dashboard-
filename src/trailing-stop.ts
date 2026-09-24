@@ -47,6 +47,12 @@ function isPositive(n: number | undefined): n is number {
   return typeof n === "number" && Number.isFinite(n) && n > 0;
 }
 
+/** Whether a position's peak has reached the gain that arms the trail. */
+export function isTrailArmed(entryPrice: number, peakPrice: number, activateAtPercent: number): boolean {
+  if (!isPositive(entryPrice) || !Number.isFinite(activateAtPercent)) return false;
+  return ((peakPrice - entryPrice) / entryPrice) * 100 >= activateAtPercent;
+}
+
 /**
  * A big winner should give back LESS of its peak, not the same flat slice a
  * modest one does. Measured live 2026-09-17: positions that only ever reached
@@ -96,8 +102,7 @@ export function updateTrailingStop(input: TrailingStopInputs): TrailingStopResul
   }
 
   const peakGainPercent = ((peakPrice - entryPrice) / entryPrice) * 100;
-  const armed = Number.isFinite(activateAtPercent) && peakGainPercent >= activateAtPercent;
-  if (!armed) {
+  if (!isTrailArmed(entryPrice, peakPrice, activateAtPercent)) {
     return { peakPrice, stopLoss: currentStopLoss, raised: false, armed: false };
   }
 

@@ -12,7 +12,7 @@ export interface SmallCapGateInputs {
   liquidityUsd: number;
   volume24h: number;
   hasAnySocial: boolean;
-  /** undefined = the RugCheck lookup failed; see requireRugCheckData below. */
+  /** undefined = the RugCheck lookup failed, which fails the gate: unknown is not safe. */
   rugCheck: import("./rugcheck.js").RugCheckReport | undefined;
 }
 
@@ -34,8 +34,6 @@ export interface SmallCapGateConfig {
   maxRugCheckScoreRaw: number;
   /** Reject when RugCheck reports any danger-level risk at all. */
   blockDangerRisks: boolean;
-  /** A missing RugCheck report fails the gate rather than being skipped. */
-  requireRugCheckData: boolean;
 }
 
 export const DEFAULT_SMALL_CAP_GATE: SmallCapGateConfig = {
@@ -48,7 +46,6 @@ export const DEFAULT_SMALL_CAP_GATE: SmallCapGateConfig = {
   maxRugCheckScore: 50,
   maxRugCheckScoreRaw: 5000,
   blockDangerRisks: true,
-  requireRugCheckData: true,
 };
 
 export interface SmallCapGateResult {
@@ -70,11 +67,7 @@ export function checkSmallCapGate(
     return { pass: false, reason: "no social or website listed" };
   }
 
-  if (!input.rugCheck) {
-    return config.requireRugCheckData
-      ? { pass: false, reason: "RugCheck data unavailable and requireRugCheckData is on" }
-      : { pass: true };
-  }
+  if (!input.rugCheck) return { pass: false, reason: "RugCheck data unavailable" };
   const rc = input.rugCheck;
 
   // RugCheck's own verdict first — nothing below can redeem either of these.

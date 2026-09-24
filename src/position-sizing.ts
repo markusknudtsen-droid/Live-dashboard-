@@ -61,6 +61,15 @@ export function sizeForConfidence(confidence: number, tiers: PositionTier[], fal
   return chosen ? chosen.sol : fallbackSol;
 }
 
+/** Stop-loss and take-profit prices for an entry, from percentages below / above it. */
+export function exitLevels(
+  price: number,
+  stopLossPercent: number,
+  takeProfitPercent: number
+): { stopLoss: number; takeProfit: number } {
+  return { stopLoss: price * (1 - stopLossPercent / 100), takeProfit: price * (1 + takeProfitPercent / 100) };
+}
+
 /** Human-readable tiers, for the startup banner. */
 export function describeTiers(tiers: PositionTier[]): string {
   return tiers.map((t) => `${t.minConfidence}%+ → ${t.sol} SOL`).join(", ");
