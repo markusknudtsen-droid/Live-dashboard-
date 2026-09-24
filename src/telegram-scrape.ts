@@ -110,20 +110,16 @@ function postSeq(postId: string): number {
  */
 export async function pollPublicChannel(channelRef: string, timeoutMs = 10_000): Promise<number> {
   const channel = normaliseChannel(channelRef);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
   let html: string;
   try {
     const res = await fetch(`https://t.me/s/${encodeURIComponent(channel)}`, {
-      signal: controller.signal,
+      signal: AbortSignal.timeout(timeoutMs),
       headers: { "user-agent": "Mozilla/5.0" },
     });
     if (!res.ok) return 0;
     html = await res.text();
   } catch {
     return 0;
-  } finally {
-    clearTimeout(timer);
   }
 
   const messages = parsePreviewPage(html);

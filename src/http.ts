@@ -43,6 +43,25 @@ async function requestWithRetry<T>(config: AxiosRequestConfig): Promise<T> {
   throw new Error("HTTP request retries exhausted.");
 }
 
+/**
+ * GET a JSON body with a hard timeout, for the optional third-party sources
+ * (pump.fun, RugCheck, GeckoTerminal, Jupiter pools). Never throws: a network
+ * error, timeout, non-2xx or unparseable body all resolve to null, which every
+ * caller treats as "no data" rather than as a verdict. No retries — these are
+ * polled again on the next cycle anyway.
+ */
+export async function fetchJson(url: string, timeoutMs: number, headers: Record<string, string> = {}): Promise<unknown> {
+  try {
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: { accept: "application/json", ...headers },
+    });
+    return res.ok ? await res.json() : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function httpGet<T>(url: string, config?: AxiosRequestConfig): Promise<T> {
   return requestWithRetry<T>({ ...(config || {}), method: "GET", url });
 }

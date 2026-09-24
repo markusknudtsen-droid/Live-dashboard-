@@ -13,6 +13,8 @@
  * rather than hardcoded to a guess at their exact banding.
  */
 
+import { fetchJson } from "./http.js";
+
 const RUGCHECK_API = "https://api.rugcheck.xyz/v1";
 
 export interface RugCheckReport {
@@ -103,18 +105,12 @@ export async function fetchRugCheckReport(
   const hit = cache.get(mint);
   if (hit && now - hit.at < CACHE_TTL_MS) return hit.report;
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const j = (await fetchJson(`${RUGCHECK_API}/tokens/${encodeURIComponent(mint)}/report`, timeoutMs)) as RcReport | null;
+  if (!j || typeof j !== "object") {
+    cache.set(mint, { at: now, report: undefined });
+    return undefined;
+  }
   try {
-    const res = await fetch(`${RUGCHECK_API}/tokens/${encodeURIComponent(mint)}/report`, {
-      signal: controller.signal,
-      headers: { accept: "application/json" },
-    });
-    if (!res.ok) {
-      cache.set(mint, { at: now, report: undefined });
-      return undefined;
-    }
-    const j = (await res.json()) as RcReport;
 
     const supply = typeof j.token?.supply === "number" && j.token.supply > 0 ? j.token.supply : undefined;
     const holders = Array.isArray(j.topHolders) ? j.topHolders : [];
@@ -157,7 +153,5 @@ export async function fetchRugCheckReport(
   } catch {
     cache.set(mint, { at: now, report: undefined });
     return undefined;
-  } finally {
-    clearTimeout(timer);
   }
 }

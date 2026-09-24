@@ -21,6 +21,7 @@
 
 import { CONFIG } from "./config.js";
 import { logger } from "./logger.js";
+import { fetchJson } from "./http.js";
 
 const JUPITER_POOLS_API = "https://datapi.jup.ag/v1/pools";
 
@@ -194,21 +195,10 @@ export function passesFreshLaunchGate(
 
 /** Newest pools from Jupiter, newest first. Empty on any failure. */
 export async function fetchFreshLaunches(limit = 50, timeoutMs = 8000): Promise<FreshLaunchPool[]> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(`${JUPITER_POOLS_API}?sortBy=timestamp&sortDir=desc&limit=${limit}`, {
-      signal: controller.signal,
-      headers: { accept: "application/json" },
-    });
-    if (!res.ok) return [];
-    const body = (await res.json()) as { pools?: FreshLaunchPool[] };
-    return Array.isArray(body.pools) ? body.pools : [];
-  } catch {
-    return [];
-  } finally {
-    clearTimeout(timer);
-  }
+  const body = (await fetchJson(`${JUPITER_POOLS_API}?sortBy=timestamp&sortDir=desc&limit=${limit}`, timeoutMs)) as {
+    pools?: FreshLaunchPool[];
+  } | null;
+  return Array.isArray(body?.pools) ? body.pools : [];
 }
 
 /**

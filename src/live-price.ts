@@ -21,6 +21,7 @@
  */
 
 import { CONFIG } from "./config.js";
+import { fetchJson } from "./http.js";
 
 export interface LivePrice {
   priceUsd: number;
@@ -87,16 +88,6 @@ export function parseDexScreenerPrice(body: unknown): LivePrice | null {
   return { priceUsd, liquidityUsd: usable(pair?.liquidity?.usd), source: "dexscreener" };
 }
 
-async function getJson(url: string, timeoutMs: number): Promise<unknown | null> {
-  try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs), headers: { accept: "application/json" } });
-    if (!res.ok) return null;
-    return await res.json();
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Price and liquidity for one mint, Jupiter first, DexScreener as fallback.
  * Null only when BOTH sources fail — the caller then skips this tick rather
@@ -109,13 +100,13 @@ export async function fetchLivePrice(
 ): Promise<LivePrice | null> {
   if (CONFIG.useJupiterPriceFeed) {
     const jup = parseJupiterPrice(
-      await getJson(`https://datapi.jup.ag/v1/pools?assetIds=${encodeURIComponent(tokenAddress)}`, timeoutMs)
+      await fetchJson(`https://datapi.jup.ag/v1/pools?assetIds=${encodeURIComponent(tokenAddress)}`, timeoutMs)
     );
     if (jup) return jup;
   }
 
   return parseDexScreenerPrice(
-    await getJson(
+    await fetchJson(
       `${CONFIG.dexScreenerApiUrl}/tokens/v1/${encodeURIComponent(chainId)}/${encodeURIComponent(tokenAddress)}`,
       timeoutMs
     )

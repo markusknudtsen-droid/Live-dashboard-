@@ -32,6 +32,7 @@
  */
 
 import { CONFIG } from "./config.js";
+import { fetchJson } from "./http.js";
 
 const GECKOTERMINAL_API = "https://api.geckoterminal.com/api/v2";
 
@@ -80,26 +81,17 @@ export async function fetchNewPoolMints(chain = "solana", limit = 20, timeoutMs 
   const hit = poolCache.get(key);
   if (hit && ttlMs > 0 && Date.now() - hit.at < ttlMs) return hit.mints;
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(
-      `${GECKOTERMINAL_API}/networks/${encodeURIComponent(chain)}/new_pools?page=1&include=base_token`,
-      { signal: controller.signal, headers: { accept: "application/json" } }
-    );
-    // A rate-limited or failed call serves the last good list if one is still
-    // held, rather than reporting "no new pools" and blinding the scanner for
-    // a cycle. Only a cold cache yields an empty result.
-    if (!res.ok) return hit?.mints ?? [];
-    const j = (await res.json()) as GtResponse;
-    const mints = extractMints(j, limit);
-    poolCache.set(key, { at: Date.now(), mints });
-    return mints;
-  } catch {
-    return hit?.mints ?? [];
-  } finally {
-    clearTimeout(timer);
-  }
+  const j = (await fetchJson(
+    `${GECKOTERMINAL_API}/networks/${encodeURIComponent(chain)}/new_pools?page=1&include=base_token`,
+    timeoutMs
+  )) as GtResponse | null;
+  // A rate-limited or failed call serves the last good list if one is still
+  // held, rather than reporting "no new pools" and blinding the scanner for a
+  // cycle. Only a cold cache yields an empty result.
+  if (!j || typeof j !== "object") return hit?.mints ?? [];
+  const mints = extractMints(j, limit);
+  poolCache.set(key, { at: Date.now(), mints });
+  return mints;
 }
 
 /**

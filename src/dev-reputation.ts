@@ -20,6 +20,8 @@
  * numeric check, and the bonus is withheld — the same outcome as a 404.
  */
 
+import { fetchJson } from "./http.js";
+
 export interface DevReputation {
   followers: number;
   migratedTokens: number;
@@ -97,22 +99,9 @@ export function clearDevReputationCache(): void {
   cache.clear();
 }
 
-async function getJson(url: string, timeoutMs: number): Promise<unknown | undefined> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, {
-      signal: controller.signal,
-      headers: { accept: "application/json", "user-agent": "Mozilla/5.0" },
-    });
-    if (!res.ok) return undefined;
-    return (await res.json()) as unknown;
-  } catch {
-    // Network error, timeout, abort, invalid JSON — all the same outcome.
-    return undefined;
-  } finally {
-    clearTimeout(timer);
-  }
+/** pump.fun refuses requests without a browser user-agent. */
+function getJson(url: string, timeoutMs: number): Promise<unknown> {
+  return fetchJson(url, timeoutMs, { "user-agent": "Mozilla/5.0" });
 }
 
 /**
