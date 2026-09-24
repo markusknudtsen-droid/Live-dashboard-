@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import { CONFIG } from "./config.js";
 import { httpGet } from "./http.js";
 import { logger } from "./logger.js";
@@ -96,10 +97,6 @@ function asNumber(value: string | number | undefined, fallback = 0): number {
 }
 
 /**
- * Scan DexScreener for high-potential memecoin candidates
- * Filters: volume > $10k, liquidity > $5k, age < 72h, buy ratio > 55%
- */
-/**
  * A candidate is worth analysing if it clears the established-coin bar OR the
  * new-coin bar. Keeping them as two separate tests (rather than loosening the
  * one filter) means an established coin still has to prove real trailing
@@ -134,12 +131,7 @@ async function fetchCandidateForMint(mint: string): Promise<TokenCandidate | nul
  * liquidity/volume/age bars as anything else, never bypass them.
  */
 export async function resolveMintsToCandidates(mints: string[]): Promise<TokenCandidate[]> {
-  const out: TokenCandidate[] = [];
-  for (const mint of mints.slice(0, 10)) {
-    const candidate = await fetchCandidateForMint(mint);
-    if (candidate && isWorthAnalysing(candidate)) out.push(candidate);
-  }
-  return out;
+  return (await resolveMintsUnfiltered(mints)).filter(isWorthAnalysing);
 }
 
 /**
@@ -212,10 +204,6 @@ export async function scanForCandidates(): Promise<TokenCandidate[]> {
 
     for (const chain of CONFIG.scanChains) {
       try {
-        await httpGet<unknown>(`${CONFIG.dexScreenerApiUrl}/token-pairs/v1/${chain}/0x0000000000000000000000000000000000000000`, {
-          params: { sort: "volume24h", order: "desc" },
-        });
-
         const memeSearch = await httpGet<DexSearchResponse>(`${CONFIG.dexScreenerApiUrl}/latest/dex/search?q=meme+${chain}`);
         const memePairs = memeSearch.pairs || [];
         for (const pair of memePairs.slice(0, 15)) {
@@ -295,9 +283,6 @@ export function parsePairToCandidate(pair: DexPair, boostAmount?: number): Token
 }
 
 /**
- * Initial filter to remove obvious bad candidates before AI analysis
- */
-/**
  * A young coin cannot satisfy the standard filter, and that is not a tuning
  * problem — it is arithmetic. volume24h is a TRAILING 24-hour figure, so a coin
  * minutes old has almost none of it no matter how hard it is trading right now.
@@ -336,10 +321,6 @@ export function passesInitialFilter(candidate: TokenCandidate): boolean {
   if (!candidate.address || candidate.address.length < 10) return false;
   if (!Number.isFinite(candidate.priceUsd) || candidate.priceUsd <= 0) return false;
   return true;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 if (process.argv[1]?.endsWith("scanner.ts") || process.argv[1]?.endsWith("scanner.js")) {
