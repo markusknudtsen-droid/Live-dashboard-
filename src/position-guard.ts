@@ -73,6 +73,12 @@ export interface RecentExit {
   exitedAt: number;
   /** True when the position closed below entry. */
   wasLoss: boolean;
+  /**
+   * True when a stop closed it — the fixed stop-loss or a trailing stop, even
+   * one that locked in a profit. Optional so exits persisted before this
+   * existed still load (treated as not stopped).
+   */
+  stopped?: boolean;
 }
 
 export interface ReentryConfig {
@@ -122,7 +128,13 @@ export function canReenter(
   // not a mistake to sit out. Only losses serve the cooldown. MAX_BUYS_PER_TOKEN
   // still caps how many times a single token can be entered in one run, so
   // dropping the timer here cannot turn into an unbounded loop on one coin.
-  if (!latest.wasLoss) return { allowed: true };
+  //
+  // A STOPPED exit is different, even in profit: a trailing stop only fires
+  // once the price has fallen well off its peak, so the coin is falling at the
+  // moment it is sold. On 2026-09-24 ASSCAT and CMC were re-bought 17-59s
+  // after profitable trailing exits and lost -51% and -39%. Those serve the
+  // cooldown too; take-profit and ladder exits still re-enter freely.
+  if (!latest.wasLoss && !latest.stopped) return { allowed: true };
 
   const elapsedMinutes = (now - latest.exitedAt) / 60_000;
   if (Number.isFinite(elapsedMinutes) && elapsedMinutes < config.cooldownMinutes) {

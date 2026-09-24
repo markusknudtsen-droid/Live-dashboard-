@@ -1217,9 +1217,14 @@ export async function evaluatePositionAtPrice(
   const trailArmed = CONFIG.trailingStopEnabled && trailIsArmed(position);
   const deferTakeProfit = CONFIG.letWinnersRun && trailArmed;
 
-  const exitReason: "STOP_LOSS" | "TAKE_PROFIT" | null =
+  // A stop sitting above entry is a trailing stop locking in profit; call it
+  // that, so the log and the trade history don't record a winner as a
+  // "STOP_LOSS".
+  const exitReason: "STOP_LOSS" | "TRAILING_STOP" | "TAKE_PROFIT" | null =
     currentPrice <= position.stopLoss
-      ? "STOP_LOSS"
+      ? position.stopLoss > position.entryPrice
+        ? "TRAILING_STOP"
+        : "STOP_LOSS"
       : !deferTakeProfit && currentPrice >= position.takeProfit
         ? "TAKE_PROFIT"
         : null;
@@ -1259,6 +1264,7 @@ export async function evaluatePositionAtPrice(
   if (!exitReason) return;
 
   if (exitReason === "STOP_LOSS") logger.warn(`🛑 STOP LOSS triggered for ${position.tokenSymbol}`);
+  else if (exitReason === "TRAILING_STOP") logger.info(`🔒 TRAILING STOP triggered for ${position.tokenSymbol}`);
   else logger.info(`🎯 TAKE PROFIT triggered for ${position.tokenSymbol}`);
 
   const result = await executeSell(position, exitReason, currentPrice);

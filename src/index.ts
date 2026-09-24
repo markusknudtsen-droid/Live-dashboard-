@@ -861,7 +861,16 @@ async function runCycle(): Promise<void> {
     }
   }
 
-  const buySignals = signals.filter((s) => s.action === "BUY" && s.confidence >= CONFIG.minConfidence);
+  // Both the model's own verdict and the final, modified score must clear the
+  // bar. The modifiers (entry score, Telegram, dev reputation, trend) are cheap
+  // to fake, and exist to tip a coin that already looks good — not to lift a
+  // 50-65% model verdict over MIN_CONFIDENCE on their own.
+  const buySignals = signals.filter(
+    (s) =>
+      s.action === "BUY" &&
+      s.confidence >= CONFIG.minConfidence &&
+      (s.entryContext?.confidenceBeforeModifiers ?? s.confidence) >= CONFIG.minConfidence
+  );
   logger.info(`📊 Results: ${buySignals.length} BUY signals (>=${CONFIG.minConfidence}% confidence)`);
 
   if (buySignals.length === 0) {
@@ -1165,6 +1174,7 @@ async function main(): Promise<void> {
         // nothing. It also made the "N straight losses" read in the exit log
         // count flat trades as losers.
         wasLoss: (event.pnlPercent ?? 0) < 0,
+        stopped: event.reason === "STOP_LOSS" || event.reason === "TRAILING_STOP",
       });
       recentExits = pruneExits(recentExits, Date.now(), pruneConfig());
       // Persist immediately rather than waiting for cycle end. An exit record
@@ -1340,12 +1350,13 @@ async function main(): Promise<void> {
   // Position monitoring runs on its own independent interval, decoupled from
   // the scan/analyze/buy cycle below — see runMonitoringTick()'s comment for
   // why: a stuck cycle (e.g. an AI-provider outage) must never starve
-  // stop-loss/take-profit checks on real open positions. The first tick
-  // fires one scanIntervalSeconds from now, not immediately — the pass just
-  // above already covers right now.
+  // stop-loss/take-profit checks on real open positions. It runs on its own,
+  // faster MONITOR_INTERVAL_SECONDS: at the 10s scan interval, stops set at
+  // -33% filled at -37% to -51% on 2026-09-24. The first tick fires one
+  // interval from now — the pass just above already covers right now.
   setInterval(() => {
     void runMonitoringTick();
-  }, CONFIG.scanIntervalSeconds * 1000);
+  }, CONFIG.monitorIntervalSeconds * 1000);
 
   // Start the scan/analyze/buy cycle loop NOW, without waiting for the
   // preflight. runCycle() checks analysisModelStatus itself: if the

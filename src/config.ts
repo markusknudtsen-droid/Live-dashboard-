@@ -64,6 +64,13 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env) {
     stopLossPercent: parseNumberInRange("STOP_LOSS_PERCENT", env.STOP_LOSS_PERCENT, 33, 1, 95),
     takeProfitPercent: parseNumberInRange("TAKE_PROFIT_PERCENT", env.TAKE_PROFIT_PERCENT, 50, 1, 1000),
     scanIntervalSeconds: parseNumberInRange("SCAN_INTERVAL_SECONDS", env.SCAN_INTERVAL_SECONDS, 60, 5, 3600, true),
+    /**
+     * How often open positions are priced and their stops checked. Separate
+     * from the scan interval: a stop only fills as close to its level as the
+     * last price check allowed. Measured 2026-09-24 at a 10s check: -33% stops
+     * filled at -37% to -51% on fast coins.
+     */
+    monitorIntervalSeconds: parseNumberInRange("MONITOR_INTERVAL_SECONDS", env.MONITOR_INTERVAL_SECONDS, 3, 1, 60, true),
     solanaRpcUrl: env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com",
     dexScreenerApiUrl: env.DEXSCREENER_API_URL || "https://api.dexscreener.com",
     // Jupiter Swap V2 Meta-Aggregator: /order + /execute. Keyless access is
@@ -301,7 +308,11 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env) {
      * "Already in position for X, skipping." was unconditional — no matter how
      * strong a later signal was, a held token could never be topped up.
      */
-    addOnEnabled: parseBoolean(env.ADD_ON_ENABLED, true),
+    //
+    // Off by default since 2026-09-24: the only live add-on fired 20s after
+    // entry on a coin that had just pumped +185%, doubling a position that
+    // then stopped out at -51%.
+    addOnEnabled: parseBoolean(env.ADD_ON_ENABLED, false),
     /** Flat SOL size for a single add-on buy, independent of maxPositionSol. */
     addOnSol: parseNumberInRange("ADD_ON_SOL", env.ADD_ON_SOL, 0.05, 0, 100),
     /** Position must be down at least this many percent to qualify for an add-on. */
@@ -449,7 +460,7 @@ export function validateConfig(config: AppConfig = CONFIG): void {
   console.log(`   Max Position: ${config.maxPositionSol} SOL`);
   console.log(`   Stop Loss: -${config.stopLossPercent}%`);
   console.log(`   Take Profit: +${config.takeProfitPercent}%`);
-  console.log(`   Scan Interval: ${config.scanIntervalSeconds}s`);
+  console.log(`   Scan Interval: ${config.scanIntervalSeconds}s (positions checked every ${config.monitorIntervalSeconds}s)`);
   console.log(`   Chains: ${config.scanChains.join(", ")}`);
   console.log(
     `   Jupiter API: ${config.jupiterApiKey ? "authenticated key configured" : "unauthenticated (free tier)"} @ ${config.jupiterApiBaseUrl}`

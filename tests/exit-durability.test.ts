@@ -66,3 +66,13 @@ test("RECONCILE_EVERY_TICKS is configurable with a sane default", () => {
   assert.equal(buildConfig({}).reconcileEveryTicks, 20);
   assert.equal(buildConfig({ RECONCILE_EVERY_TICKS: "5" }).reconcileEveryTicks, 5);
 });
+
+test("a profitable exit by a stop still serves the cooldown; a take-profit exit does not", () => {
+  const COOL = { cooldownMinutes: 2, blockLosersForRun: false };
+  const at = (stopped: boolean): RecentExit[] => [
+    { tokenAddress: "mintRun", tokenSymbol: "RUN", exitedAt: NOW - 30_000, wasLoss: false, stopped },
+  ];
+  assert.equal(canReenter("mintRun", at(true), NOW, COOL).allowed, false, "trailing stop fired: the coin is falling");
+  assert.equal(canReenter("mintRun", at(false), NOW, COOL).allowed, true, "take-profit: re-entry stays free");
+  assert.equal(canReenter("mintRun", at(true), NOW + 3 * 60_000, COOL).allowed, true, "after the cooldown it is buyable again");
+});
