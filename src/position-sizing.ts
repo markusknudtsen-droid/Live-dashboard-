@@ -19,6 +19,8 @@
  * Pure — the caller supplies the confidence and the fallback.
  */
 
+import { parseNumberPairs } from "./take-profit-ladder.js";
+
 export interface PositionTier {
   /** Minimum final confidence, in percent, for this stake. */
   minConfidence: number;
@@ -35,22 +37,9 @@ export interface PositionTier {
  * depend on the order the operator typed.
  */
 export function parsePositionTiers(spec: string | undefined): PositionTier[] {
-  if (!spec || typeof spec !== "string") return [];
-  const out: PositionTier[] = [];
-  const seen = new Set<number>();
-
-  for (const part of spec.split(",")) {
-    const [rawConfidence, rawSol] = part.split(":");
-    const minConfidence = Number(String(rawConfidence ?? "").trim());
-    const sol = Number(String(rawSol ?? "").trim());
-    if (!Number.isFinite(minConfidence) || minConfidence <= 0 || minConfidence > 100) continue;
-    if (!Number.isFinite(sol) || sol <= 0) continue;
-    if (seen.has(minConfidence)) continue;
-    seen.add(minConfidence);
-    out.push({ minConfidence, sol });
-  }
-
-  return out.sort((a, b) => a.minConfidence - b.minConfidence);
+  return parseNumberPairs(spec, (confidence, sol) => confidence > 0 && confidence <= 100 && sol > 0).map(
+    ([minConfidence, sol]) => ({ minConfidence, sol })
+  );
 }
 
 /**

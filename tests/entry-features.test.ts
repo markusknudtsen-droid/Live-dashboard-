@@ -19,7 +19,6 @@ function token(overrides: Partial<TokenCandidate> = {}): TokenCandidate {
     priceChange6h: 0,
     priceChange24h: 0,
     volume24h: 91_000,
-    volumeChange: 0,
     liquidityUsd: 12_500,
     marketCap: 48_000,
     txns24hBuys: 30,

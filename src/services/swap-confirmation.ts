@@ -33,6 +33,7 @@
 
 import { Connection, VersionedTransaction } from "@solana/web3.js";
 import bs58 from "bs58";
+import { setTimeout as sleep } from "node:timers/promises";
 import { executeJupiterSwap, JupiterExecuteResponse, JupiterOrderResponse } from "./jupiter-client.js";
 import { logger } from "../logger.js";
 
@@ -74,10 +75,6 @@ export function deriveTransactionSignature(tx: VersionedTransaction): string {
     throw new Error("deriveTransactionSignature: transaction has no signature — sign() it first.");
   }
   return bs58.encode(sig);
-}
-
-async function sleep(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**

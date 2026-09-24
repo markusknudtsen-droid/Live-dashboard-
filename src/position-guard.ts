@@ -153,11 +153,10 @@ export function pruneExits(
   now: number,
   config: ReentryConfig = DEFAULT_REENTRY
 ): RecentExit[] {
-  if (config.blockLosersForRun) {
-    // Losses must survive the whole run; only time-expired wins are pruned.
-    return recentExits.filter((e) => e.wasLoss || now - e.exitedAt < config.cooldownMinutes * 60_000);
-  }
-  return recentExits.filter((e) => now - e.exitedAt < config.cooldownMinutes * 60_000);
+  // Under blockLosersForRun, losses must survive the whole run.
+  return recentExits.filter(
+    (e) => (config.blockLosersForRun && e.wasLoss) || now - e.exitedAt < config.cooldownMinutes * 60_000
+  );
 }
 
 /**

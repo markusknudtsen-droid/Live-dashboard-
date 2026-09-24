@@ -16,7 +16,6 @@ export interface TokenCandidate {
   priceChange6h: number;
   priceChange24h: number;
   volume24h: number;
-  volumeChange: number;
   liquidityUsd: number;
   marketCap: number;
   txns24hBuys: number;
@@ -263,7 +262,6 @@ export function parsePairToCandidate(pair: DexPair, boostAmount?: number): Token
       priceChange6h: asNumber(pair.priceChange?.h6, 0),
       priceChange24h: asNumber(pair.priceChange?.h24, 0),
       volume24h,
-      volumeChange: 0,
       liquidityUsd,
       marketCap: asNumber(pair.marketCap ?? pair.fdv, 0),
       txns24hBuys: buys,

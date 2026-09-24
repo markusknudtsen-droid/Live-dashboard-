@@ -16,7 +16,6 @@ function candidate(over: Partial<TokenCandidate> = {}): TokenCandidate {
     priceChange6h: 0,
     priceChange24h: 0,
     volume24h: 0,
-    volumeChange: 0,
     liquidityUsd: 9000,
     marketCap: 50_000,
     txns24hBuys: 10,

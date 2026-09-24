@@ -17,6 +17,27 @@ export interface LadderRung {
 }
 
 /**
+ * Parse "a:b,c:d" into number pairs. Pairs failing `isValid` are dropped (not
+ * thrown), then the rest are deduped on the first number and sorted ascending
+ * by it, so nothing downstream depends on how the operator typed the list.
+ * Shared by the ladder here and position-sizing.ts's tiers.
+ */
+export function parseNumberPairs(
+  spec: string | undefined,
+  isValid: (a: number, b: number) => boolean
+): Array<[number, number]> {
+  if (!spec || typeof spec !== "string") return [];
+  const out: Array<[number, number]> = [];
+  for (const part of spec.split(",")) {
+    const [a, b] = part.split(":").map((v) => Number(String(v ?? "").trim()));
+    if (!Number.isFinite(a) || !Number.isFinite(b) || !isValid(a, b)) continue;
+    if (out.some(([seen]) => seen === a)) continue;
+    out.push([a, b]);
+  }
+  return out.sort((x, y) => x[0] - y[0]);
+}
+
+/**
  * Parse "40:50,100:50,250:50" into rungs — gain percent : percent of the
  * remaining position to sell.
  *
@@ -26,22 +47,10 @@ export interface LadderRung {
  * relies on cannot depend on how the operator typed it.
  */
 export function parseLadder(spec: string | undefined): LadderRung[] {
-  if (!spec || typeof spec !== "string") return [];
-  const out: LadderRung[] = [];
-  const seen = new Set<number>();
-
-  for (const part of spec.split(",")) {
-    const [rawGain, rawSell] = part.split(":");
-    const gainPercent = Number(String(rawGain ?? "").trim());
-    const sellPercent = Number(String(rawSell ?? "").trim());
-    if (!Number.isFinite(gainPercent) || gainPercent <= 0) continue;
-    if (!Number.isFinite(sellPercent) || sellPercent <= 0 || sellPercent > 100) continue;
-    if (seen.has(gainPercent)) continue;
-    seen.add(gainPercent);
-    out.push({ gainPercent, sellFraction: sellPercent / 100 });
-  }
-
-  return out.sort((a, b) => a.gainPercent - b.gainPercent);
+  return parseNumberPairs(spec, (gain, sell) => gain > 0 && sell > 0 && sell <= 100).map(([gainPercent, sell]) => ({
+    gainPercent,
+    sellFraction: sell / 100,
+  }));
 }
 
 /**

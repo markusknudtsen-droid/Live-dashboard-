@@ -62,36 +62,30 @@ function sanitizeIfString<T>(value: T): T {
  * that gap for every consumer regardless of which bot version originally
  * wrote the file.
  */
+/**
+ * Sanitize one string field on every entry of a restored list.
+ *
+ * This file explicitly tolerates malformed entries — a persisted null, a
+ * stray primitive, anything isRestorablePosition below is built to reject
+ * individually. Accessing a field on a non-object entry would throw, and
+ * since loadState() doesn't distinguish "one bad entry" from "totally broken
+ * file", it would discard every OTHER, valid position too. So a non-object
+ * entry passes through untouched for the downstream validator to reject.
+ */
+function sanitizeField<T>(list: T[], key: keyof T): T[] {
+  return list.map((entry) =>
+    entry && typeof entry === "object" ? { ...entry, [key]: sanitizeIfString(entry[key]) } : entry
+  );
+}
+
 function sanitizeRestoredState(state: BotState): BotState {
   return {
     ...state,
-    // This file explicitly tolerates malformed entries — a persisted null,
-    // a stray primitive, anything isRestorablePosition below is specifically
-    // built to individually reject — the array itself is only shape-checked
-    // (Array.isArray) above, not its elements. Accessing .tokenSymbol on a
-    // non-object entry would throw here, and since loadState() doesn't
-    // distinguish "one bad entry" from "totally broken file", it would
-    // discard every position (fail open to the empty default) — losing every
-    // OTHER, valid position too.
-    // Pass a non-object entry through untouched so the existing downstream
-    // validator still gets to reject it individually, same as before this
-    // sanitization step existed.
-    activePositions: state.activePositions.map((position) => {
-      if (!position || typeof position !== "object") return position;
-      return { ...position, tokenSymbol: sanitizeIfString(position.tokenSymbol) };
-    }),
-    tradeHistory: state.tradeHistory.map((entry) => {
-      if (!entry || typeof entry !== "object") return entry;
-      return { ...entry, symbol: sanitizeIfString(entry.symbol) };
-    }),
-    // Same reasoning as above: canReenter() builds its block reason from this
-    // symbol and index.ts logs that reason verbatim, so a restored entry
-    // reaches a log line without passing through the open-position path that
-    // normally sanitizes. Absent field stays absent.
-    recentExits: state.recentExits?.map((exit) => {
-      if (!exit || typeof exit !== "object") return exit;
-      return { ...exit, tokenSymbol: sanitizeIfString(exit.tokenSymbol) };
-    }),
+    activePositions: sanitizeField(state.activePositions, "tokenSymbol"),
+    tradeHistory: sanitizeField(state.tradeHistory, "symbol"),
+    // canReenter() builds its block reason from this symbol and index.ts logs
+    // it verbatim, so it needs the same treatment. Absent field stays absent.
+    recentExits: state.recentExits && sanitizeField(state.recentExits, "tokenSymbol"),
   };
 }
 

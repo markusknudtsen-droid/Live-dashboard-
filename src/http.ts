@@ -1,4 +1,5 @@
 import axios, { AxiosRequestConfig } from "axios";
+import { setTimeout as sleep } from "node:timers/promises";
 import { CONFIG } from "./config.js";
 
 // Exported so callers that catch an error AFTER requestWithRetry has already
@@ -15,10 +16,6 @@ export function isRetryableError(error: unknown): boolean {
   const status = error.response?.status;
   if (!status) return true;
   return status === 408 || status === 425 || status === 429 || status >= 500;
-}
-
-async function sleep(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function requestWithRetry<T>(config: AxiosRequestConfig): Promise<T> {

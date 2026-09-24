@@ -147,7 +147,3 @@ export async function pollPublicChannel(channelRef: string, timeoutMs = 10_000):
   lastSeenSeq.set(channel, maxSeq);
   return sinceSeq === 0 ? 0 : found;
 }
-
-export function resetScrapeCursors(): void {
-  lastSeenSeq.clear();
-}

@@ -40,7 +40,6 @@ function makeSignal(overrides: Partial<TokenCandidateT> = {}): TradeSignalT {
     priceChange6h: 10,
     priceChange24h: 20,
     volume24h: 1_000_000,
-    volumeChange: 0,
     liquidityUsd: 500_000,
     marketCap: 100_000_000,
     txns24hBuys: 800,

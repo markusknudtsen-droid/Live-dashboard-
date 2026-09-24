@@ -275,7 +275,6 @@ function buildFreshLaunchSignal(fresh: FreshLaunchCandidate): TradeSignal {
     priceChange6h: 0,
     priceChange24h: 0,
     volume24h: fresh.buyVolume5m,
-    volumeChange: 0,
     liquidityUsd: fresh.liquidityUsd,
     marketCap: fresh.marketCapUsd,
     txns24hBuys: 0,
