@@ -156,6 +156,30 @@ function recordNonSaleExit(tokenAddress: string, tokenSymbol: string): void {
   recentExits = pruneExits(recentExits, Date.now(), pruneConfig());
 }
 
+/** Record a buy attempt in the trade history and, on success, the per-run buy count. */
+function recordBuyResult(
+  symbol: string,
+  tokenAddress: string,
+  confidence: number,
+  result: { success: boolean; error?: string; txSignature?: string },
+  label: string
+): void {
+  tradeHistory.push({
+    timestamp: Date.now(),
+    symbol,
+    action: "BUY",
+    confidence,
+    result: result.success ? "SUCCESS" : `FAILED: ${result.error}`,
+    txSignature: result.txSignature,
+  });
+  if (result.success) {
+    logger.info(`✅ ${label} executed: ${symbol}`);
+    buyCounts = recordBuy(buyCounts, tokenAddress, symbol);
+  } else {
+    logger.warn(`❌ ${label} failed: ${result.error}`);
+  }
+}
+
 /**
  * Whether a token may be bought, given what has already been exited and how
  * many times it has already been bought this run. Shared by the instant-buy
@@ -190,14 +214,6 @@ function reentryBlocked(tokenAddress: string, symbol: string, useNewCoinCooldown
   return false;
 }
 
-/**
- * Build the TradeSignal an instant buy needs, without a model round-trip.
- *
- * Exit levels come from the operator's configured percentages, exactly as they
- * would for an analysed trade — the boost decides WHETHER to buy, never how
- * much risk to take. Confidence is recorded as 100 only to denote "did not go
- * through the model"; it is never compared against minConfidence on this path.
- */
 /**
  * Scan Jupiter's newest pools and buy anything that clears the fresh-launch
  * gate, at its own size and take-profit.
@@ -235,21 +251,7 @@ async function scanFreshLaunches(): Promise<void> {
         `${fresh.organicBuyPercent.toFixed(1)}% organic`
     );
 
-    const result = await executeBuy(buildFreshLaunchSignal(fresh));
-    tradeHistory.push({
-      timestamp: Date.now(),
-      symbol: fresh.symbol,
-      action: "BUY",
-      confidence: 100,
-      result: result.success ? "SUCCESS" : `FAILED: ${result.error}`,
-      txSignature: result.txSignature,
-    });
-    if (result.success) {
-      logger.info(`✅ Fresh-launch buy executed: ${fresh.symbol}`);
-      buyCounts = recordBuy(buyCounts, fresh.address, fresh.symbol);
-    } else {
-      logger.warn(`❌ Fresh-launch buy failed: ${result.error}`);
-    }
+    recordBuyResult(fresh.symbol, fresh.address, 100, await executeBuy(buildFreshLaunchSignal(fresh)), "Fresh-launch buy");
     await persistRuntimeState();
   }
 }
@@ -310,6 +312,14 @@ function buildFreshLaunchSignal(fresh: FreshLaunchCandidate): TradeSignal {
   };
 }
 
+/**
+ * Build the TradeSignal an instant buy needs, without a model round-trip.
+ *
+ * Exit levels come from the operator's configured percentages, exactly as they
+ * would for an analysed trade — the boost decides WHETHER to buy, never how
+ * much risk to take. Confidence is recorded as 100 only to denote "did not go
+ * through the model"; it is never compared against minConfidence on this path.
+ */
 function buildInstantBuySignal(token: TokenCandidate): TradeSignal {
   return {
     token,
@@ -356,21 +366,6 @@ async function persistRuntimeState(): Promise<void> {
 }
 
 /**
- * Position monitoring runs on its own independent schedule (see main()),
- * separate from the scan/analyze/buy cycle below — a provider outage can
- * make batchAnalyze() spend its full retry/timeout budget on every one of
- * up to 5 candidates sequentially (potentially several minutes), and
- * runScheduledCycle()'s cycleInProgress guard means a slow cycle blocks
- * every interval tick behind it. If monitoring lived inside that same
- * cycle, an AI-provider outage would starve stop-loss/take-profit checks on
- * real open positions for exactly as long as it starves analysis — the
- * opposite of the guarantee the rest of this file works to provide.
- * monitoringInProgress mirrors cycleInProgress so overlapping monitoring
- * ticks can't double-evaluate (and potentially double-sell) the same
- * position; it's a separate flag because the two loops are now independent
- * and neither should be able to block the other.
- */
-/**
  * Reconciliation only ran at startup, so a position sold by hand mid-run stayed
  * in the bot's book: it kept pricing a coin it no longer owned, and the exit was
  * never recorded, leaving the token free to be bought straight back. Running it
@@ -408,6 +403,17 @@ async function reconcileDuringRun(): Promise<void> {
   await persistRuntimeState();
 }
 
+/**
+ * Position monitoring runs on its own independent schedule (see main()),
+ * separate from the scan/analyze/buy cycle — a provider outage can make
+ * batchAnalyze() spend its full retry/timeout budget on every candidate, and
+ * runScheduledCycle()'s cycleInProgress guard means a slow cycle blocks every
+ * interval tick behind it. If monitoring lived inside that same cycle, an
+ * AI-provider outage would starve stop-loss/take-profit checks on real open
+ * positions for exactly as long as it starves analysis. monitoringInProgress
+ * mirrors cycleInProgress so overlapping ticks can't double-evaluate (and
+ * potentially double-sell) the same position.
+ */
 async function runMonitoringTick(): Promise<void> {
   if (monitoringInProgress) return;
   monitoringInProgress = true;
@@ -449,13 +455,7 @@ async function checkHeldPositionsForBearishExit(): Promise<void> {
     });
   if (due.length === 0) return;
 
-  let refreshed: Awaited<ReturnType<typeof resolveMintsUnfiltered>>;
-  try {
-    refreshed = await resolveMintsUnfiltered(due);
-  } catch (error) {
-    logger.debug(`Bearish-exit recheck skipped: ${error instanceof Error ? error.message : String(error)}`);
-    return;
-  }
+  const refreshed = await resolveMintsUnfiltered(due);
   for (const c of refreshed) positionRecheckAt.set(c.address, now);
   if (refreshed.length === 0) return;
 
@@ -606,60 +606,32 @@ async function runCycle(): Promise<void> {
   };
   tagSource(candidates, "dexscreener");
 
-  // Telegram is a candidate source: it surfaces coins the DexScreener feeds
-  // never show. Resolved candidates still pass isWorthAnalysing() inside
-  // resolveMintsToCandidates(), so a mention cannot bypass the liquidity/age
-  // bars that gate everything else.
+  // Extra discovery sources supply mint addresses only. Each is resolved
+  // through resolveMintsToCandidates(), so every field is real DexScreener
+  // data and nothing bypasses isWorthAnalysing()'s liquidity/age bars.
+  const addSource = async (mints: string[], source: string, logLabel?: string): Promise<void> => {
+    const fresh = mints.filter((m) => !candidates.some((c) => c.address === m));
+    if (fresh.length === 0) return;
+    const resolved = await resolveMintsToCandidates(fresh);
+    if (logLabel && resolved.length > 0) logger.info(`${logLabel}: ${resolved.length} resolved to candidates`);
+    tagSource(resolved, source);
+    candidates = [...candidates, ...resolved];
+  };
+
+  // Telegram surfaces coins the DexScreener feeds never show.
   if (CONFIG.telegramEnabled || CONFIG.telegramScrapeChannels.length > 0) {
-    const mentioned = recentMentionedMints(Date.now(), CONFIG.telegramSignalTtlMinutes)
-      .filter((m) => !candidates.some((c) => c.address === m));
-    if (mentioned.length > 0) {
-      const resolved = await resolveMintsToCandidates(mentioned);
-      tagSource(resolved, "telegram");
-      candidates = [...candidates, ...resolved];
-    }
+    await addSource(recentMentionedMints(Date.now(), CONFIG.telegramSignalTtlMinutes), "telegram");
   }
-
-  // GeckoTerminal is a second discovery source, alongside DexScreener: its
-  // new_pools feed is sorted by actual pool-creation time, which none of
-  // DexScreener's own feeds are (all three are biased toward coins that have
-  // already gained volume, boost spend, or search relevance). It supplies
-  // mint addresses only — everything else is fetched from DexScreener via the
-  // same resolveMintsToCandidates() path used above, so a GeckoTerminal find
-  // gets real social/paid-info data rather than being built on fields
-  // GeckoTerminal never carries, and cannot bypass isWorthAnalysing() either.
+  // GeckoTerminal's new_pools feed is sorted by actual pool-creation time,
+  // which none of DexScreener's feeds are (all biased toward coins that have
+  // already gained volume, boost spend, or search relevance).
   if (CONFIG.geckoTerminalEnabled) {
-    const gtMints = (await fetchNewPoolMints(undefined, CONFIG.geckoTerminalNewPoolsLimit)).filter(
-      (addr) => !candidates.some((c) => c.address === addr)
-    );
-    if (gtMints.length > 0) {
-      const resolved = await resolveMintsToCandidates(gtMints);
-      if (resolved.length > 0) {
-        logger.info(`🦎 GeckoTerminal: ${resolved.length} new pool(s) resolved to candidates`);
-      }
-      tagSource(resolved, "geckoterminal");
-      candidates = [...candidates, ...resolved];
-    }
+    await addSource(await fetchNewPoolMints(undefined, CONFIG.geckoTerminalNewPoolsLimit), "geckoterminal", "🦎 GeckoTerminal");
   }
-
-  // pump.fun's own creation feed — the earliest a Solana meme coin is visible
-  // anywhere, well before DexScreener indexes a pool for it. Same
-  // discovery-only contract as GeckoTerminal above: mints in,
-  // resolveMintsToCandidates() supplies every real field, so a coin too new to
-  // have a resolvable pool simply drops out here instead of being traded on
-  // data nobody fetched.
+  // pump.fun's creation feed — the earliest a Solana meme coin is visible
+  // anywhere. A coin too new to have a resolvable pool simply drops out.
   if (CONFIG.pumpfunDiscoveryEnabled) {
-    const pumpMints = (await fetchNewPumpMints(CONFIG.pumpfunDiscoveryLimit)).filter(
-      (addr) => !candidates.some((c) => c.address === addr)
-    );
-    if (pumpMints.length > 0) {
-      const resolved = await resolveMintsToCandidates(pumpMints);
-      if (resolved.length > 0) {
-        logger.info(`💊 pump.fun: ${resolved.length} new mint(s) resolved to candidates`);
-      }
-      tagSource(resolved, "pumpfun");
-      candidates = [...candidates, ...resolved];
-    }
+    await addSource(await fetchNewPumpMints(CONFIG.pumpfunDiscoveryLimit), "pumpfun", "💊 pump.fun");
   }
 
   // Fold this poll into the boost sighting record BEFORE any buy decision, so
@@ -775,21 +747,7 @@ async function runCycle(): Promise<void> {
       if (instantSignal.entryContext) {
         instantSignal.entryContext.source = sourceByAddress.get(candidate.address);
       }
-      const result = await executeBuy(instantSignal);
-      tradeHistory.push({
-        timestamp: Date.now(),
-        symbol: candidate.symbol,
-        action: "BUY",
-        confidence: 100,
-        result: result.success ? "SUCCESS" : `FAILED: ${result.error}`,
-        txSignature: result.txSignature,
-      });
-      if (result.success) {
-        logger.info("✅ Instant buy executed");
-        buyCounts = recordBuy(buyCounts, candidate.address, candidate.symbol);
-      } else {
-        logger.warn(`❌ Instant buy failed: ${result.error}`);
-      }
+      recordBuyResult(candidate.symbol, candidate.address, 100, await executeBuy(instantSignal), "Instant buy");
       await persistRuntimeState();
     }
   }
@@ -872,24 +830,10 @@ async function runCycle(): Promise<void> {
       bonus: CONFIG.devReputationBonus,
     };
     for (const s of signals) {
-      try {
-        const creator = await fetchCreatorWallet(s.token.address);
-        if (!creator) continue;
-        const rep = await fetchDevReputation(creator);
-        const { bonus, reason } = devReputationBonus(rep, repConfig);
-        if (bonus > 0) {
-          const before = s.confidence;
-          s.confidence = Math.min(100, s.confidence + bonus);
-          recordConfidenceBonus(s, "devReputation", s.confidence - before);
-          logger.info(`👤 ${s.token.symbol}: ${before}% → ${s.confidence}% (${reason})`);
-        }
-      } catch (error) {
-        logger.debug(
-          `Dev reputation lookup skipped for ${s.token.symbol}: ${
-            error instanceof Error ? error.message : String(error)
-          }`
-        );
-      }
+      const creator = await fetchCreatorWallet(s.token.address);
+      if (!creator) continue;
+      const { bonus, reason } = devReputationBonus(await fetchDevReputation(creator), repConfig);
+      applyBonus(s, "devReputation", bonus, `👤 ${reason}`);
     }
   }
 
@@ -900,12 +844,7 @@ async function runCycle(): Promise<void> {
     for (const s of signals) {
       const sig = getTelegramSignal(s.token.address, Date.now(), CONFIG.telegramSignalTtlMinutes);
       if (sig) {
-        const before = s.confidence;
-        s.confidence = Math.min(100, s.confidence + CONFIG.telegramMentionBonus);
-        recordConfidenceBonus(s, "telegram", s.confidence - before);
-        logger.info(
-          `📡 ${s.token.symbol}: ${before}% → ${s.confidence}% (+${CONFIG.telegramMentionBonus} mentioned in ${sig.channel})`
-        );
+        applyBonus(s, "telegram", CONFIG.telegramMentionBonus, `📡 +${CONFIG.telegramMentionBonus} mentioned in ${sig.channel}`);
       }
     }
   }
@@ -919,12 +858,7 @@ async function runCycle(): Promise<void> {
     for (const s of signals) {
       const bucket = extractBucket(`${s.token.symbol} ${s.token.name}`);
       const { bonus, reason } = trendBonus(bucket, recentBucketExits, Date.now());
-      if (bonus > 0) {
-        const before = s.confidence;
-        s.confidence = Math.min(100, s.confidence + bonus);
-        recordConfidenceBonus(s, "narrativeTrend", s.confidence - before);
-        logger.info(`📈 ${s.token.symbol}: ${before}% → ${s.confidence}% (${reason})`);
-      }
+      applyBonus(s, "narrativeTrend", bonus, `📈 ${reason}`);
     }
   }
 
@@ -940,7 +874,6 @@ async function runCycle(): Promise<void> {
 
   const activePositions = getActivePositions();
 
-  let slotsAvailable: number;
   if (CONFIG.requireProfitableFirstTrade) {
     const gate = shouldSkipNewEntries(firstTradeValidated, activePositions.length);
     if (gate.skip) {
@@ -948,19 +881,14 @@ async function runCycle(): Promise<void> {
       await persistRuntimeState();
       return;
     }
-    slotsAvailable = maxNewEntries(firstTradeValidated, MAX_CONCURRENT_POSITIONS, activePositions.length);
-    if (slotsAvailable <= 0) {
-      logger.warn(`Max concurrent positions (${MAX_CONCURRENT_POSITIONS}) reached. Skipping new entries.`);
-      await persistRuntimeState();
-      return;
-    }
-  } else {
-    if (activePositions.length >= MAX_CONCURRENT_POSITIONS) {
-      logger.warn(`Max concurrent positions (${MAX_CONCURRENT_POSITIONS}) reached. Skipping new entries.`);
-      await persistRuntimeState();
-      return;
-    }
-    slotsAvailable = MAX_CONCURRENT_POSITIONS - activePositions.length;
+  }
+  const slotsAvailable = CONFIG.requireProfitableFirstTrade
+    ? maxNewEntries(firstTradeValidated, MAX_CONCURRENT_POSITIONS, activePositions.length)
+    : MAX_CONCURRENT_POSITIONS - activePositions.length;
+  if (slotsAvailable <= 0) {
+    logger.warn(`Max concurrent positions (${MAX_CONCURRENT_POSITIONS}) reached. Skipping new entries.`);
+    await persistRuntimeState();
+    return;
   }
 
   const tradesToExecute = buySignals.slice(0, slotsAvailable);
@@ -1120,28 +1048,21 @@ async function runCycle(): Promise<void> {
       }
     }
 
-    const result = await executeBuy(signal);
-
-    tradeHistory.push({
-      timestamp: Date.now(),
-      symbol: signal.token.symbol,
-      action: "BUY",
-      confidence: signal.confidence,
-      result: result.success ? "SUCCESS" : `FAILED: ${result.error}`,
-      txSignature: result.txSignature,
-    });
-
-    if (result.success) {
-      logger.info("✅ Trade executed successfully");
-      buyCounts = recordBuy(buyCounts, signal.token.address, signal.token.symbol);
-    } else {
-      logger.warn(`❌ Trade failed: ${result.error}`);
-    }
+    recordBuyResult(signal.token.symbol, signal.token.address, signal.confidence, await executeBuy(signal), "Trade");
   }
 
   const elapsed = ((Date.now() - cycleStart) / 1000).toFixed(1);
   logger.info(`⏱️ Cycle completed in ${elapsed}s`);
   await persistRuntimeState();
+}
+
+/** Add a confidence bonus (capped at 100), record it on the entry context, and log why. */
+function applyBonus(s: TradeSignal, modifier: string, bonus: number, reason: string): void {
+  if (bonus <= 0) return;
+  const before = s.confidence;
+  s.confidence = Math.min(100, s.confidence + bonus);
+  recordConfidenceBonus(s, modifier, s.confidence - before);
+  logger.info(`${s.token.symbol}: ${before}% → ${s.confidence}% (${reason})`);
 }
 
 function logWatchSignals(signals: TradeSignal[]): void {
@@ -1387,11 +1308,6 @@ async function main(): Promise<void> {
         `MAX_POSITION_SOL to use the configured slot count.`
     );
   }
-  logger.info(`Bot starting with ${CONFIG.scanIntervalSeconds}s scan interval`);
-  logger.info(`Min confidence for trade: ${CONFIG.minConfidence}%`);
-  logger.info(`Max position size: ${CONFIG.maxPositionSol} SOL`);
-  logger.info(`Stop loss: -${CONFIG.stopLossPercent}%`);
-  logger.info(`Take profit: +${CONFIG.takeProfitPercent}%`);
   if (CONFIG.requireProfitableFirstTrade) {
     logger.info(`🔒 First-trade validation gate: ${describeGateState(firstTradeValidated)}`);
   }
