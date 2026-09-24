@@ -17,12 +17,12 @@ import { decideSweep } from "./profit-sweep.js";
 import { TradeSignal } from "./analyze.js";
 import { buildEntryFeatures, type EntryFeatures } from "./entry-features.js";
 import { logger } from "./logger.js";
-import { httpGet } from "./http.js";
-import { getJupiterQuote, isValidSolanaMint, SOL_MINT } from "./services/jupiter-client.js";
+import { getJupiterQuote, isValidSolanaMint, SOL_MINT, type JupiterOrderResponse } from "./services/jupiter-client.js";
 import { forcePriorityFee } from "./services/priority-fee.js";
 import { nextLadderRung } from "./take-profit-ladder.js";
 import { fetchLivePrice } from "./live-price.js";
-import { confirmOrRecoverSwap, deriveTransactionSignature } from "./services/swap-confirmation.js";
+import { confirmOrRecoverSwap, deriveTransactionSignature, type SwapConfirmResult } from "./services/swap-confirmation.js";
+import { setTimeout as sleep } from "node:timers/promises";
 
 export interface TradeResult {
   success: boolean;
@@ -111,23 +111,6 @@ export interface ActivePosition {
   ladderRungsTaken?: number;
 }
 
-interface DexPairPrice {
-  priceUsd?: string | number;
-  /**
-   * DexScreener has always sent this on the same payload monitorPositions()
-   * already fetches; it simply was not read. Watching it is what lets a drain
-   * be seen as it happens instead of inferred from price afterwards.
-   */
-  liquidity?: { usd?: string | number };
-}
-
-/**
- * The raw base-unit amount to sell for a position: never more than the
- * wallet actually holds, and never more than this position itself recorded
- * having bought. Exported so the cap can be exercised without a live RPC
- * connection or Jupiter round-trip - see tokenAmountRaw's doc comment for
- * the failure ($SOF, 2026-09-17) this replaces.
- */
 /**
  * Positions already warned about an inert rug exit, so the warning is emitted
  * once per position instead of on every monitoring cycle. Cleared for a token
@@ -136,6 +119,13 @@ interface DexPairPrice {
  */
 const rugExitInertWarned = new Set<string>();
 
+/**
+ * The raw base-unit amount to sell for a position: never more than the
+ * wallet actually holds, and never more than this position itself recorded
+ * having bought. Exported so the cap can be exercised without a live RPC
+ * connection or Jupiter round-trip - see tokenAmountRaw's doc comment for
+ * the failure ($SOF, 2026-09-17) this replaces.
+ */
 export function capSellAmount(walletRaw: bigint, positionRaw: bigint | undefined): bigint {
   // FAILS CLOSED. Without a recorded buy quantity there is no way to tell which
   // part of the wallet's balance belongs to the bot, and this wallet is also
@@ -336,11 +326,6 @@ function findPositionIndex(position: ActivePosition): number {
 }
 
 /**
- * Whether the trailing stop has armed for this position — i.e. its peak has
- * reached the activation gain, so the stop is now trailing rather than sitting
- * at the original level.
- */
-/**
  * Force CONFIG.priorityFeeSol onto a Jupiter-assembled swap, before signing.
  *
  * Jupiter's /order sets its own prioritizationFeeLamports (~0.0002 SOL) and
@@ -366,6 +351,29 @@ function applyPriorityFee(tx: VersionedTransaction, label: string): void {
   }
 }
 
+/**
+ * Sign a Jupiter order locally and land it. The signature is derived BEFORE
+ * calling Jupiter: it is the transaction's own, known regardless of whether
+ * Jupiter ever answers — see swap-confirmation.ts for why an unanswered
+ * /execute is not the same as "this did not happen".
+ */
+async function signAndExecute(
+  order: JupiterOrderResponse,
+  transactionBase64: string,
+  label: string
+): Promise<SwapConfirmResult> {
+  const transaction = VersionedTransaction.deserialize(Buffer.from(transactionBase64, "base64"));
+  applyPriorityFee(transaction, label);
+  transaction.sign([wallet]);
+  const signed = Buffer.from(transaction.serialize()).toString("base64");
+  return confirmOrRecoverSwap(connection, order, signed, deriveTransactionSignature(transaction));
+}
+
+/**
+ * Whether the trailing stop has armed for this position — i.e. its peak has
+ * reached the activation gain, so the stop is now trailing rather than sitting
+ * at the original level.
+ */
 export function trailIsArmed(position: ActivePosition): boolean {
   if (!Number.isFinite(position.entryPrice) || position.entryPrice <= 0) return false;
   const peak = position.peakPrice ?? position.entryPrice;
@@ -539,7 +547,7 @@ async function executeAddOnLocked(position: ActivePosition, signal: TradeSignal,
   });
 
   // A position closed (sold out, rugged) while this was queued must not be
-  // topped up - same stale-reference guard executeSellLocked already uses.
+  // topped up - same stale-reference guard sellLocked already uses.
   if (findPositionIndex(position) === -1) return failure("Position already closed");
   if (position.addOnTaken) return failure("Add-on already used for this position");
 
@@ -567,8 +575,9 @@ async function executeAddOnLocked(position: ActivePosition, signal: TradeSignal,
     position.addOnTaken = true;
   }
 
+  let txSignature: string;
   if (CONFIG.dryRun) {
-    const txSignature = generateDryRunTxSignature();
+    txSignature = generateDryRunTxSignature();
     paperBalanceSol -= addOnSol;
 
     // No real quote exists in DRY_RUN, so token quantity is only implied by
@@ -576,60 +585,34 @@ async function executeAddOnLocked(position: ActivePosition, signal: TradeSignal,
     const oldQty = position.amountSol / position.entryPrice;
     const newQty = addOnSol / token.priceUsd;
     applyAddOn(weightedAverageEntryPrice(oldQty, position.entryPrice, newQty, token.priceUsd));
-
     logger.info(`🧪 [DRY RUN] Add-on executed. New avg entry: $${position.entryPrice.toFixed(10)}. Fake TX: ${txSignature}`);
-    emitTrade({
-      type: "BUY",
-      symbol: token.symbol,
-      tokenAddress: token.address,
-      chainId: token.chainId,
-      amountSol: addOnSol,
-      price: token.priceUsd,
-      paper: true,
-      txSignature,
-      timestamp: Date.now(),
-      confidence: signal.confidence,
-      features: buildEntryFeatures(signal, "add-on"),
-    });
-    return {
-      success: true,
-      txSignature,
-      entryPrice: position.entryPrice,
-      amountSol: addOnSol,
-      tokenAddress: token.address,
-      tokenSymbol: token.symbol,
-      timestamp: Date.now(),
-    };
+  } else {
+    const amountLamports = Math.floor(addOnSol * LAMPORTS_PER_SOL);
+    const order = await getJupiterQuote(SOL_MINT, token.address, amountLamports, wallet.publicKey.toBase58());
+    if (!order?.transaction || !order.requestId) return failure("No valid Jupiter Swap V2 order found");
+
+    const execution = await signAndExecute(order, order.transaction, "ADD-ON");
+    if (!execution.success || !execution.signature) {
+      return failure(execution.error ?? "Jupiter execution failed");
+    }
+
+    // getJupiterQuote() itself already rejects a response with no outAmount
+    // before returning it (same invariant executeBuyLocked relies on) — this is
+    // a belt-and-suspenders type guard, not an expected runtime path.
+    if (!order.outAmount) return failure("Jupiter order settled with no outAmount");
+
+    // Raw base-unit quantities as weights - decimals cancel in the ratio, and
+    // this is the same quantity capSellAmount relies on for sell-sizing, so the
+    // combined total must be exact (BigInt), not a float approximation.
+    const oldRaw = position.tokenAmountRaw ? BigInt(position.tokenAmountRaw) : 0n;
+    const newRaw = BigInt(order.outAmount);
+    position.tokenAmountRaw = (oldRaw + newRaw).toString();
+    applyAddOn(weightedAverageEntryPrice(Number(oldRaw), position.entryPrice, Number(newRaw), token.priceUsd));
+
+    txSignature = execution.signature;
+    logger.info(`✅ Add-on executed! New avg entry: $${position.entryPrice.toFixed(10)}. TX: ${txSignature}`);
   }
 
-  const amountLamports = Math.floor(addOnSol * LAMPORTS_PER_SOL);
-  const order = await getJupiterQuote(SOL_MINT, token.address, amountLamports, wallet.publicKey.toBase58());
-  if (!order?.transaction || !order.requestId) return failure("No valid Jupiter Swap V2 order found");
-
-  const transaction = VersionedTransaction.deserialize(Buffer.from(order.transaction, "base64"));
-  applyPriorityFee(transaction, "ADD-ON");
-  transaction.sign([wallet]);
-  const signedTransaction = Buffer.from(transaction.serialize()).toString("base64");
-  const ownSignature = deriveTransactionSignature(transaction);
-  const execution = await confirmOrRecoverSwap(connection, order, signedTransaction, ownSignature);
-  if (!execution.success || !execution.signature) {
-    return failure(execution.error ?? "Jupiter execution failed");
-  }
-
-  // getJupiterQuote() itself already rejects a response with no outAmount
-  // before returning it (same invariant executeBuyLocked relies on) — this is
-  // a belt-and-suspenders type guard, not an expected runtime path.
-  if (!order.outAmount) return failure("Jupiter order settled with no outAmount");
-
-  // Raw base-unit quantities as weights - decimals cancel in the ratio, and
-  // this is the same quantity capSellAmount relies on for sell-sizing, so the
-  // combined total must be exact (BigInt), not a float approximation.
-  const oldRaw = position.tokenAmountRaw ? BigInt(position.tokenAmountRaw) : 0n;
-  const newRaw = BigInt(order.outAmount);
-  position.tokenAmountRaw = (oldRaw + newRaw).toString();
-  applyAddOn(weightedAverageEntryPrice(Number(oldRaw), position.entryPrice, Number(newRaw), token.priceUsd));
-
-  logger.info(`✅ Add-on executed! New avg entry: $${position.entryPrice.toFixed(10)}. TX: ${execution.signature}`);
   emitTrade({
     type: "BUY",
     symbol: token.symbol,
@@ -637,15 +620,15 @@ async function executeAddOnLocked(position: ActivePosition, signal: TradeSignal,
     chainId: token.chainId,
     amountSol: addOnSol,
     price: token.priceUsd,
-    paper: false,
-    txSignature: execution.signature,
+    paper: CONFIG.dryRun,
+    txSignature,
     timestamp: Date.now(),
     confidence: signal.confidence,
     features: buildEntryFeatures(signal, "add-on"),
   });
   return {
     success: true,
-    txSignature: execution.signature,
+    txSignature,
     entryPrice: position.entryPrice,
     amountSol: addOnSol,
     tokenAddress: token.address,
@@ -656,6 +639,16 @@ async function executeAddOnLocked(position: ActivePosition, signal: TradeSignal,
 
 async function executeBuyLocked(signal: TradeSignal): Promise<TradeResult> {
   const { token, positionSizeSol } = signal;
+  const failure = (error: string | undefined, txSignature?: string): TradeResult => ({
+    success: false,
+    ...(txSignature !== undefined ? { txSignature } : {}),
+    entryPrice: token.priceUsd,
+    amountSol: positionSizeSol,
+    tokenAddress: token.address,
+    tokenSymbol: token.symbol,
+    timestamp: Date.now(),
+    error,
+  });
 
   // Re-anchor the exit levels to the price we are ACTUALLY entering at.
   //
@@ -694,17 +687,7 @@ async function executeBuyLocked(signal: TradeSignal): Promise<TradeResult> {
 
   try {
     const tokenValidation = isTradeSignalSafe(signal);
-    if (!tokenValidation.ok) {
-      return {
-        success: false,
-        entryPrice: token.priceUsd,
-        amountSol: positionSizeSol,
-        tokenAddress: token.address,
-        tokenSymbol: token.symbol,
-        timestamp: Date.now(),
-        error: tokenValidation.reason,
-      };
-    }
+    if (!tokenValidation.ok) return failure(tokenValidation.reason);
 
     // Callers check activePositions.length against MAX_CONCURRENT_POSITIONS
     // before ever calling executeBuy, but that check happens outside this
@@ -713,15 +696,7 @@ async function executeBuyLocked(signal: TradeSignal): Promise<TradeResult> {
     // exceeding the limit. Re-check now, inside the lock, against the live
     // count: this is the only check that's actually atomic with the buy.
     if (activePositions.length >= MAX_CONCURRENT_POSITIONS) {
-      return {
-        success: false,
-        entryPrice: token.priceUsd,
-        amountSol: positionSizeSol,
-        tokenAddress: token.address,
-        tokenSymbol: token.symbol,
-        timestamp: Date.now(),
-        error: `Max concurrent positions (${MAX_CONCURRENT_POSITIONS}) reached.`,
-      };
+      return failure(`Max concurrent positions (${MAX_CONCURRENT_POSITIONS}) reached.`);
     }
 
     const balance = await getBalance();
@@ -729,108 +704,31 @@ async function executeBuyLocked(signal: TradeSignal): Promise<TradeResult> {
     // (paper) buys pay no on-chain fee, so no buffer is required in DRY_RUN.
     const feeBufferSol = CONFIG.dryRun ? 0 : 0.01;
     if (balance < positionSizeSol + feeBufferSol) {
-      const need = CONFIG.dryRun
-        ? positionSizeSol.toFixed(4)
-        : `${positionSizeSol.toFixed(4)} + fees`;
-      return {
-        success: false,
-        entryPrice: token.priceUsd,
-        amountSol: positionSizeSol,
-        tokenAddress: token.address,
-        tokenSymbol: token.symbol,
-        timestamp: Date.now(),
-        error: `Insufficient balance: ${balance.toFixed(4)} SOL (need ${need})`,
-      };
+      const need = CONFIG.dryRun ? positionSizeSol.toFixed(4) : `${positionSizeSol.toFixed(4)} + fees`;
+      return failure(`Insufficient balance: ${balance.toFixed(4)} SOL (need ${need})`);
     }
 
+    let txSignature: string;
+    let tokenAmountRaw: string | undefined;
     if (CONFIG.dryRun) {
-      // Simulated buy: debit the paper wallet and open a position. No Jupiter
-      // route is fetched and no transaction is signed or sent.
-      const txSignature = generateDryRunTxSignature();
+      // Simulated buy: debit the paper wallet. No Jupiter route is fetched and
+      // no transaction is signed or sent.
+      txSignature = generateDryRunTxSignature();
       paperBalanceSol -= positionSizeSol;
+    } else {
+      const amountLamports = Math.floor(positionSizeSol * LAMPORTS_PER_SOL);
+      const order = await getJupiterQuote(SOL_MINT, token.address, amountLamports, wallet.publicKey.toBase58());
+      if (!order?.transaction || !order.requestId) return failure("No valid Jupiter Swap V2 order found");
 
-      activePositions.push({
-        tokenAddress: token.address,
-        tokenSymbol: token.symbol,
-        chainId: token.chainId,
-        entryPrice: token.priceUsd,
-        currentPrice: token.priceUsd,
-        amountSol: positionSizeSol,
-        stopLoss,
-        takeProfit,
-        entryTime: Date.now(),
-        pnlPercent: 0,
-        txSignature,
-        enteredAsNewCoin: token.marketCap < CONFIG.newCoinSlotMaxMarketCapUsd,
-      });
-
-      logger.info(`🧪 [DRY RUN] Simulated buy executed. Fake TX: ${txSignature}`);
-      logger.info(`🧪 [DRY RUN] Paper balance: ${paperBalanceSol.toFixed(4)} SOL`);
-
-      emitTrade({
-        type: "BUY",
-        symbol: token.symbol,
-        tokenAddress: token.address,
-        chainId: token.chainId,
-        amountSol: positionSizeSol,
-        price: token.priceUsd,
-        paper: true,
-        txSignature,
-        timestamp: Date.now(),
-        confidence: signal.confidence,
-        features: buildEntryFeatures(signal),
-      });
-
-      return {
-        success: true,
-        txSignature,
-        entryPrice: token.priceUsd,
-        amountSol: positionSizeSol,
-        tokenAddress: token.address,
-        tokenSymbol: token.symbol,
-        timestamp: Date.now(),
-      };
+      const execution = await signAndExecute(order, order.transaction, "BUY");
+      if (!execution.success || !execution.signature) {
+        return failure(execution.error ?? "Jupiter execution failed", execution.signature);
+      }
+      txSignature = execution.signature;
+      // The quote is already validated (outAmount present, > 0) before this
+      // point is reached - see getJupiterQuote's own checks.
+      tokenAmountRaw = order.outAmount;
     }
-
-    const amountLamports = Math.floor(positionSizeSol * LAMPORTS_PER_SOL);
-    const order = await getJupiterQuote(SOL_MINT, token.address, amountLamports, wallet.publicKey.toBase58());
-
-    if (!order?.transaction || !order.requestId) {
-      return {
-        success: false,
-        entryPrice: token.priceUsd,
-        amountSol: positionSizeSol,
-        tokenAddress: token.address,
-        tokenSymbol: token.symbol,
-        timestamp: Date.now(),
-        error: "No valid Jupiter Swap V2 order found",
-      };
-    }
-
-    const transaction = VersionedTransaction.deserialize(Buffer.from(order.transaction, "base64"));
-    applyPriorityFee(transaction, "BUY");
-    transaction.sign([wallet]);
-    const signedTransaction = Buffer.from(transaction.serialize()).toString("base64");
-    // Derived BEFORE calling Jupiter: this is the transaction's own signature,
-    // known locally regardless of whether Jupiter ever answers — see
-    // swap-confirmation.ts for why an unanswered /execute is not the same as
-    // "this did not happen".
-    const ownSignature = deriveTransactionSignature(transaction);
-    const execution = await confirmOrRecoverSwap(connection, order, signedTransaction, ownSignature);
-    if (!execution.success || !execution.signature) {
-      return {
-        success: false,
-        txSignature: execution.signature,
-        entryPrice: token.priceUsd,
-        amountSol: positionSizeSol,
-        tokenAddress: token.address,
-        tokenSymbol: token.symbol,
-        timestamp: Date.now(),
-        error: execution.error ?? "Jupiter execution failed",
-      };
-    }
-
-    const txSignature = execution.signature;
 
     activePositions.push({
       tokenAddress: token.address,
@@ -844,14 +742,17 @@ async function executeBuyLocked(signal: TradeSignal): Promise<TradeResult> {
       entryTime: Date.now(),
       pnlPercent: 0,
       txSignature,
-      // The quote is already validated (outAmount present, > 0) before this
-      // point is reached - see getJupiterQuote's own checks.
-      tokenAmountRaw: order.outAmount,
+      ...(tokenAmountRaw !== undefined ? { tokenAmountRaw } : {}),
       enteredAsNewCoin: token.marketCap < CONFIG.newCoinSlotMaxMarketCapUsd,
     });
 
-    logger.info(`✅ Trade executed! TX: ${txSignature}`);
-    logger.info(`https://solscan.io/tx/${txSignature}`);
+    if (CONFIG.dryRun) {
+      logger.info(`🧪 [DRY RUN] Simulated buy executed. Fake TX: ${txSignature}`);
+      logger.info(`🧪 [DRY RUN] Paper balance: ${paperBalanceSol.toFixed(4)} SOL`);
+    } else {
+      logger.info(`✅ Trade executed! TX: ${txSignature}`);
+      logger.info(`https://solscan.io/tx/${txSignature}`);
+    }
 
     emitTrade({
       type: "BUY",
@@ -860,7 +761,7 @@ async function executeBuyLocked(signal: TradeSignal): Promise<TradeResult> {
       chainId: token.chainId,
       amountSol: positionSizeSol,
       price: token.priceUsd,
-      paper: false,
+      paper: CONFIG.dryRun,
       txSignature,
       timestamp: Date.now(),
       confidence: signal.confidence,
@@ -879,34 +780,10 @@ async function executeBuyLocked(signal: TradeSignal): Promise<TradeResult> {
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     logger.error(`Trade failed: ${message}`);
-    return {
-      success: false,
-      entryPrice: token.priceUsd,
-      amountSol: positionSizeSol,
-      tokenAddress: token.address,
-      tokenSymbol: token.symbol,
-      timestamp: Date.now(),
-      error: message,
-    };
+    return failure(message);
   }
 }
 
-/**
- * Execute a sell (exit position) using Jupiter
- */
-/**
- * `markPriceUsd`, if given, marks the position to this price before
- * settling — used by callers (mcp-server.ts's memebot_paper_sell) that let
- * an operator specify an exit price. This must happen INSIDE the lock,
- * after the duplicate check below, rather than the caller mutating
- * position.currentPrice/pnlPercent itself before calling executeSell: two
- * concurrent sell requests for the same position (different callers, or
- * the same caller invoked twice) both hold the same shared object, and a
- * mutation applied outside the lock can be overwritten by a second,
- * ultimately-rejected request before the first request's queued
- * settlement ever runs — settling the first request at a price it never
- * reported.
- */
 /**
  * Sell a FRACTION of a position and leave the rest open.
  *
@@ -929,16 +806,36 @@ export async function executeSellPartial(
   reason: string,
   markPriceUsd?: number
 ): Promise<TradeResult> {
-  return withTraderLock(sellQueue, () => executeSellPartialLocked(position, fraction, reason, markPriceUsd));
+  if (!(fraction > 0 && fraction < 1)) {
+    return sellFailure(position, `Partial sell fraction must be between 0 and 1, got ${fraction}`);
+  }
+  return withTraderLock(sellQueue, () => sellLocked(position, fraction, reason, markPriceUsd));
 }
 
-async function executeSellPartialLocked(
+/**
+ * Close a position in full.
+ *
+ * `markPriceUsd`, if given, marks the position to this price before
+ * settling — used by callers (mcp-server.ts's memebot_paper_sell) that let
+ * an operator specify an exit price. This must happen INSIDE the lock,
+ * after the duplicate check, rather than the caller mutating
+ * position.currentPrice/pnlPercent itself before calling executeSell: two
+ * concurrent sell requests for the same position both hold the same shared
+ * object, and a mutation applied outside the lock can be overwritten by a
+ * second, ultimately-rejected request before the first request's queued
+ * settlement ever runs — settling the first request at a price it never
+ * reported.
+ */
+export async function executeSell(
   position: ActivePosition,
-  fraction: number,
   reason: string,
   markPriceUsd?: number
 ): Promise<TradeResult> {
-  const failure = (error: string): TradeResult => ({
+  return withTraderLock(sellQueue, () => sellLocked(position, 1, reason, markPriceUsd));
+}
+
+function sellFailure(position: ActivePosition, error: string): TradeResult {
+  return {
     success: false,
     entryPrice: position.entryPrice,
     amountSol: position.amountSol,
@@ -946,180 +843,27 @@ async function executeSellPartialLocked(
     tokenSymbol: position.tokenSymbol,
     timestamp: Date.now(),
     error,
-  });
-
-  if (!(fraction > 0 && fraction < 1)) return failure(`Partial sell fraction must be between 0 and 1, got ${fraction}`);
-  // A position closed while this was queued must not be partially sold.
-  if (findPositionIndex(position) === -1) return failure("Position already closed");
-
-  if (Number.isFinite(markPriceUsd) && (markPriceUsd as number) > 0) {
-    position.currentPrice = markPriceUsd as number;
-    position.pnlPercent = ((markPriceUsd as number) - position.entryPrice) / position.entryPrice * 100;
-  }
-  const pnlPercent = Math.max(Number.isFinite(position.pnlPercent) ? position.pnlPercent : 0, -100);
-  const soldSol = position.amountSol * fraction;
-
-  logger.info(
-    `💰 Banking ${Math.round(fraction * 100)}% of ${position.tokenSymbol} at ${pnlPercent >= 0 ? "+" : ""}${pnlPercent.toFixed(2)}% (${reason})`
-  );
-
-  try {
-    if (CONFIG.dryRun) {
-      const txSignature = generateDryRunTxSignature();
-      paperBalanceSol += soldSol * (1 + pnlPercent / 100);
-      position.amountSol -= soldSol;
-      position.partialTakeProfitTaken = true;
-
-      logger.info(
-        `🧪 [DRY RUN] Partial sell executed. Remaining ${position.amountSol.toFixed(4)} SOL in ${position.tokenSymbol}. ` +
-          `Paper balance: ${paperBalanceSol.toFixed(4)} SOL`
-      );
-      emitTrade({
-        type: "SELL",
-        symbol: position.tokenSymbol,
-        tokenAddress: position.tokenAddress,
-        chainId: position.chainId,
-        amountSol: soldSol,
-        price: position.currentPrice,
-        paper: true,
-        txSignature,
-        timestamp: Date.now(),
-        pnlPercent,
-        reason,
-      });
-      return {
-        success: true,
-        txSignature,
-        entryPrice: position.entryPrice,
-        amountSol: soldSol,
-        tokenAddress: position.tokenAddress,
-        tokenSymbol: position.tokenSymbol,
-        timestamp: Date.now(),
-        pnlPercent,
-      };
-    }
-
-    if (!isValidSolanaMint(position.tokenAddress)) {
-      throw new Error(`Invalid position token mint: ${position.tokenAddress}`);
-    }
-
-    const tokenMint = new PublicKey(position.tokenAddress);
-    const tokenAccounts = await connection.getParsedTokenAccountsByOwner(wallet.publicKey, { mint: tokenMint });
-    if (tokenAccounts.value.length === 0) return failure("No token balance found");
-
-    // Raw base units, capped at this position's own recorded amount (see
-    // tokenAmountRaw's doc comment) rather than the wallet's whole balance of
-    // the mint - the same fix as the full sell path. Floor rather than round,
-    // so the quote can never ask for more than is actually available.
-    const walletRawBalance = BigInt(tokenAccounts.value[0].account.data.parsed.info.tokenAmount.amount);
-    // Same fail-closed rule as the full-sell path: with no recorded buy
-    // quantity, a fraction of the WHOLE wallet balance would take a slice of
-    // any manually-held tokens of the same mint, so nothing is sold.
-    if (!position.tokenAmountRaw) {
-      logger.error(
-        `⛔ ${position.tokenSymbol}: no recorded buy quantity — REFUSING to take profit, because the bot cannot ` +
-          `tell its own tokens from any you hold manually. Sell this position by hand.`
-      );
-    }
-    const rawBalance = capSellAmount(walletRawBalance, position.tokenAmountRaw ? BigInt(position.tokenAmountRaw) : undefined);
-    const rawToSell = (rawBalance * BigInt(Math.round(fraction * 10_000))) / 10_000n;
-    if (rawToSell <= 0n) return failure("Partial sell amount rounds to zero");
-
-    const order = await getJupiterQuote(
-      position.tokenAddress,
-      SOL_MINT,
-      rawToSell.toString(),
-      wallet.publicKey.toBase58()
-    );
-    if (!order?.transaction || !order.requestId) return failure("No valid Jupiter Swap V2 partial sell order found");
-
-    const transaction = VersionedTransaction.deserialize(Buffer.from(order.transaction, "base64"));
-    applyPriorityFee(transaction, "PARTIAL SELL");
-    transaction.sign([wallet]);
-    const signedTransaction = Buffer.from(transaction.serialize()).toString("base64");
-    const ownSignature = deriveTransactionSignature(transaction);
-    const execution = await confirmOrRecoverSwap(connection, order, signedTransaction, ownSignature);
-    if (!execution.success || !execution.signature) {
-      throw new Error(execution.error ?? "Jupiter partial sell failed");
-    }
-
-    // Only mutate the position after the swap has actually settled, so a
-    // failed swap leaves the position exactly as it was and the trigger can
-    // fire again on a later tick.
-    position.amountSol -= soldSol;
-    position.partialTakeProfitTaken = true;
-    // Shrink the recorded amount by exactly what was sold, so a later full
-    // sell of the remainder is still capped against what THIS position
-    // actually has left, not the wallet's whole balance of the mint.
-    if (position.tokenAmountRaw) {
-      const remaining = BigInt(position.tokenAmountRaw) - rawToSell;
-      position.tokenAmountRaw = (remaining > 0n ? remaining : 0n).toString();
-    }
-
-    logger.info(`✅ Banked ${soldSol.toFixed(4)} SOL of ${position.tokenSymbol}! TX: ${execution.signature}`);
-    logger.info(`   ${position.amountSol.toFixed(4)} SOL still running in ${position.tokenSymbol}.`);
-
-    emitTrade({
-      type: "SELL",
-      symbol: position.tokenSymbol,
-      tokenAddress: position.tokenAddress,
-      chainId: position.chainId,
-      amountSol: soldSol,
-      price: position.currentPrice,
-      paper: false,
-      txSignature: execution.signature,
-      timestamp: Date.now(),
-      pnlPercent,
-      reason,
-    });
-
-    return {
-      success: true,
-      txSignature: execution.signature,
-      entryPrice: position.entryPrice,
-      amountSol: soldSol,
-      tokenAddress: position.tokenAddress,
-      tokenSymbol: position.tokenSymbol,
-      timestamp: Date.now(),
-      pnlPercent,
-    };
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
-    logger.error(`Partial sell failed: ${message}`);
-    return failure(message);
-  }
+  };
 }
 
-export async function executeSell(
+/** The one sell path: `fraction` 1 closes the position, anything less banks a slice. */
+async function sellLocked(
   position: ActivePosition,
+  fraction: number,
   reason: string,
   markPriceUsd?: number
 ): Promise<TradeResult> {
-  return withTraderLock(sellQueue, () => executeSellLocked(position, reason, markPriceUsd));
-}
+  const partial = fraction < 1;
 
-async function executeSellLocked(position: ActivePosition, reason: string, markPriceUsd?: number): Promise<TradeResult> {
   // The trader lock only serializes execution — it doesn't stop two callers
   // from both looking up the SAME still-open position before either of them
-  // reaches it (e.g. two concurrent memebot_paper_sell MCP calls for the
-  // same token_address, each resolving the position via
-  // getActivePositions().find() before calling executeSell). Both then
-  // queue here; without this check, the first call settles and removes the
-  // position, and the second — still holding the same object reference —
-  // would settle it a second time (crediting the paper wallet twice, or
-  // attempting a second live sell) before removePosition() below became a
-  // silent no-op. Re-verify membership now, inside the lock, and reject a
-  // stale request instead.
+  // reaches it (e.g. two concurrent memebot_paper_sell MCP calls). Both then
+  // queue here; without this check the second — still holding the same object
+  // reference — would settle it a second time (crediting the paper wallet
+  // twice, or attempting a second live sell). Re-verify membership now,
+  // inside the lock, and reject a stale request instead.
   if (findPositionIndex(position) === -1) {
-    return {
-      success: false,
-      entryPrice: position.entryPrice,
-      amountSol: position.amountSol,
-      tokenAddress: position.tokenAddress,
-      tokenSymbol: position.tokenSymbol,
-      timestamp: Date.now(),
-      error: "Position already closed (duplicate sell request).",
-    };
+    return sellFailure(position, "Position already closed (duplicate sell request).");
   }
 
   if (markPriceUsd !== undefined && Number.isFinite(markPriceUsd) && markPriceUsd > 0 && position.entryPrice > 0) {
@@ -1131,150 +875,111 @@ async function executeSellLocked(position: ActivePosition, reason: string, markP
   // NaN/Infinity (toFixed throws on Infinity) or an impossible sub-100% loss.
   // This value drives the log, the paper settlement and the emitted event.
   const pnlPercent = Math.max(Number.isFinite(position.pnlPercent) ? position.pnlPercent : 0, -100);
+  const pnlLabel = `${pnlPercent >= 0 ? "+" : ""}${pnlPercent.toFixed(2)}%`;
+  const soldSol = position.amountSol * fraction;
 
-  logger.info(`💸 Executing SELL: ${position.tokenSymbol} (${reason})`);
-  logger.info(`PnL: ${pnlPercent >= 0 ? "+" : ""}${pnlPercent.toFixed(2)}%`);
+  if (partial) {
+    logger.info(`💰 Banking ${Math.round(fraction * 100)}% of ${position.tokenSymbol} at ${pnlLabel} (${reason})`);
+  } else {
+    logger.info(`💸 Executing SELL: ${position.tokenSymbol} (${reason})`);
+    logger.info(`PnL: ${pnlLabel}`);
+  }
 
   try {
+    let txSignature: string;
     if (CONFIG.dryRun) {
-      // Simulated sell: credit the position's proceeds back to the SAME paper
-      // wallet the buy was funded from (proceeds = amountSol adjusted by PnL),
-      // then close the position. Nothing leaves the wallet on a trade exit.
-      const txSignature = generateDryRunTxSignature();
-      const proceedsSol = position.amountSol * (1 + pnlPercent / 100);
-      paperBalanceSol += proceedsSol;
+      // Simulated sell: credit the proceeds back to the SAME paper wallet the
+      // buy was funded from. Nothing leaves the wallet on a trade exit.
+      txSignature = generateDryRunTxSignature();
+      paperBalanceSol += soldSol * (1 + pnlPercent / 100);
+    } else {
+      if (!isValidSolanaMint(position.tokenAddress)) {
+        throw new Error(`Invalid position token mint: ${position.tokenAddress}`);
+      }
 
-      removePosition(position);
-
-      logger.info(`🧪 [DRY RUN] Simulated sell executed. Fake TX: ${txSignature}`);
-      logger.info(
-        `🧪 [DRY RUN] Proceeds ${proceedsSol.toFixed(4)} SOL settled to bot wallet. Paper balance: ${paperBalanceSol.toFixed(4)} SOL`
-      );
-
-      emitTrade({
-        type: "SELL",
-        symbol: position.tokenSymbol,
-        tokenAddress: position.tokenAddress,
-        chainId: position.chainId,
-        amountSol: position.amountSol,
-        price: position.currentPrice,
-        paper: true,
-        txSignature,
-        timestamp: Date.now(),
-        // Emit the same sanitized PnL the settlement used, so downstream
-        // consumers (dashboard reporting) never see NaN/Infinity.
-        pnlPercent,
-        reason,
+      const tokenAccounts = await connection.getParsedTokenAccountsByOwner(wallet.publicKey, {
+        mint: new PublicKey(position.tokenAddress),
       });
+      if (tokenAccounts.value.length === 0) return sellFailure(position, "No token balance found");
 
-      return {
-        success: true,
-        txSignature,
-        entryPrice: position.entryPrice,
-        amountSol: position.amountSol,
-        tokenAddress: position.tokenAddress,
-        tokenSymbol: position.tokenSymbol,
-        timestamp: Date.now(),
-        pnlPercent,
-      };
+      const walletRaw = BigInt(tokenAccounts.value[0].account.data.parsed.info.tokenAmount.amount);
+      const recordedRaw = position.tokenAmountRaw ? BigInt(position.tokenAmountRaw) : undefined;
+      // Fail closed: with no recorded buy quantity the bot cannot tell its own
+      // tokens from any held by hand in the same wallet, so nothing is sold.
+      if (recordedRaw === undefined) {
+        logger.error(
+          `⛔ ${position.tokenSymbol}: no recorded buy quantity — REFUSING to sell, because the bot cannot tell ` +
+            `its own tokens from any you hold manually. Sell this position by hand.`
+        );
+      }
+
+      let sellRaw: bigint;
+      if (partial) {
+        // A slice of this position's own recorded amount, never of the wallet's
+        // whole balance of the mint. Floored so the quote can never ask for
+        // more than is actually available.
+        sellRaw = (capSellAmount(walletRaw, recordedRaw) * BigInt(Math.round(fraction * 10_000))) / 10_000n;
+      } else {
+        // A full exit sweeps the wallet balance rather than stopping at the
+        // recorded quantity, or the quote-vs-fill difference is stranded as dust
+        // (COPPERCAT, 6.07 tokens). Still bounded: a balance far above what this
+        // position bought means manually-held coins. See fullExitSellAmount.
+        sellRaw = fullExitSellAmount(walletRaw, recordedRaw, CONFIG.fullExitSweepTolerancePercent);
+        if (recordedRaw !== undefined && walletRaw > recordedRaw && sellRaw === recordedRaw) {
+          logger.warn(
+            `⚠️  ${position.tokenSymbol}: wallet holds more than this position bought ` +
+              `(${walletRaw} vs ${recordedRaw}) — selling only the position's share and leaving the rest, ` +
+              `which looks like coins you bought yourself.`
+          );
+        }
+      }
+      if (sellRaw <= 0n) {
+        return sellFailure(position, "Sell amount is zero: no recorded position amount, or the wallet holds none of this mint");
+      }
+
+      const order = await getJupiterQuote(position.tokenAddress, SOL_MINT, sellRaw.toString(), wallet.publicKey.toBase58());
+      if (!order?.transaction || !order.requestId) return sellFailure(position, "No valid Jupiter Swap V2 sell order found");
+
+      const execution = await signAndExecute(order, order.transaction, partial ? "PARTIAL SELL" : "SELL");
+      if (!execution.success || !execution.signature) {
+        throw new Error(execution.error ?? "Jupiter sell execution failed");
+      }
+      txSignature = execution.signature;
+
+      // Shrink the recorded amount by exactly what was sold, so a later full
+      // sell of the remainder is still capped against what THIS position has left.
+      if (partial && recordedRaw !== undefined) {
+        const remaining = recordedRaw - sellRaw;
+        position.tokenAmountRaw = (remaining > 0n ? remaining : 0n).toString();
+      }
     }
 
-    if (!isValidSolanaMint(position.tokenAddress)) {
-      throw new Error(`Invalid position token mint: ${position.tokenAddress}`);
+    // Only mutate the position after the swap has actually settled, so a
+    // failed swap leaves it exactly as it was and the trigger can fire again.
+    if (partial) {
+      position.amountSol -= soldSol;
+      position.partialTakeProfitTaken = true;
+    } else {
+      removePosition(position);
     }
 
-    const tokenMint = new PublicKey(position.tokenAddress);
-    const tokenAccounts = await connection.getParsedTokenAccountsByOwner(wallet.publicKey, {
-      mint: tokenMint,
-    });
-
-    if (tokenAccounts.value.length === 0) {
-      return {
-        success: false,
-        entryPrice: position.entryPrice,
-        amountSol: position.amountSol,
-        tokenAddress: position.tokenAddress,
-        tokenSymbol: position.tokenSymbol,
-        timestamp: Date.now(),
-        error: "No token balance found",
-      };
-    }
-
-    // Cap at this position's own recorded amount, never the whole wallet
-    // This is the FULL exit, so it sweeps the wallet balance rather than
-    // stopping at the recorded buy quantity — otherwise the quote-vs-fill
-    // difference is stranded as dust (COPPERCAT, 6.07 tokens). The sweep is
-    // still bounded: a balance far above what this position bought means
-    // manually-held coins, and those are left alone. See fullExitSellAmount.
-    const walletRaw = BigInt(tokenAccounts.value[0].account.data.parsed.info.tokenAmount.amount);
-    if (!position.tokenAmountRaw) {
-      logger.error(
-        `⛔ ${position.tokenSymbol}: no recorded buy quantity — REFUSING to sell, because the bot cannot tell ` +
-          `its own tokens from any you hold manually. Sell this position by hand.`
-      );
-    }
-    const recordedRaw = position.tokenAmountRaw ? BigInt(position.tokenAmountRaw) : undefined;
-    const sellRaw = fullExitSellAmount(walletRaw, recordedRaw, CONFIG.fullExitSweepTolerancePercent);
-    if (recordedRaw !== undefined && walletRaw > recordedRaw && sellRaw === recordedRaw) {
-      // The sweep was declined — say so, because the leftover is intentional
-      // here rather than the rounding crumb this change exists to remove.
-      logger.warn(
-        `⚠️  ${position.tokenSymbol}: wallet holds more than this position bought ` +
-          `(${walletRaw} vs ${recordedRaw}) — selling only the position's share and leaving the rest, ` +
-          `which looks like coins you bought yourself.`
-      );
-    }
-    if (sellRaw <= 0n) {
-      return {
-        success: false,
-        entryPrice: position.entryPrice,
-        amountSol: position.amountSol,
-        tokenAddress: position.tokenAddress,
-        tokenSymbol: position.tokenSymbol,
-        timestamp: Date.now(),
-        error: "Recorded position amount is zero or the wallet holds none of this mint",
-      };
-    }
-    const tokenBalance = sellRaw.toString();
-    const order = await getJupiterQuote(position.tokenAddress, SOL_MINT, tokenBalance, wallet.publicKey.toBase58());
-    if (!order?.transaction || !order.requestId) {
-      return {
-        success: false,
-        entryPrice: position.entryPrice,
-        amountSol: position.amountSol,
-        tokenAddress: position.tokenAddress,
-        tokenSymbol: position.tokenSymbol,
-        timestamp: Date.now(),
-        error: "No valid Jupiter Swap V2 sell order found",
-      };
-    }
-
-    const transaction = VersionedTransaction.deserialize(Buffer.from(order.transaction, "base64"));
-    applyPriorityFee(transaction, "SELL");
-    transaction.sign([wallet]);
-    const signedTransaction = Buffer.from(transaction.serialize()).toString("base64");
-    const ownSignature = deriveTransactionSignature(transaction);
-    const execution = await confirmOrRecoverSwap(connection, order, signedTransaction, ownSignature);
-    if (!execution.success || !execution.signature) {
-      throw new Error(execution.error ?? "Jupiter sell execution failed");
-    }
-
-    const txSignature = execution.signature;
-
-    removePosition(position);
-
-    logger.info(`✅ Sold! TX: ${txSignature}`);
+    const dry = CONFIG.dryRun ? "🧪 [DRY RUN] " : "";
+    logger.info(`${dry}✅ Sold ${soldSol.toFixed(4)} SOL of ${position.tokenSymbol}. TX: ${txSignature}`);
+    if (partial) logger.info(`   ${position.amountSol.toFixed(4)} SOL still running in ${position.tokenSymbol}.`);
+    if (CONFIG.dryRun) logger.info(`🧪 [DRY RUN] Paper balance: ${paperBalanceSol.toFixed(4)} SOL`);
 
     emitTrade({
       type: "SELL",
       symbol: position.tokenSymbol,
       tokenAddress: position.tokenAddress,
       chainId: position.chainId,
-      amountSol: position.amountSol,
+      amountSol: soldSol,
       price: position.currentPrice,
-      paper: false,
+      paper: CONFIG.dryRun,
       txSignature,
       timestamp: Date.now(),
+      // The same sanitized PnL the settlement used, so downstream consumers
+      // (dashboard reporting) never see NaN/Infinity.
       pnlPercent,
       reason,
     });
@@ -1283,7 +988,7 @@ async function executeSellLocked(position: ActivePosition, reason: string, markP
       success: true,
       txSignature,
       entryPrice: position.entryPrice,
-      amountSol: position.amountSol,
+      amountSol: soldSol,
       tokenAddress: position.tokenAddress,
       tokenSymbol: position.tokenSymbol,
       timestamp: Date.now(),
@@ -1291,16 +996,8 @@ async function executeSellLocked(position: ActivePosition, reason: string, markP
     };
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
-    logger.error(`Sell failed: ${message}`);
-    return {
-      success: false,
-      entryPrice: position.entryPrice,
-      amountSol: position.amountSol,
-      tokenAddress: position.tokenAddress,
-      tokenSymbol: position.tokenSymbol,
-      timestamp: Date.now(),
-      error: message,
-    };
+    logger.error(`${partial ? "Partial sell" : "Sell"} failed: ${message}`);
+    return sellFailure(position, message);
   }
 }
 
@@ -1412,7 +1109,7 @@ export async function monitorPositions(): Promise<void> {
       // 0 would panic-sell every position on any partial API response.
       await evaluatePositionAtPrice(position, live.priceUsd, live.liquidityUsd);
 
-      await new Promise((r) => setTimeout(r, 500));
+      await sleep(500);
     } catch {
       logger.debug(`Monitoring failed for ${position.tokenSymbol}, continuing.`);
     }
@@ -1631,14 +1328,6 @@ export async function evaluatePositionAtPrice(
 
 export function getActivePositions(): ActivePosition[] {
   return [...activePositions];
-}
-
-/**
- * Current simulated paper-wallet balance (DRY_RUN mode only). Returns 0 when
- * not running in dry-run mode, where the real on-chain balance is authoritative.
- */
-export function getPaperBalanceSol(): number {
-  return CONFIG.dryRun ? paperBalanceSol : 0;
 }
 
 /** The public address of the wallet the bot is trading from (real or paper). */
