@@ -21,6 +21,7 @@
  */
 
 import { fetchJson } from "./http.js";
+import { setTimeout as sleep } from "node:timers/promises";
 
 export interface DevReputation {
   followers: number;
@@ -117,11 +118,34 @@ const creatorCache = new Map<string, { at: number; creator: string | undefined }
 export function clearDevReputationCache(): void {
   cache.clear();
   creatorCache.clear();
+  pumpQueue = Promise.resolve();
+  lastCallAt = 0;
 }
+
+/**
+ * pump.fun 429'd 2 of 5 back-to-back calls (measured 2026-09-24). Every call
+ * in this file funnels through here, so serializing with a minimum gap here
+ * is the one place that fixes it for every caller — fetchCreatorWallet,
+ * fetchDevReputation's pair, and fetchNewPumpMints.
+ *
+ * ponytail: a fixed gap, not adaptive backoff or a 429 retry. Add one if a
+ * 429 still slips through in practice.
+ */
+const MIN_CALL_GAP_MS = 500;
+let pumpQueue: Promise<unknown> = Promise.resolve();
+let lastCallAt = 0;
 
 /** pump.fun refuses requests without a browser user-agent. */
 function getJson(url: string, timeoutMs: number): Promise<unknown> {
-  return fetchJson(url, timeoutMs, { "user-agent": "Mozilla/5.0" });
+  const call = pumpQueue.then(async () => {
+    const wait = lastCallAt + MIN_CALL_GAP_MS - Date.now();
+    if (wait > 0) await sleep(wait);
+    lastCallAt = Date.now();
+    return fetchJson(url, timeoutMs, { "user-agent": "Mozilla/5.0" });
+  });
+  // A failed call must not jam the queue for every call queued behind it.
+  pumpQueue = call.catch(() => undefined);
+  return call;
 }
 
 /**
