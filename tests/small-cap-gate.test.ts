@@ -59,6 +59,17 @@ test("at least one social or website is required", () => {
   assert.match(r.reason ?? "", /social/);
 });
 
+test("requireSocial: false lets a no-social coin through but keeps every rug check", () => {
+  const off = { ...DEFAULT_SMALL_CAP_GATE, requireSocial: false };
+  assert.equal(checkSmallCapGate({ ...baseInput, hasAnySocial: false }, off).pass, true);
+  const minted = checkSmallCapGate(
+    { ...baseInput, hasAnySocial: false, rugCheck: goodReport({ mintAuthorityDisabled: false }) },
+    off
+  );
+  assert.equal(minted.pass, false);
+  assert.match(minted.reason ?? "", /mint authority/);
+});
+
 test("mint authority must be disabled", () => {
   const r = checkSmallCapGate({ ...baseInput, rugCheck: goodReport({ mintAuthorityDisabled: false }) });
   assert.equal(r.pass, false);

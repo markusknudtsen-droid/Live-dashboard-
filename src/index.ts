@@ -1117,6 +1117,7 @@ async function runCycle(): Promise<void> {
           maxRugCheckScoreRaw: CONFIG.maxRugCheckScoreRaw,
           blockDangerRisks: CONFIG.blockDangerRisks,
           requireRugCheckData: true,
+          requireSocial: CONFIG.smallCapRequireSocial,
         }
       );
       if (!gate.pass) {

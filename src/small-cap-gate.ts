@@ -40,6 +40,8 @@ export interface SmallCapGateConfig {
   blockDangerRisks: boolean;
   /** A missing RugCheck report fails the gate rather than being skipped. */
   requireRugCheckData: boolean;
+  /** Reject coins with no social or website listed. Unset means true. */
+  requireSocial?: boolean;
 }
 
 export const DEFAULT_SMALL_CAP_GATE: SmallCapGateConfig = {
@@ -76,7 +78,7 @@ export function checkSmallCapGate(
   if (input.volume24h < config.minVolume24h) {
     return { pass: false, reason: `24h volume $${Math.round(input.volume24h)} below $${config.minVolume24h}` };
   }
-  if (!input.hasAnySocial) {
+  if (config.requireSocial !== false && !input.hasAnySocial) {
     return { pass: false, reason: "no social or website listed" };
   }
 

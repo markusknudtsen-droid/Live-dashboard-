@@ -186,6 +186,8 @@ export interface AppConfig {
   smallCapMaxBundlerHoldingPct: number;
   smallCapMinVolume24h: number;
   smallCapMaxRugCheckScore: number;
+  /** Reject buys with no social or website listed (SMALL_CAP_REQUIRE_SOCIAL). */
+  smallCapRequireSocial: boolean;
   /** Coins younger than newCoinMaxAgeHours skip the re-entry cooldown entirely. */
   newCoinCooldownExempt: boolean;
   /** Blocks a BUY (fresh or cooldown-exempt re-entry) when the model's own trendStrength/momentum reads bearish. */
@@ -503,6 +505,7 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     smallCapMaxBundlerHoldingPct: parseNumberInRange("SMALL_CAP_MAX_BUNDLER_HOLDING_PCT", env.SMALL_CAP_MAX_BUNDLER_HOLDING_PCT, 22, 0, 100),
     smallCapMinVolume24h: parseNumberInRange("SMALL_CAP_MIN_VOLUME_24H", env.SMALL_CAP_MIN_VOLUME_24H, 1000, 0, 100_000_000),
     smallCapMaxRugCheckScore: parseNumberInRange("SMALL_CAP_MAX_RUGCHECK_SCORE", env.SMALL_CAP_MAX_RUGCHECK_SCORE, 50, 0, 100),
+    smallCapRequireSocial: parseBoolean(env.SMALL_CAP_REQUIRE_SOCIAL, true),
     newCoinCooldownExempt: parseBoolean(env.NEW_COIN_COOLDOWN_EXEMPT, false),
     bearishBuyGuardEnabled: parseBoolean(env.BEARISH_BUY_GUARD_ENABLED, true),
     bearishExitRecheckMinutes: parseNumberInRange("BEARISH_EXIT_RECHECK_MINUTES", env.BEARISH_EXIT_RECHECK_MINUTES, 3, 0, 1440),
@@ -638,7 +641,8 @@ export function validateConfig(config: AppConfig = CONFIG): void {
   console.log(
     `   🔬 SMALL_CAP_GATE: coins under $${config.smallCapMaxMarketCapUsd.toLocaleString("en-US")} need RugCheck ` +
       `Good (score<=${config.smallCapMaxRugCheckScore}), ${config.smallCapMinHolders}+ holders, dev<=${config.smallCapMaxDevHoldingPct}%, ` +
-      `insiders<=${config.smallCapMaxInsiderHoldingPct}%, bundlers<=${config.smallCapMaxBundlerHoldingPct}%, mint/freeze auth disabled.`
+      `insiders<=${config.smallCapMaxInsiderHoldingPct}%, bundlers<=${config.smallCapMaxBundlerHoldingPct}%, mint/freeze auth disabled` +
+      (config.smallCapRequireSocial ? ", a social or website listed." : "; social/website NOT required.")
   );
   if (config.bearishBuyGuardEnabled) {
     console.log("   📉 BEARISH_BUY_GUARD: a BUY is skipped when the model's own trend/momentum reads bearish.");
