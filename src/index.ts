@@ -7,6 +7,7 @@ import {
   executeAddOn,
   trailIsArmed,
   executeSell,
+  settleSellResult,
   executeSweep,
   monitorPositions,
   getBalance,
@@ -510,6 +511,7 @@ async function checkHeldPositionsForBearishExit(): Promise<void> {
     );
     try {
       const result = await executeSell(position, "AI_BEARISH", signal.token.priceUsd);
+      settleSellResult(position, result);
       if (!result.success) {
         logger.warn(`Bearish exit for ${position.tokenSymbol} failed: ${result.error}`);
       }

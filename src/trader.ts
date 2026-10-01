@@ -1484,8 +1484,7 @@ export async function evaluatePositionAtPrice(
 
     if (rug.exit) {
       logger.warn(`🚨 RUG EXIT for ${position.tokenSymbol}: ${rug.reason} — selling now, no model call.`);
-      const rugResult = await executeSell(position, "LIQUIDITY_DRAIN", currentPrice);
-      if (rugResult.success) resetFailedSellCount(position.tokenAddress);
+      settleSellResult(position, await executeSell(position, "LIQUIDITY_DRAIN", currentPrice));
       return;
     }
   }
@@ -1596,8 +1595,19 @@ export async function evaluatePositionAtPrice(
   if (exitReason === "STOP_LOSS") logger.warn(`🛑 STOP LOSS triggered for ${position.tokenSymbol}`);
   else logger.info(`🎯 TAKE PROFIT triggered for ${position.tokenSymbol}`);
 
-  const result = await executeSell(position, exitReason, currentPrice);
+  settleSellResult(position, await executeSell(position, exitReason, currentPrice));
+}
 
+/**
+ * Bookkeeping after ANY full-exit sell: reset the failure count on success,
+ * otherwise count it and abandon the position at MAX_SELL_ATTEMPTS.
+ *
+ * Every exit path must route through here. Only the stop-loss path used to
+ * count, so a position whose tokens were gone retried forever via the rug-exit
+ * and AI-bearish paths (OPENGAP: ~1,600 failed sells, each costing an RPC call
+ * and, for AI_BEARISH, an OpenRouter call — which is what drove the 429s).
+ */
+export function settleSellResult(position: ActivePosition, result: TradeResult): void {
   if (result.success) {
     resetFailedSellCount(position.tokenAddress);
     return;

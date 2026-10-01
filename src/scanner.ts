@@ -116,15 +116,43 @@ function isWorthAnalysing(c: TokenCandidate): boolean {
   );
 }
 
-async function fetchCandidateForMint(mint: string): Promise<TokenCandidate | null> {
-  try {
-    const pairs = await httpGet<DexPair[]>(`${CONFIG.dexScreenerApiUrl}/tokens/v1/solana/${mint}`);
-    if (!pairs?.length) return null;
-    return parsePairToCandidate(pairs[0]);
-  } catch {
-    logger.debug(`Could not resolve mint ${mint} to a candidate`);
-    return null;
+// DexScreener's /tokens/v1/{chain}/{a,b,c} accepts up to 30 comma-separated addresses.
+const DEX_TOKENS_BATCH = 30;
+
+/**
+ * Pair lookup for many mints at once: one request per 30 mints instead of one
+ * per mint (the old serial loop spent ~250ms of sleep + a round trip on every
+ * boosted token, which is most of a 14s scan cycle). The first pair returned
+ * for a token wins, exactly as pairs[0] did for the single-mint call. A failed
+ * batch just yields no pairs for those mints, same as a failed single lookup.
+ */
+async function fetchPairsByMint(chainId: string, mints: string[]): Promise<Map<string, DexPair>> {
+  const out = new Map<string, DexPair>();
+  for (let i = 0; i < mints.length; i += DEX_TOKENS_BATCH) {
+    const batch = mints.slice(i, i + DEX_TOKENS_BATCH);
+    try {
+      const pairs = await httpGet<DexPair[]>(`${CONFIG.dexScreenerApiUrl}/tokens/v1/${chainId}/${batch.join(",")}`);
+      for (const pair of pairs ?? []) {
+        const address = pair.baseToken?.address;
+        if (address && !out.has(address)) out.set(address, pair);
+      }
+    } catch {
+      logger.debug(`Could not resolve ${batch.length} mint(s) on ${chainId} to candidates`);
+    }
   }
+  return out;
+}
+
+async function fetchCandidatesForMints(mints: string[], keep: (c: TokenCandidate) => boolean): Promise<TokenCandidate[]> {
+  const unique = [...new Set(mints.slice(0, 10))];
+  const pairs = await fetchPairsByMint("solana", unique);
+  const out: TokenCandidate[] = [];
+  for (const mint of unique) {
+    const pair = pairs.get(mint);
+    const candidate = pair ? parsePairToCandidate(pair) : null;
+    if (candidate && keep(candidate)) out.push(candidate);
+  }
+  return out;
 }
 
 /**
@@ -134,12 +162,7 @@ async function fetchCandidateForMint(mint: string): Promise<TokenCandidate | nul
  * liquidity/volume/age bars as anything else, never bypass them.
  */
 export async function resolveMintsToCandidates(mints: string[]): Promise<TokenCandidate[]> {
-  const out: TokenCandidate[] = [];
-  for (const mint of mints.slice(0, 10)) {
-    const candidate = await fetchCandidateForMint(mint);
-    if (candidate && isWorthAnalysing(candidate)) out.push(candidate);
-  }
-  return out;
+  return fetchCandidatesForMints(mints, isWorthAnalysing);
 }
 
 /**
@@ -150,12 +173,7 @@ export async function resolveMintsToCandidates(mints: string[]): Promise<TokenCa
  * when watching it matters most.
  */
 export async function resolveMintsUnfiltered(mints: string[]): Promise<TokenCandidate[]> {
-  const out: TokenCandidate[] = [];
-  for (const mint of mints.slice(0, 10)) {
-    const candidate = await fetchCandidateForMint(mint);
-    if (candidate) out.push(candidate);
-  }
-  return out;
+  return fetchCandidatesForMints(mints, () => true);
 }
 
 export async function scanForCandidates(): Promise<TokenCandidate[]> {
@@ -192,30 +210,21 @@ export async function scanForCandidates(): Promise<TokenCandidate[]> {
 
     const relevantBoosted = boostedTokens.filter((t) => CONFIG.scanChains.includes(String(t.chainId || "").toLowerCase()));
 
+    const boostedByChain = new Map<string, DexTokenBoost[]>();
     for (const token of relevantBoosted.slice(0, 20)) {
-      try {
-        const pairs = await httpGet<DexPair[]>(
-          `${CONFIG.dexScreenerApiUrl}/tokens/v1/${token.chainId}/${token.tokenAddress}`
-        );
-        if (pairs.length > 0) {
-          const pair = pairs[0];
-          const candidate = parsePairToCandidate(pair, token.totalAmount || token.amount);
-          if (candidate && isWorthAnalysing(candidate)) {
-            candidates.push(candidate);
-          }
-        }
-        await sleep(250);
-      } catch {
-        logger.debug("Skipping failed boosted token fetch.");
+      boostedByChain.set(token.chainId, [...(boostedByChain.get(token.chainId) ?? []), token]);
+    }
+    for (const [chainId, tokens] of boostedByChain) {
+      const pairs = await fetchPairsByMint(chainId, tokens.map((t) => t.tokenAddress));
+      for (const token of tokens) {
+        const pair = pairs.get(token.tokenAddress);
+        const candidate = pair ? parsePairToCandidate(pair, token.totalAmount || token.amount) : null;
+        if (candidate && isWorthAnalysing(candidate)) candidates.push(candidate);
       }
     }
 
     for (const chain of CONFIG.scanChains) {
       try {
-        await httpGet<unknown>(`${CONFIG.dexScreenerApiUrl}/token-pairs/v1/${chain}/0x0000000000000000000000000000000000000000`, {
-          params: { sort: "volume24h", order: "desc" },
-        });
-
         const memeSearch = await httpGet<DexSearchResponse>(`${CONFIG.dexScreenerApiUrl}/latest/dex/search?q=meme+${chain}`);
         const memePairs = memeSearch.pairs || [];
         for (const pair of memePairs.slice(0, 15)) {
