@@ -459,6 +459,9 @@ async function checkHeldPositionsForBearishExit(): Promise<void> {
   if (refreshed.length === 0) return;
 
   const signals = await batchAnalyze(refreshed);
+  // The newest read wins everywhere: without this the buy/add-on path kept
+  // using an older cached BUY while this recheck already said SKIP.
+  for (const signal of signals) rememberVerdict(analysisCache, signal, now);
   for (const signal of signals) {
     // Re-fetch rather than reuse a captured reference: a monitoring tick could
     // have closed this same position (stop-loss/take-profit) while the model
@@ -812,7 +815,7 @@ async function runCycle(): Promise<void> {
   const fresh: typeof candidates = [];
   const reused: TradeSignal[] = [];
   for (const c of candidates) {
-    const hit = recallVerdict(analysisCache, c.address, nowMs, analysisTtlMs);
+    const hit = recallVerdict(analysisCache, c.address, nowMs, analysisTtlMs, c.priceUsd);
     if (hit) {
       // Re-point the cached verdict at the current candidate so price-derived
       // fields downstream are current, even though the model's judgement is not.

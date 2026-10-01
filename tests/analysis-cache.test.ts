@@ -121,3 +121,15 @@ test("an unknown mint has no verdict", () => {
   const cache: AnalysisCache = new Map();
   assert.equal(recallVerdict(cache, "never-seen", 1, 60_000), undefined);
 });
+
+test("a cached verdict is dropped once the price has moved past MAX_PRICE_DRIFT since analysis", () => {
+  // Regression: SEEDLESS was bought on a cached strong_up/100% read after a
+  // 60.5% fall since that read (2026-10-01).
+  const cache: AnalysisCache = new Map();
+  rememberVerdict(cache, signal(90), 0); // analysed at $0.0001
+  assert.ok(recallVerdict(cache, ADDRESS, 1000, 600_000, 0.0001 * 1.1), "+10% still reuses");
+  assert.ok(recallVerdict(cache, ADDRESS, 1000, 600_000, 0.0001 * 0.9), "-10% still reuses");
+  assert.equal(recallVerdict(cache, ADDRESS, 1000, 600_000, 0.0001 * 0.395), undefined, "-60.5% re-analyses");
+  assert.equal(recallVerdict(cache, ADDRESS, 1000, 600_000, 0.0001 * 1.3), undefined, "+30% re-analyses");
+  assert.ok(recallVerdict(cache, ADDRESS, 1000, 600_000), "no current price: unchanged behaviour");
+});

@@ -40,10 +40,21 @@ export function recallVerdict(
   cache: AnalysisCache,
   address: string,
   now: number,
-  ttlMs: number
+  ttlMs: number,
+  currentPriceUsd?: number
 ): TradeSignal | undefined {
   if (ttlMs <= 0) return undefined;
   const hit = cache.get(address);
   if (!hit || now - hit.at >= ttlMs) return undefined;
+  // A verdict is about the price it was given. SEEDLESS was bought (and nearly
+  // averaged down into) on a cached "strong_up 100%" read after the price had
+  // already fallen 60.5% since that read. Past MAX_PRICE_DRIFT, re-ask.
+  const then = hit.signal.token?.priceUsd;
+  if (currentPriceUsd !== undefined && then > 0 && Math.abs(currentPriceUsd / then - 1) > MAX_PRICE_DRIFT) {
+    return undefined;
+  }
   return { ...hit.signal };
 }
+
+/** Largest price move since analysis for which a cached verdict still applies. */
+export const MAX_PRICE_DRIFT = 0.15;
