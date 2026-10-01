@@ -1501,6 +1501,7 @@ export async function evaluatePositionAtPrice(
   // evaluation does to the shared position afterward.
   // Raise the stop before testing it, so a price that both sets a new peak and
   // then has to be judged against the stop is judged against the CURRENT one.
+  const runner = CONFIG.trailingStopRunnerDistancePercent > 0 && (position.ladderRungsTaken ?? 0) > 0;
   if (CONFIG.trailingStopEnabled) {
     const trail = updateTrailingStop({
       entryPrice: position.entryPrice,
@@ -1508,7 +1509,8 @@ export async function evaluatePositionAtPrice(
       peakPrice: position.peakPrice,
       currentStopLoss: position.stopLoss,
       activateAtPercent: CONFIG.trailingStopActivatePercent,
-      distancePercent: CONFIG.trailingStopDistancePercent,
+      distancePercent: runner ? CONFIG.trailingStopRunnerDistancePercent : CONFIG.trailingStopDistancePercent,
+      flatDistance: runner,
     });
     position.peakPrice = trail.peakPrice;
     if (trail.raised) {
@@ -1568,7 +1570,21 @@ export async function evaluatePositionAtPrice(
       // Marked BEFORE the sell: a failed sale must not leave the rung armed to
       // retry every tick, which is how a transient RPC error turns into a
       // stream of partial sales.
+      const firstRung = (position.ladderRungsTaken ?? 0) === 0;
       position.ladderRungsTaken = step.rungsConsumed;
+      // The trail only ratchets up, so the wider runner trail has to be put in
+      // place explicitly, once, when the first rung banks the first half.
+      if (firstRung && CONFIG.trailingStopRunnerDistancePercent > 0) {
+        const peak = Math.max(position.peakPrice ?? currentPrice, currentPrice);
+        position.stopLoss = Math.max(
+          peak * (1 - CONFIG.trailingStopRunnerDistancePercent / 100),
+          position.entryPrice
+        );
+        logger.info(
+          `🏃 ${position.tokenSymbol}: runner trail ${CONFIG.trailingStopRunnerDistancePercent}% below peak ` +
+            `— stop now $${position.stopLoss.toFixed(10)}.`
+        );
+      }
       await executeSellPartial(position, step.rung.sellFraction, "PARTIAL_TAKE_PROFIT", currentPrice);
       return;
     }

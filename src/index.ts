@@ -1460,7 +1460,7 @@ async function main(): Promise<void> {
   // above already covers right now.
   setInterval(() => {
     void runMonitoringTick();
-  }, CONFIG.scanIntervalSeconds * 1000);
+  }, CONFIG.monitorIntervalSeconds * 1000);
 
   // Start the scan/analyze/buy cycle loop NOW, without waiting for the
   // preflight. runCycle() checks analysisModelStatus itself: if the

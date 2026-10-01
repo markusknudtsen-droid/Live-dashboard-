@@ -63,6 +63,13 @@ export interface AppConfig {
   trailingStopActivatePercent: number;
   /** How far (%) below the peak the trailed stop sits. */
   trailingStopDistancePercent: number;
+  /**
+   * Trail for what is left after the first take-profit ladder rung, flat
+   * (no tightening tiers). 0 = same as trailingStopDistancePercent.
+   */
+  trailingStopRunnerDistancePercent: number;
+  /** How often held positions are price-checked, independent of the scan. */
+  monitorIntervalSeconds: number;
   /** Hard entry gates: off by default. */
   rugGatesEnabled: boolean;
   minLiquidityUsd: number;
@@ -419,6 +426,23 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       1,
       99
     ),
+    trailingStopRunnerDistancePercent: parseNumberInRange(
+      "TRAILING_STOP_RUNNER_DISTANCE_PERCENT",
+      env.TRAILING_STOP_RUNNER_DISTANCE_PERCENT,
+      0,
+      0,
+      99
+    ),
+    // Unset = the scan interval (the old behaviour). The scan timer is too slow
+    // for a held memecoin: SOI fell from +45% through a +33.6% stop to +11%
+    // between two checks 22s apart (2026-10-01).
+    monitorIntervalSeconds: parseIntegerInRange(
+      "MONITOR_INTERVAL_SECONDS",
+      env.MONITOR_INTERVAL_SECONDS,
+      parseIntegerInRange("SCAN_INTERVAL_SECONDS", env.SCAN_INTERVAL_SECONDS, 60, 5, 3600),
+      1,
+      3600
+    ),
     rugGatesEnabled: parseBoolean(env.RUG_GATES_ENABLED, false),
     minLiquidityUsd: parseNumberInRange("MIN_LIQUIDITY_USD", env.MIN_LIQUIDITY_USD, 5000, 0, 100_000_000),
     // Defaults on: a drained pool is the one exit signal that is never a false
@@ -611,9 +635,13 @@ export function validateConfig(config: AppConfig = CONFIG): void {
   if (config.trailingStopEnabled) {
     console.log(
       `   🔒 TRAILING_STOP enabled: arms at +${config.trailingStopActivatePercent}%, trails ` +
-        `${config.trailingStopDistancePercent}% below peak, never below entry once armed.`
+        `${config.trailingStopDistancePercent}% below peak, never below entry once armed` +
+        (config.trailingStopRunnerDistancePercent > 0
+          ? `; after the first ladder rung the rest trails a flat ${config.trailingStopRunnerDistancePercent}%.`
+          : ".")
     );
   }
+  console.log(`   ⏱️  Held positions price-checked every ${config.monitorIntervalSeconds}s.`);
   if (config.rugGatesEnabled) {
     console.log(
       `   🛡️  RUG_GATES enabled: min liquidity $${config.minLiquidityUsd}, max top-holder ` +

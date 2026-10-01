@@ -30,6 +30,8 @@ export interface TrailingStopInputs {
   activateAtPercent: number;
   /** How far (percent) below the peak the trailed stop sits. */
   distancePercent: number;
+  /** Use distancePercent as-is, skipping the big-winner tightening tiers. */
+  flatDistance?: boolean;
 }
 
 export interface TrailingStopResult {
@@ -106,7 +108,9 @@ export function updateTrailingStop(input: TrailingStopInputs): TrailingStopResul
   // would arm and still exit at a loss — the exact outcome it exists to
   // prevent. Once a position has proven itself by reaching the activation
   // gain, it must never be allowed to become a losing trade.
-  const distance = effectiveDistance(peakGainPercent, activateAtPercent, distancePercent);
+  const distance = input.flatDistance
+    ? distancePercent
+    : effectiveDistance(peakGainPercent, activateAtPercent, distancePercent);
   const trailed = Math.max(peakPrice * (1 - distance / 100), entryPrice);
 
   // Ratchet: only ever raise. Also never at or above the current price, which
