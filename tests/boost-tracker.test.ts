@@ -5,6 +5,7 @@ import {
   isBoostFresh,
   pruneSightings,
   boostKey,
+  wasBaselined,
   type BoostSightings,
 } from "../src/boost-tracker.js";
 import { checkRugGates, DEFAULT_RUG_GATES } from "../src/entry-score.js";
@@ -93,6 +94,27 @@ test("pruneSightings bounds the map without dropping usable entries", () => {
   const pruned = pruneSightings(s, NOW, { freshWindowSeconds: 120 });
   assert.equal(pruned.has("solana:new"), true);
   assert.equal(pruned.has("solana:ancient"), false);
+});
+
+test("a boost still sitting in the feed hours after startup never re-fires as new", () => {
+  // Regression: pruning by firstSeenAt dropped it after an hour, and the next
+  // poll re-observed it as a fresh boost (CALI/casinu/PAIDDOGE, 2026-09-17).
+  let s: BoostSightings = observeBoosts([obs("OLD")], new Map(), NOW, true).sightings;
+  for (let min = 1; min <= 180; min++) {
+    const t = NOW + min * 60_000;
+    const r = observeBoosts([obs("OLD")], s, t, false);
+    assert.equal(r.newlyBoosted.length, 0, `re-fired at +${min}min`);
+    s = pruneSightings(r.sightings, t, { freshWindowSeconds: 120 });
+  }
+  assert.equal(wasBaselined("solana", "OLD", s), true, "still known as a startup boost");
+});
+
+test("a startup-baselined boost becomes tradeable only when topped up", () => {
+  const base = observeBoosts([obs("T", 100)], new Map(), NOW, true).sightings;
+  assert.equal(wasBaselined("solana", "T", base), true);
+  const topped = observeBoosts([obs("T", 500)], base, NOW + 60_000, false);
+  assert.equal(topped.newlyBoosted.length, 1);
+  assert.equal(wasBaselined("solana", "T", topped.sightings), false);
 });
 
 /* --------------------------- market cap ceiling --------------------------- */

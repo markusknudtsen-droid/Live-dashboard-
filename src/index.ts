@@ -1,5 +1,5 @@
 import { CONFIG, validateConfig } from "./config.js";
-import { scanForCandidates, resolveMintsToCandidates, resolveMintsUnfiltered } from "./scanner.js";
+import { scanForCandidates, resolveMintsToCandidates, resolveMintsUnfiltered, getLastBoostFeed } from "./scanner.js";
 import { batchAnalyze, TradeSignal } from "./analyze.js";
 import {
   initTrader,
@@ -66,6 +66,7 @@ import {
   observeBoosts,
   isBoostFresh,
   pruneSightings,
+  wasBaselined,
   type BoostSightings,
 } from "./boost-tracker.js";
 import type { TokenCandidate } from "./scanner.js";
@@ -664,26 +665,27 @@ async function runCycle(): Promise<void> {
   // Fold this poll into the boost sighting record BEFORE any buy decision, so
   // freshness is judged against when the bot actually first saw each boost.
   const now = Date.now();
-  const observed = observeBoosts(
-    candidates
-      .filter((c) => (c.boostAmount ?? 0) > 0)
-      .map((c) => ({ chainId: c.chainId, tokenAddress: c.address, boostAmount: c.boostAmount ?? 0 })),
-    boostSightings,
-    now,
-    !boostBaselineTaken
-  );
+  const boostFeed = getLastBoostFeed();
+  const observed = observeBoosts(boostFeed, boostSightings, now, !boostBaselineTaken);
   boostSightings = pruneSightings(observed.sightings, now, {
     freshWindowSeconds: CONFIG.boostFreshWindowSeconds,
   });
-  if (!boostBaselineTaken) {
+  // Only a poll that actually returned the feed counts as the baseline: an
+  // empty first poll (feed down) would make the whole backlog look new later.
+  if (!boostBaselineTaken && boostFeed.length > 0) {
     boostBaselineTaken = true;
     logger.info(
       `⚡ Boost baseline taken: ${boostSightings.size} already-boosted token(s) recorded and will NOT be ` +
-        `instant-bought. Only boosts observed arriving from now on qualify.`
+        `bought. Only boosts observed arriving from now on qualify.`
     );
   } else if (observed.newlyBoosted.length > 0) {
     logger.info(`⚡ Newly boosted this cycle: ${observed.newlyBoosted.map((o) => o.tokenAddress.slice(0, 6)).join(", ")}`);
   }
+
+  // Already boosted when the bot started (and not topped up since) means stale:
+  // skip it on every path, not just instant buy — the model path used to buy
+  // these too, straight after a restart.
+  candidates = candidates.filter((c) => !wasBaselined(c.chainId, c.address, boostSightings));
 
   if (candidates.length === 0) {
     logger.info("No candidates found this cycle.");

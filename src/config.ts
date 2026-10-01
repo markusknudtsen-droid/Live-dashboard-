@@ -348,7 +348,7 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     // OpenRouter, which silently turned every analysis into a zero-confidence
     // SKIP. See checkAnalysisModel() in src/model-preflight.ts, which verifies
     // this model actually works before any trading starts.
-    openRouterModel: env.OPENROUTER_MODEL || "deepseek/deepseek-v3.2",
+    openRouterModel: env.OPENROUTER_MODEL || "google/gemini-2.5-flash-lite",
     // Configurable purely so tests can point analyzeToken() at a local
     // stand-in server (see tests/analyze.test.ts) instead of a real network
     // call — same convention as jupiterApiBaseUrl below. Not meant to be

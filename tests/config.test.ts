@@ -57,7 +57,7 @@ test("buildConfig parses DRY_RUN and paper balance", () => {
 
 test("buildConfig defaults OPENROUTER_MODEL to a currently-live model, not the retired Gemini 2.0 Flash", () => {
   const config = buildConfig({ OPENROUTER_API_KEY: "x" });
-  assert.equal(config.openRouterModel, "deepseek/deepseek-v3.2");
+  assert.equal(config.openRouterModel, "google/gemini-2.5-flash-lite");
 });
 
 test("buildConfig accepts a custom OPENROUTER_MODEL", () => {

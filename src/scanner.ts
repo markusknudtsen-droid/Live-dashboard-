@@ -176,6 +176,16 @@ export async function resolveMintsUnfiltered(mints: string[]): Promise<TokenCand
   return fetchCandidatesForMints(mints, () => true);
 }
 
+/**
+ * Every boosted token in the last scan's feeds, BEFORE candidate filtering.
+ * The boost baseline must see the whole feed: a token that only passes the
+ * filters later would otherwise look like a boost bought after startup.
+ */
+let lastBoostFeed: Array<{ chainId: string; tokenAddress: string; boostAmount: number }> = [];
+export function getLastBoostFeed(): typeof lastBoostFeed {
+  return lastBoostFeed;
+}
+
 export async function scanForCandidates(): Promise<TokenCandidate[]> {
   const candidates: TokenCandidate[] = [];
 
@@ -209,6 +219,11 @@ export async function scanForCandidates(): Promise<TokenCandidate[]> {
     }
 
     const relevantBoosted = boostedTokens.filter((t) => CONFIG.scanChains.includes(String(t.chainId || "").toLowerCase()));
+    lastBoostFeed = relevantBoosted.map((t) => ({
+      chainId: t.chainId,
+      tokenAddress: t.tokenAddress,
+      boostAmount: t.totalAmount || t.amount || 0,
+    }));
 
     const boostedByChain = new Map<string, DexTokenBoost[]>();
     for (const token of relevantBoosted.slice(0, 20)) {

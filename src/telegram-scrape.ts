@@ -137,7 +137,10 @@ export async function pollPublicChannel(channelRef: string, timeoutMs = 10_000):
     if (seq <= sinceSeq) continue;
     if (seq > maxSeq) maxSeq = seq;
 
-    const mint = pickPrimaryMint(msg.text);
+    // First poll (sinceSeq 0) is the channel's backlog: set the cursor only.
+    // Recording it stamped every old call with "now", so on each restart the
+    // whole page became fresh candidates with the Telegram confidence bonus.
+    const mint = sinceSeq > 0 ? pickPrimaryMint(msg.text) : null;
     if (mint) {
       recordMention(mint, channel, now);
       found++;

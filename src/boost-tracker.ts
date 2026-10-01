@@ -42,6 +42,8 @@ export interface SeenBoost {
    * outcome the baseline exists to prevent.
    */
   baselined: boolean;
+  /** Last poll this token was in the feed, epoch ms. Pruning keys off this. */
+  lastSeenAt?: number;
 }
 
 /** token key -> sighting. Key is `${chainId}:${tokenAddress}`. */
@@ -99,8 +101,10 @@ export function observeBoosts(
     if (!prior || o.boostAmount > prior.amount) {
       // A boost TOP-UP seen while running is a genuine new purchase even if the
       // token was baselined, so it clears the flag and becomes actionable.
-      next.set(key, { amount: o.boostAmount, firstSeenAt: now, baselined: isBaseline });
+      next.set(key, { amount: o.boostAmount, firstSeenAt: now, lastSeenAt: now, baselined: isBaseline });
       if (!isBaseline) newlyBoosted.push(o);
+    } else {
+      next.set(key, { ...prior, lastSeenAt: now });
     }
   }
 
@@ -137,8 +141,20 @@ export function pruneSightings(
 ): BoostSightings {
   const cutoffMs = Math.max(config.freshWindowSeconds * 1000 * 10, 60 * 60 * 1000);
   const next: BoostSightings = new Map();
+  // Keyed on when the token was last SEEN, not first seen. Pruning a token that
+  // is still sitting in the feed made the next poll re-observe it as a brand-new
+  // boost: every stale boost re-fired hourly (CALI, casinu, PAIDDOGE instant-
+  // bought 60.3 min after the 2026-09-17 14:06 restart).
   for (const [k, v] of sightings) {
-    if (now - v.firstSeenAt < cutoffMs) next.set(k, v);
+    if (now - (v.lastSeenAt ?? v.firstSeenAt) < cutoffMs) next.set(k, v);
   }
   return next;
+}
+
+/**
+ * True for a token that was already boosted when the bot started and has not
+ * been topped up since — stale by definition, so no path may buy it.
+ */
+export function wasBaselined(chainId: string, tokenAddress: string, sightings: BoostSightings): boolean {
+  return sightings.get(boostKey(chainId, tokenAddress))?.baselined === true;
 }
