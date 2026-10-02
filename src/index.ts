@@ -1,4 +1,5 @@
 import { CONFIG, validateConfig } from "./config.js";
+import { recordShadowCandidates, recordShadowReject, startShadowLog } from "./shadow-log.js";
 import { scanForCandidates, resolveMintsToCandidates, resolveMintsUnfiltered, getLastBoostFeed } from "./scanner.js";
 import { batchAnalyze, TradeSignal } from "./analyze.js";
 import {
@@ -590,7 +591,7 @@ async function runCycle(): Promise<void> {
     );
   }
 
-  if (balance < 0.05) {
+  if (balance < 0.05 && !CONFIG.shadowNoTrade) {
     logger.warn("Low balance! Skipping trading this cycle (positions are still monitored independently).");
     await persistRuntimeState();
     return;
@@ -940,6 +941,8 @@ async function runCycle(): Promise<void> {
     }
   }
 
+  recordShadowCandidates(candidates, signals, sourceByAddress);
+
   const buySignals = signals.filter((s) => s.action === "BUY" && s.confidence >= CONFIG.minConfidence);
   logger.info(`📊 Results: ${buySignals.length} BUY signals (>=${CONFIG.minConfidence}% confidence)`);
 
@@ -1082,6 +1085,7 @@ async function runCycle(): Promise<void> {
       );
       if (!basic.pass) {
         logger.warn(`⛔ ${signal.token.symbol} rejected by rug gate: ${basic.reason}`);
+        recordShadowReject(signal.token.address, `rug gate: ${basic.reason}`);
         continue;
       }
 
@@ -1122,6 +1126,7 @@ async function runCycle(): Promise<void> {
       );
       if (!gate.pass) {
         logger.warn(`⛔ ${signal.token.symbol} rejected by RugCheck gate: ${gate.reason}`);
+        recordShadowReject(signal.token.address, `rugcheck: ${gate.reason}`, rc ? { rc } : undefined);
         continue;
       }
     }
@@ -1468,6 +1473,7 @@ async function main(): Promise<void> {
   // resolved by now, this first cycle can scan immediately; otherwise it
   // stays "pending" and this cycle skips scanning/entries same as any other
   // in-flight state.
+  await startShadowLog();
   await runScheduledCycle();
 
   setInterval(() => {

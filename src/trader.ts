@@ -507,6 +507,18 @@ export function weightedAverageEntryPrice(oldQty: number, oldPrice: number, newQ
  * Execute a buy trade using Jupiter aggregator
  */
 export async function executeBuy(signal: TradeSignal): Promise<TradeResult> {
+  if (CONFIG.shadowNoTrade) {
+    // Every buy path (instant, analysed, fresh-launch) goes through here.
+    return {
+      success: false,
+      entryPrice: signal.token.priceUsd,
+      amountSol: signal.positionSizeSol,
+      tokenAddress: signal.token.address,
+      tokenSymbol: signal.token.symbol,
+      timestamp: Date.now(),
+      error: "SHADOW_NO_TRADE is on: not buying",
+    };
+  }
   return withTraderLock(buyQueue, () => executeBuyLocked(signal));
 }
 

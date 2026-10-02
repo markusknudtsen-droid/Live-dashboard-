@@ -70,6 +70,10 @@ export interface AppConfig {
   trailingStopRunnerDistancePercent: number;
   /** How often held positions are price-checked, independent of the scan. */
   monitorIntervalSeconds: number;
+  /** Record every candidate and its +1/+5/+15/+60 min outcome (SHADOW_LOG_ENABLED). */
+  shadowEnabled: boolean;
+  /** Never buy; keep scanning, analysing and logging even with an empty wallet (SHADOW_NO_TRADE). */
+  shadowNoTrade: boolean;
   /** Hard entry gates: off by default. */
   rugGatesEnabled: boolean;
   minLiquidityUsd: number;
@@ -436,6 +440,8 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     // Unset = the scan interval (the old behaviour). The scan timer is too slow
     // for a held memecoin: SOI fell from +45% through a +33.6% stop to +11%
     // between two checks 22s apart (2026-10-01).
+    shadowEnabled: parseBoolean(env.SHADOW_LOG_ENABLED, false),
+    shadowNoTrade: parseBoolean(env.SHADOW_NO_TRADE, false),
     monitorIntervalSeconds: parseIntegerInRange(
       "MONITOR_INTERVAL_SECONDS",
       env.MONITOR_INTERVAL_SECONDS,
