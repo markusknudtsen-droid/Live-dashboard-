@@ -185,6 +185,52 @@ export async function fetchNewPumpMints(limit = 20, timeoutMs = 6000): Promise<s
     .map((c) => c.mint as string);
 }
 
+/** The few coin fields the dev ranking needs, read defensively. */
+export interface PumpCoinRecord {
+  mint: string;
+  creator: string;
+  complete: boolean;
+  usdMarketCap: number | null;
+  createdAt: number | null;
+}
+
+/** Pure: one raw pump.fun coin -> record, or undefined when it lacks a mint/creator. */
+export function toPumpCoinRecord(raw: unknown): PumpCoinRecord | undefined {
+  const c = (raw ?? undefined) as (PumpCoin & Record<string, unknown>) | undefined;
+  if (typeof c?.mint !== "string" || !c.mint || typeof c.creator !== "string" || !c.creator) return undefined;
+  const cap = typeof c.usd_market_cap === "number" ? c.usd_market_cap : Number.NaN;
+  const created = typeof c.created_timestamp === "number" ? c.created_timestamp : Number.NaN;
+  return {
+    mint: c.mint,
+    creator: c.creator,
+    complete: c.complete === true,
+    usdMarketCap: Number.isFinite(cap) ? cap : null,
+    createdAt: Number.isFinite(created) && created > 0 ? created : null,
+  };
+}
+
+/**
+ * A page of pump.fun coins for a raw query string (e.g. "creator=...&limit=100").
+ * undefined means the request failed (including a 429), which is different from
+ * an empty page: the caller backs off instead of concluding there is nothing.
+ */
+export async function fetchPumpCoinList(query: string, timeoutMs = 8000): Promise<PumpCoinRecord[] | undefined> {
+  const raw = await getJson(`${PUMP_API}/coins?${query}`, timeoutMs);
+  if (!Array.isArray(raw)) return undefined;
+  return raw.map(toPumpCoinRecord).filter((c): c is PumpCoinRecord => c !== undefined);
+}
+
+/** Current market cap (USD) and graduation flag of one coin; undefined when unreadable. */
+export async function fetchPumpCoinSnapshot(
+  mint: string,
+  timeoutMs = 6000
+): Promise<{ usdMarketCap: number | null; complete: boolean } | undefined> {
+  if (!mint) return undefined;
+  const raw = await getJson(`${PUMP_API}/coins/${encodeURIComponent(mint)}`, timeoutMs);
+  const record = toPumpCoinRecord(raw);
+  return record ? { usdMarketCap: record.usdMarketCap, complete: record.complete } : undefined;
+}
+
 /**
  * Resolve the creator wallet for a mint. Only pump.fun mints have one; anything
  * else returns undefined and simply gets no dev bonus.

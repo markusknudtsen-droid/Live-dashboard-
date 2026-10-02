@@ -44,6 +44,7 @@ import { recallVerdict, rememberVerdict, type AnalysisCache } from "./analysis-c
 import { fetchRugCheckReport } from "./rugcheck.js";
 import { fetchNewPoolMints } from "./geckoterminal.js";
 import { onchainDetectionAgeSeconds, recentOnchainMints, startOnchainFeed } from "./onchain-feed.js";
+import { startDevRanking } from "./dev-ranking.js";
 import { checkSmallCapGate } from "./small-cap-gate.js";
 import {
   fetchCreatorWallet,
@@ -1497,6 +1498,7 @@ async function main(): Promise<void> {
   // in-flight state.
   await startShadowLog();
   startOnchainFeed();
+  void startDevRanking();
   await runScheduledCycle();
 
   setInterval(() => {
