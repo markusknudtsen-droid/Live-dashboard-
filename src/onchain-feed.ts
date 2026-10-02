@@ -1,5 +1,5 @@
 /**
- * Real-time on-chain discovery: pump.fun token creations, seen the moment the
+ * Real-time on-chain discovery: pump.fun and Stonk.fun token creations, seen the moment the
  * transaction is confirmed instead of whenever an indexer lists the pool.
  *
  * Why this exists: every other source (DexScreener, GeckoTerminal, pump.fun's
@@ -20,7 +20,11 @@
  * unchanged. Fail-safe: any error is swallowed and means "no new mints";
  * nothing here can block or place a trade.
  *
- * Limits, deliberately: pump.fun launches only (not Raydium/PumpSwap
+ * Stonk.fun (Raydium LaunchLab) has no mint-carrying event, so its creation is
+ * recognised from the instruction log and the mint read with one capped
+ * getTransaction call (see onchain-launchpads.ts).
+ *
+ * Limits, deliberately: pump.fun and Stonk.fun launches only (not Raydium/PumpSwap
  * migrations or other launchpads), and the transport is the standard RPC
  * websocket. A Yellowstone gRPC stream is a faster transport for the same
  * parser; swap it in behind startOnchainFeed() if latency measurements justify
@@ -29,6 +33,16 @@
 import { Connection, PublicKey } from "@solana/web3.js";
 import { CONFIG } from "./config.js";
 import { logger } from "./logger.js";
+import {
+  LAUNCHLAB_CREATION_INSTRUCTIONS,
+  LAUNCHLAB_PROGRAM,
+  STONKFUN_PLATFORM_CONFIG,
+  extractInitialisedMint,
+  logsContainCreation,
+  transactionTouches,
+  type FeedSourceId,
+  type ParsedTxLike,
+} from "./onchain-launchpads.js";
 
 export const PUMP_FUN_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 /** PDA that is the new mint's authority; present only in create transactions. */
@@ -47,6 +61,7 @@ export interface CreatedMint {
   slot: number;
   /** Local clock when the websocket delivered the event, epoch ms. */
   detectedAt: number;
+  source?: FeedSourceId;
 }
 
 function readString(buf: Buffer, offset: number): { value: string; next: number } | null {
@@ -136,12 +151,101 @@ export interface FeedStats {
   running: boolean;
   detected: number;
   lastEventAt: number | null;
+  stonkfunDetected: number;
+  /** Stonk.fun creations skipped because the transaction lookup queue was full or failed. */
+  stonkfunDropped: number;
 }
 
 const buffer = new RecentMintBuffer();
-const stats: FeedStats = { running: false, detected: 0, lastEventAt: null };
+const stats: FeedStats = { running: false, detected: 0, lastEventAt: null, stonkfunDetected: 0, stonkfunDropped: 0 };
 let connection: Connection | null = null;
-let subscriptionId: number | null = null;
+let subscriptionIds: number[] = [];
+
+// Stonk.fun creations need one getTransaction each (~1 per 15s measured); the
+// cap keeps a burst from ever turning into an RPC flood.
+const MAX_CONCURRENT_FETCHES = 2;
+const MAX_PENDING_FETCHES = 40;
+const FETCH_ATTEMPTS = 4;
+const FETCH_RETRY_DELAY_MS = 700;
+let inFlight = 0;
+const pendingFetches: Array<{ signature: string; slot: number; detectedAt: number }> = [];
+
+/**
+ * Pure: turn a fetched Stonk.fun creation transaction into a CreatedMint, or
+ * null when it is not a Stonk.fun launch (LaunchLab also hosts other
+ * launchpads) or the mint cannot be read unambiguously.
+ */
+export function stonkfunCreationFromTx(
+  tx: ParsedTxLike | null | undefined,
+  signature: string,
+  slot: number,
+  detectedAt: number
+): CreatedMint | null {
+  if (!transactionTouches(tx, STONKFUN_PLATFORM_CONFIG)) return null;
+  const mint = extractInitialisedMint(tx);
+  if (!mint) return null;
+  return { mint, symbol: "", name: "", creator: "", signature, slot, detectedAt, source: "stonkfun" };
+}
+
+async function fetchParsedTransaction(signature: string): Promise<ParsedTxLike | null> {
+  for (let attempt = 0; attempt < FETCH_ATTEMPTS; attempt++) {
+    try {
+      const response = await fetch(CONFIG.solanaRpcUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "getTransaction",
+          // Version 1 transactions exist on mainnet now; 0 would make the RPC reject them.
+          params: [signature, { encoding: "jsonParsed", maxSupportedTransactionVersion: 1, commitment: "confirmed" }],
+        }),
+        signal: AbortSignal.timeout(5_000),
+      });
+      const body = (await response.json()) as { result?: ParsedTxLike | null };
+      if (body.result) return body.result;
+    } catch {
+      /* retry */
+    }
+    await new Promise((resolve) => setTimeout(resolve, FETCH_RETRY_DELAY_MS));
+  }
+  return null;
+}
+
+function drainFetchQueue(): void {
+  while (inFlight < MAX_CONCURRENT_FETCHES && pendingFetches.length > 0) {
+    const job = pendingFetches.shift()!;
+    inFlight += 1;
+    void fetchParsedTransaction(job.signature)
+      .then((tx) => {
+        const created = stonkfunCreationFromTx(tx, job.signature, job.slot, job.detectedAt);
+        if (!created) {
+          stats.stonkfunDropped += 1;
+          return;
+        }
+        buffer.add(created);
+        stats.detected += 1;
+        stats.stonkfunDetected += 1;
+        stats.lastEventAt = job.detectedAt;
+      })
+      .catch(() => {
+        stats.stonkfunDropped += 1;
+      })
+      .finally(() => {
+        inFlight -= 1;
+        drainFetchQueue();
+      });
+  }
+}
+
+function enqueueStonkfunCreation(signature: string, slot: number, detectedAt: number): void {
+  if (pendingFetches.length >= MAX_PENDING_FETCHES) {
+    stats.stonkfunDropped += 1;
+    return;
+  }
+  pendingFetches.push({ signature, slot, detectedAt });
+  drainFetchQueue();
+}
 
 export function getOnchainFeedStats(): FeedStats {
   return { ...stats };
@@ -174,25 +278,53 @@ export function startOnchainFeed(): void {
   try {
     const wsEndpoint = CONFIG.onchainFeedWsUrl || toWebsocketUrl(CONFIG.solanaRpcUrl);
     // web3.js re-subscribes automatically after a dropped websocket.
-    connection = new Connection(CONFIG.solanaRpcUrl, { wsEndpoint, commitment: "confirmed" });
-    subscriptionId = connection.onLogs(
-      new PublicKey(PUMP_FUN_MINT_AUTHORITY),
-      (logs, context) => {
-        try {
-          if (logs.err) return;
-          const created = parseCreateEvent(logs.logs, logs.signature, context.slot);
-          if (!created) return;
-          buffer.add(created);
-          stats.detected += 1;
-          stats.lastEventAt = created.detectedAt;
-        } catch (error) {
-          logger.debug(`on-chain feed event ignored: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      },
-      "confirmed"
-    );
+    const conn = new Connection(CONFIG.solanaRpcUrl, { wsEndpoint, commitment: "confirmed" });
+    connection = conn;
+    const sources = CONFIG.onchainFeedSources;
+    if (sources.includes("pumpfun")) {
+      subscriptionIds.push(
+        conn.onLogs(
+          new PublicKey(PUMP_FUN_MINT_AUTHORITY),
+          (logs, context) => {
+            try {
+              if (logs.err) return;
+              const created = parseCreateEvent(logs.logs, logs.signature, context.slot);
+              if (!created) return;
+              buffer.add({ ...created, source: "pumpfun" });
+              stats.detected += 1;
+              stats.lastEventAt = created.detectedAt;
+            } catch (error) {
+              logger.debug(`on-chain feed event ignored: ${error instanceof Error ? error.message : String(error)}`);
+            }
+          },
+          "confirmed"
+        )
+      );
+    }
+    if (sources.includes("stonkfun")) {
+      // Stonk.fun's platform config is in every Stonk.fun transaction (trades too),
+      // so only the creation instruction in the logs triggers a lookup.
+      subscriptionIds.push(
+        conn.onLogs(
+          new PublicKey(STONKFUN_PLATFORM_CONFIG),
+          (logs, context) => {
+            try {
+              if (logs.err) return;
+              if (!logsContainCreation(logs.logs, LAUNCHLAB_PROGRAM, LAUNCHLAB_CREATION_INSTRUCTIONS)) return;
+              enqueueStonkfunCreation(logs.signature, context.slot, Date.now());
+            } catch (error) {
+              logger.debug(`on-chain feed event ignored: ${error instanceof Error ? error.message : String(error)}`);
+            }
+          },
+          "confirmed"
+        )
+      );
+    }
     stats.running = true;
-    logger.info(`⛓️  ONCHAIN_FEED: subscribed to pump.fun creations (window ${CONFIG.onchainFeedTtlSeconds}s).`);
+    logger.info(
+      `??  ONCHAIN_FEED: subscribed to ${sources.map((s) => (s === "pumpfun" ? "pump.fun" : "Stonk.fun")).join(" + ")} creations ` +
+        `(window ${CONFIG.onchainFeedTtlSeconds}s).`
+    );
   } catch (error) {
     logger.warn(`ONCHAIN_FEED could not start: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -200,11 +332,12 @@ export function startOnchainFeed(): void {
 
 export async function stopOnchainFeed(): Promise<void> {
   try {
-    if (connection && subscriptionId !== null) await connection.removeOnLogsListener(subscriptionId);
+    if (connection) await Promise.all(subscriptionIds.map((id) => connection!.removeOnLogsListener(id)));
   } catch {
     /* shutting down */
   }
   stats.running = false;
-  subscriptionId = null;
+  subscriptionIds = [];
+  pendingFetches.length = 0;
   connection = null;
 }

@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { PublicKey } from "@solana/web3.js";
 import { parseLadder, describeLadder, type LadderRung } from "./take-profit-ladder.js";
+import { parseFeedSources, type FeedSourceId } from "./onchain-launchpads.js";
 import { parsePositionTiers, describeTiers, type PositionTier } from "./position-sizing.js";
 
 export interface AppConfig {
@@ -271,6 +272,8 @@ export interface AppConfig {
   /** Websocket URL; empty derives it from SOLANA_RPC_URL. */
   onchainFeedWsUrl: string;
   /** How long a detected mint is offered to the scanner before it is dropped. */
+  /** Which launchpads the on-chain feed watches (ONCHAIN_FEED_SOURCES: pumpfun,stonkfun). */
+  onchainFeedSources: FeedSourceId[];
   onchainFeedTtlSeconds: number;
   onchainFeedLimit: number;
   devReputationEnabled: boolean;
@@ -573,6 +576,7 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     pumpfunDiscoveryLimit: parseNumberInRange("PUMPFUN_DISCOVERY_LIMIT", env.PUMPFUN_DISCOVERY_LIMIT, 20, 1, 100),
     onchainFeedEnabled: parseBoolean(env.ONCHAIN_FEED_ENABLED, false),
     onchainFeedWsUrl: (env.ONCHAIN_FEED_WS_URL || "").trim(),
+    onchainFeedSources: parseFeedSources(env.ONCHAIN_FEED_SOURCES),
     onchainFeedTtlSeconds: parseNumberInRange("ONCHAIN_FEED_TTL_SECONDS", env.ONCHAIN_FEED_TTL_SECONDS, 180, 10, 3600),
     onchainFeedLimit: parseNumberInRange("ONCHAIN_FEED_LIMIT", env.ONCHAIN_FEED_LIMIT, 30, 1, 100),
     devReputationEnabled: parseBoolean(env.DEV_REPUTATION_ENABLED, false),
@@ -704,7 +708,7 @@ export function validateConfig(config: AppConfig = CONFIG): void {
   }
   if (config.onchainFeedEnabled) {
     console.log(
-      `   ⛓️  ONCHAIN_FEED: real-time pump.fun creations over the RPC websocket, offered for ` +
+      `   ⛓️  ONCHAIN_FEED: real-time ${config.onchainFeedSources.join(" + ")} creations over the RPC websocket, offered for ` +
         `${config.onchainFeedTtlSeconds}s and resolved via DexScreener like every other source.`
     );
   }
