@@ -266,6 +266,13 @@ export interface AppConfig {
   /** pump.fun's creation feed as a third candidate source. */
   pumpfunDiscoveryEnabled: boolean;
   pumpfunDiscoveryLimit: number;
+  /** Real-time pump.fun creations from the chain itself (ONCHAIN_FEED_ENABLED). */
+  onchainFeedEnabled: boolean;
+  /** Websocket URL; empty derives it from SOLANA_RPC_URL. */
+  onchainFeedWsUrl: string;
+  /** How long a detected mint is offered to the scanner before it is dropped. */
+  onchainFeedTtlSeconds: number;
+  onchainFeedLimit: number;
   devReputationEnabled: boolean;
   devMinFollowers: number;
   devMinMigratedTokens: number;
@@ -564,6 +571,10 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     narrativeTrendEnabled: parseBoolean(env.NARRATIVE_TREND_ENABLED, false),
     pumpfunDiscoveryEnabled: parseBoolean(env.PUMPFUN_DISCOVERY_ENABLED, false),
     pumpfunDiscoveryLimit: parseNumberInRange("PUMPFUN_DISCOVERY_LIMIT", env.PUMPFUN_DISCOVERY_LIMIT, 20, 1, 100),
+    onchainFeedEnabled: parseBoolean(env.ONCHAIN_FEED_ENABLED, false),
+    onchainFeedWsUrl: (env.ONCHAIN_FEED_WS_URL || "").trim(),
+    onchainFeedTtlSeconds: parseNumberInRange("ONCHAIN_FEED_TTL_SECONDS", env.ONCHAIN_FEED_TTL_SECONDS, 180, 10, 3600),
+    onchainFeedLimit: parseNumberInRange("ONCHAIN_FEED_LIMIT", env.ONCHAIN_FEED_LIMIT, 30, 1, 100),
     devReputationEnabled: parseBoolean(env.DEV_REPUTATION_ENABLED, false),
     devMinFollowers: parseNumberInRange("DEV_MIN_FOLLOWERS", env.DEV_MIN_FOLLOWERS, 2000, 0, 10_000_000),
     devMinMigratedTokens: parseNumberInRange("DEV_MIN_MIGRATED_TOKENS", env.DEV_MIN_MIGRATED_TOKENS, 3, 0, 10_000),
@@ -689,6 +700,12 @@ export function validateConfig(config: AppConfig = CONFIG): void {
     console.log(
       `   🦎 GECKOTERMINAL: up to ${config.geckoTerminalNewPoolsLimit} newest Solana pool(s) per cycle, ` +
         `resolved via DexScreener like every other source.`
+    );
+  }
+  if (config.onchainFeedEnabled) {
+    console.log(
+      `   ⛓️  ONCHAIN_FEED: real-time pump.fun creations over the RPC websocket, offered for ` +
+        `${config.onchainFeedTtlSeconds}s and resolved via DexScreener like every other source.`
     );
   }
   if (config.takeProfitLadder.length > 0) {

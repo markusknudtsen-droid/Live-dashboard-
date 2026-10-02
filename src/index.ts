@@ -43,6 +43,7 @@ import { recordConfidenceBonus } from "./entry-features.js";
 import { recallVerdict, rememberVerdict, type AnalysisCache } from "./analysis-cache.js";
 import { fetchRugCheckReport } from "./rugcheck.js";
 import { fetchNewPoolMints } from "./geckoterminal.js";
+import { onchainDetectionAgeSeconds, recentOnchainMints, startOnchainFeed } from "./onchain-feed.js";
 import { checkSmallCapGate } from "./small-cap-gate.js";
 import {
   fetchCreatorWallet,
@@ -662,6 +663,27 @@ async function runCycle(): Promise<void> {
         logger.info(`💊 pump.fun: ${resolved.length} new mint(s) resolved to candidates`);
       }
       tagSource(resolved, "pumpfun");
+      candidates = [...candidates, ...resolved];
+    }
+  }
+
+  // On-chain feed: pump.fun creations seen on the chain itself, typically
+  // before any indexer lists them. Same discovery-only contract as the sources
+  // above: addresses in, resolveMintsToCandidates() supplies every real field
+  // (a mint DexScreener cannot price yet drops out and is offered again next
+  // cycle until its window ends), so no gate is bypassed.
+  if (CONFIG.onchainFeedEnabled) {
+    const chainMints = recentOnchainMints().filter((addr) => !candidates.some((c) => c.address === addr));
+    if (chainMints.length > 0) {
+      const resolved = await resolveMintsToCandidates(chainMints);
+      if (resolved.length > 0) {
+        const lags = resolved.map((c) => onchainDetectionAgeSeconds(c.address)).filter((s): s is number => s !== null);
+        logger.info(
+          `⛓️  On-chain: ${resolved.length} new mint(s) resolved to candidates ` +
+            `(seen on-chain ${lags.map((s) => s.toFixed(0)).join("s, ")}s ago)`
+        );
+      }
+      tagSource(resolved, "onchain");
       candidates = [...candidates, ...resolved];
     }
   }
@@ -1474,6 +1496,7 @@ async function main(): Promise<void> {
   // stays "pending" and this cycle skips scanning/entries same as any other
   // in-flight state.
   await startShadowLog();
+  startOnchainFeed();
   await runScheduledCycle();
 
   setInterval(() => {
