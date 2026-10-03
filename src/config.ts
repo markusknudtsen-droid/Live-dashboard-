@@ -125,6 +125,7 @@ export interface AppConfig {
    */
   watchNewCoins: boolean;
   newCoinMaxAgeHours: number;
+  newCoinMinLiquidityUsd: number;
   newCoinMinMomentumPercent: number;
   /** Candidates sent to the model per cycle. Was hardcoded at 5. */
   maxCandidatesPerCycle: number;
@@ -496,7 +497,8 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     reconcileEveryTicks: parseNumberInRange("RECONCILE_EVERY_TICKS", env.RECONCILE_EVERY_TICKS, 20, 1, 10_000),
     maxConcurrentPositions: parseNumberInRange("MAX_CONCURRENT_POSITIONS", env.MAX_CONCURRENT_POSITIONS, 3, 1, 20),
     watchNewCoins: parseBoolean(env.WATCH_NEW_COINS, false),
-    newCoinMaxAgeHours: parseNumberInRange("NEW_COIN_MAX_AGE_HOURS", env.NEW_COIN_MAX_AGE_HOURS, 6, 0.05, 168),
+    newCoinMaxAgeHours: parseNumberInRange("NEW_COIN_MAX_AGE_HOURS", env.NEW_COIN_MAX_AGE_HOURS, 1, 0.05, 168),
+    newCoinMinLiquidityUsd: parseNumberInRange("NEW_COIN_MIN_LIQUIDITY_USD", env.NEW_COIN_MIN_LIQUIDITY_USD, 4800, 0, 100_000_000),
     newCoinMinMomentumPercent: parseNumberInRange("NEW_COIN_MIN_MOMENTUM_PERCENT", env.NEW_COIN_MIN_MOMENTUM_PERCENT, 15, -100, 10_000),
     maxCandidatesPerCycle: parseNumberInRange("MAX_CANDIDATES_PER_CYCLE", env.MAX_CANDIDATES_PER_CYCLE, 5, 1, 25),
     analysisConcurrency: parseNumberInRange("ANALYSIS_CONCURRENCY", env.ANALYSIS_CONCURRENCY, 4, 1, 10),
@@ -721,8 +723,8 @@ export function validateConfig(config: AppConfig = CONFIG): void {
   }
   if (config.watchNewCoins) {
     console.log(
-      `   🌱 WATCH_NEW_COINS enabled: coins under ${config.newCoinMaxAgeHours}h qualify on liquidity ` +
-        `+ >=${config.newCoinMinMomentumPercent}% short-window momentum instead of 24h volume.`
+      `   🌱 WATCH_NEW_COINS enabled: coins up to ${config.newCoinMaxAgeHours}h old use a $${config.newCoinMinLiquidityUsd} ` +
+        `liquidity floor and need >=${config.newCoinMinMomentumPercent}% short-window momentum instead of 24h volume.`
     );
   }
   if (config.telegramScrapeChannels.length > 0) {

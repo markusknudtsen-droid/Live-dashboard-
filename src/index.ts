@@ -1,6 +1,13 @@
 import { CONFIG, validateConfig } from "./config.js";
 import { recordShadowCandidates, recordShadowReject, startShadowLog } from "./shadow-log.js";
-import { scanForCandidates, resolveMintsToCandidates, resolveMintsUnfiltered, getLastBoostFeed } from "./scanner.js";
+import {
+  candidateMinLiquidityUsd,
+  isWithinNewCoinAgeWindow,
+  scanForCandidates,
+  resolveMintsToCandidates,
+  resolveMintsUnfiltered,
+  getLastBoostFeed,
+} from "./scanner.js";
 import { batchAnalyze, TradeSignal } from "./analyze.js";
 import {
   initTrader,
@@ -718,7 +725,7 @@ async function runCycle(): Promise<void> {
     for (const candidate of candidates) {
       if (getActivePositions().length >= MAX_CONCURRENT_POSITIONS) break;
       if (getActivePositions().some((p) => p.tokenAddress === candidate.address)) continue;
-      if (reentryBlocked(candidate.address, candidate.symbol, candidate.ageHours < CONFIG.newCoinMaxAgeHours)) {
+      if (reentryBlocked(candidate.address, candidate.symbol, isWithinNewCoinAgeWindow(candidate.ageHours, CONFIG))) {
         continue;
       }
 
@@ -757,8 +764,8 @@ async function runCycle(): Promise<void> {
       // because the move is usually over by the time a RugCheck round-trip
       // returns. Everything else still applies — age ceiling, market-cap
       // bounds, re-entry cooldown, reserved slots — and qualifiesForInstantBuy
-      // below still enforces the MIN_LIQUIDITY_USD floor, which is the check
-      // the operator asked to keep ("as long as the liquidity is over 5k$").
+      // below still enforces the configured liquidity floor: $5k normally,
+      // or the lower new-coin floor when WATCH_NEW_COINS applies.
       //
       // This is the riskiest path in the bot: boosts are exactly what rug
       // operators buy, and it skips both the model and RugCheck. 🦖🦖🦖 came
@@ -771,7 +778,7 @@ async function runCycle(): Promise<void> {
           topHolderPercent: undefined,
         },
         instantConfig,
-        gateConfig
+        { ...gateConfig, minLiquidityUsd: candidateMinLiquidityUsd(candidate.ageHours, CONFIG) }
       );
 
       if (!verdict.buy) {
@@ -1026,7 +1033,7 @@ async function runCycle(): Promise<void> {
     // moving coins can legitimately be worth re-entering after a wick sooner
     // than an established coin would be. It is a shorter cooldown, not zero;
     // see reentryBlocked()'s comment for why that changed.
-    const isNewCoin = signal.token.ageHours < CONFIG.newCoinMaxAgeHours;
+    const isNewCoin = isWithinNewCoinAgeWindow(signal.token.ageHours, CONFIG);
     if (reentryBlocked(signal.token.address, signal.token.symbol, CONFIG.newCoinCooldownExempt && isNewCoin)) {
       continue;
     }
@@ -1075,7 +1082,7 @@ async function runCycle(): Promise<void> {
           topHolderPercent: undefined,
         },
         {
-          minLiquidityUsd: CONFIG.minLiquidityUsd,
+          minLiquidityUsd: candidateMinLiquidityUsd(signal.token.ageHours, CONFIG),
           maxMarketCapUsd: CONFIG.maxMarketCapUsd,
           holderCheckMinMarketCapUsd: CONFIG.holderCheckMinMarketCapUsd,
           maxTopHolderPercent: CONFIG.maxTopHolderPercent,
@@ -1111,7 +1118,7 @@ async function runCycle(): Promise<void> {
         },
         {
           maxMarketCapUsd: CONFIG.smallCapMaxMarketCapUsd,
-          minLiquidityUsd: CONFIG.minLiquidityUsd,
+          minLiquidityUsd: candidateMinLiquidityUsd(signal.token.ageHours, CONFIG),
           minHolders: CONFIG.smallCapMinHolders,
           maxDevHoldingPct: CONFIG.smallCapMaxDevHoldingPct,
           maxInsiderHoldingPct: CONFIG.smallCapMaxInsiderHoldingPct,

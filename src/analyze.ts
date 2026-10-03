@@ -257,7 +257,7 @@ export function buildAnalysisRequestBody(candidate: TokenCandidate): Record<stri
 
 Key principles:
 - High buy/sell ratio (>60%) with increasing volume = strong signal
-- Fresh tokens (1-24h old) with growing liquidity = opportunity
+- Fresh tokens (up to 1h old) with growing liquidity = opportunity
 - Boosted tokens with organic volume growth = momentum play
 - Low liquidity (<$20k) = high risk, reduce position size
 - Declining buy ratio or volume = avoid

@@ -1,4 +1,5 @@
 import { CONFIG } from "./config.js";
+import type { AppConfig } from "./config.js";
 import { httpGet } from "./http.js";
 import { logger } from "./logger.js";
 import { sanitizeDisplayText } from "./text-sanitize.js";
@@ -107,13 +108,30 @@ function asNumber(value: string | number | undefined, fallback = 0): number {
  */
 function isWorthAnalysing(c: TokenCandidate): boolean {
   if (passesInitialFilter(c)) return true;
-  if (!CONFIG.watchNewCoins) return false;
+  if (!isWithinNewCoinAgeWindow(c.ageHours, CONFIG)) return false;
   return passesNewCoinFilter(
     c,
     CONFIG.newCoinMaxAgeHours,
-    CONFIG.minLiquidityUsd,
+    candidateMinLiquidityUsd(c.ageHours, CONFIG),
     CONFIG.newCoinMinMomentumPercent
   );
+}
+
+/** True only inside the configured age window and when young-coin scanning is enabled. */
+export function isWithinNewCoinAgeWindow(ageHours: number, config: AppConfig): boolean {
+  return (
+    config.watchNewCoins &&
+    Number.isFinite(ageHours) &&
+    ageHours >= 0 &&
+    ageHours <= config.newCoinMaxAgeHours
+  );
+}
+
+/** Use the dedicated lower floor only for young coins when that path is enabled. */
+export function candidateMinLiquidityUsd(ageHours: number, config: AppConfig): number {
+  return isWithinNewCoinAgeWindow(ageHours, config)
+    ? config.newCoinMinLiquidityUsd
+    : config.minLiquidityUsd;
 }
 
 // DexScreener's /tokens/v1/{chain}/{a,b,c} accepts up to 30 comma-separated addresses.
@@ -339,7 +357,7 @@ export function passesNewCoinFilter(
   minLiquidityUsd: number,
   minMomentumPercent: number
 ): boolean {
-  if (!Number.isFinite(candidate.ageHours) || candidate.ageHours > maxAgeHours) return false;
+  if (!Number.isFinite(candidate.ageHours) || candidate.ageHours < 0 || candidate.ageHours > maxAgeHours) return false;
   // Liquidity is the one hard requirement that does not relax with age: it is
   // what decides whether a position can be exited at all.
   if (candidate.liquidityUsd < minLiquidityUsd) return false;

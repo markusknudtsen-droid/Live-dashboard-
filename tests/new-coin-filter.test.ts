@@ -1,6 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { passesNewCoinFilter, passesInitialFilter, type TokenCandidate } from "../src/scanner.js";
+import {
+  candidateMinLiquidityUsd,
+  isWithinNewCoinAgeWindow,
+  passesNewCoinFilter,
+  passesInitialFilter,
+  type TokenCandidate,
+} from "../src/scanner.js";
 import { buildConfig } from "../src/config.js";
 
 function candidate(over: Partial<TokenCandidate> = {}): TokenCandidate {
@@ -67,8 +73,46 @@ test("an old coin is not a new coin, however well it is moving", () => {
 test("new-coin scanning is off unless enabled, and its knobs are configurable", () => {
   assert.equal(buildConfig({}).watchNewCoins, false);
   assert.equal(buildConfig({ WATCH_NEW_COINS: "true" }).watchNewCoins, true);
-  assert.equal(buildConfig({}).newCoinMaxAgeHours, 6);
+  assert.equal(buildConfig({}).newCoinMaxAgeHours, 1);
   assert.equal(buildConfig({ NEW_COIN_MAX_AGE_HOURS: "2" }).newCoinMaxAgeHours, 2);
+  assert.equal(buildConfig({}).newCoinMinLiquidityUsd, 4800);
+  assert.equal(buildConfig({ NEW_COIN_MIN_LIQUIDITY_USD: "4500" }).newCoinMinLiquidityUsd, 4500);
+});
+
+test("the enabled new-coin age window includes launch through one hour", () => {
+  const config = buildConfig({ WATCH_NEW_COINS: "true" });
+  assert.equal(isWithinNewCoinAgeWindow(0, config), true);
+  assert.equal(isWithinNewCoinAgeWindow(0.5 / 60, config), true);
+  assert.equal(isWithinNewCoinAgeWindow(1, config), true);
+  assert.equal(isWithinNewCoinAgeWindow(1 + 1 / 60, config), false);
+  assert.equal(isWithinNewCoinAgeWindow(-0.01, config), false);
+  assert.equal(isWithinNewCoinAgeWindow(0.5, { ...config, watchNewCoins: false }), false);
+});
+
+test("young coins use the configured lower liquidity floor while established coins keep the standard floor", () => {
+  const config = buildConfig({
+    WATCH_NEW_COINS: "true",
+    NEW_COIN_MAX_AGE_HOURS: "6",
+    NEW_COIN_MIN_LIQUIDITY_USD: "4800",
+    MIN_LIQUIDITY_USD: "5000",
+  });
+  assert.equal(candidateMinLiquidityUsd(1, config), 4800);
+  assert.equal(candidateMinLiquidityUsd(6, config), 4800);
+  assert.equal(candidateMinLiquidityUsd(7, config), 5000);
+  assert.equal(candidateMinLiquidityUsd(1, { ...config, watchNewCoins: false }), 5000);
+});
+
+test("a young coin passes at $4,800 liquidity but not below its configured floor", () => {
+  const config = buildConfig({ WATCH_NEW_COINS: "true", NEW_COIN_MIN_LIQUIDITY_USD: "4800" });
+  const floor = candidateMinLiquidityUsd(0.5, config);
+  assert.equal(
+    passesNewCoinFilter(candidate({ ageHours: 0.5, liquidityUsd: 4800, priceChange5m: 20 }), 6, floor, 15),
+    true
+  );
+  assert.equal(
+    passesNewCoinFilter(candidate({ ageHours: 0.5, liquidityUsd: 4799, priceChange5m: 20 }), 6, floor, 15),
+    false
+  );
 });
 
 test("analysis cap and cache TTL are configurable, defaulting to prior behaviour", () => {

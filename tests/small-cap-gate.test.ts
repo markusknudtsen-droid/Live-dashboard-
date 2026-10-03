@@ -42,7 +42,7 @@ test("a coin clearing every bar passes", () => {
   assert.equal(checkSmallCapGate(baseInput).pass, true);
 });
 
-test("the $5,000 liquidity floor is enforced on new coins too, same as everywhere else", () => {
+test("the configured liquidity floor is enforced by the small-cap gate", () => {
   const r = checkSmallCapGate({ ...baseInput, liquidityUsd: 4999 });
   assert.equal(r.pass, false);
   assert.match(r.reason ?? "", /liquidity/);
