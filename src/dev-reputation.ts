@@ -220,15 +220,42 @@ export async function fetchPumpCoinList(query: string, timeoutMs = 8000): Promis
   return raw.map(toPumpCoinRecord).filter((c): c is PumpCoinRecord => c !== undefined);
 }
 
+const DEXSCREENER_TOKENS_API = "https://api.dexscreener.com/tokens/v1/solana";
+
+/**
+ * Pure: DexScreener's pair list for one mint -> market cap and graduation flag.
+ * pump.fun removed its per-coin route (GET /coins/{mint} is now a 404), so
+ * DexScreener is the reader. It lists bonding-curve coins with dexId "pumpfun"
+ * and a market cap but no liquidity; any other dexId means a real pool exists,
+ * i.e. the coin graduated.
+ */
+export function snapshotFromDexPairs(
+  raw: unknown
+): { usdMarketCap: number | null; complete: boolean } | undefined {
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const pairs = raw as Array<{
+    dexId?: unknown;
+    marketCap?: unknown;
+    fdv?: unknown;
+    liquidity?: { usd?: unknown };
+  }>;
+  const liquidityOf = (p: (typeof pairs)[number]) =>
+    typeof p.liquidity?.usd === "number" && Number.isFinite(p.liquidity.usd) ? p.liquidity.usd : 0;
+  const best = pairs.reduce((a, b) => (liquidityOf(b) > liquidityOf(a) ? b : a));
+  const cap = [best.marketCap, best.fdv].find((v): v is number => typeof v === "number" && Number.isFinite(v));
+  return {
+    usdMarketCap: cap ?? null,
+    complete: pairs.some((p) => typeof p.dexId === "string" && p.dexId !== "pumpfun"),
+  };
+}
+
 /** Current market cap (USD) and graduation flag of one coin; undefined when unreadable. */
 export async function fetchPumpCoinSnapshot(
   mint: string,
   timeoutMs = 6000
 ): Promise<{ usdMarketCap: number | null; complete: boolean } | undefined> {
   if (!mint) return undefined;
-  const raw = await getJson(`${PUMP_API}/coins/${encodeURIComponent(mint)}`, timeoutMs);
-  const record = toPumpCoinRecord(raw);
-  return record ? { usdMarketCap: record.usdMarketCap, complete: record.complete } : undefined;
+  return snapshotFromDexPairs(await getJson(`${DEXSCREENER_TOKENS_API}/${encodeURIComponent(mint)}`, timeoutMs));
 }
 
 /**

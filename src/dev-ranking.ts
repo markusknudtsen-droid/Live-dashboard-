@@ -27,7 +27,7 @@ import { logger } from "./logger.js";
 
 export const ALERT_HORIZONS_MIN = [1, 5, 15, 60];
 const DAY_MS = 86_400_000;
-/** Wait before the opening market-cap reading, so the API has indexed the coin. */
+/** Wait before the first market-cap read; it is retried until DexScreener lists the coin. */
 const OPEN_DELAY_MS = 15_000;
 
 export interface CreatorStats {
@@ -369,6 +369,19 @@ export interface PendingLaunch {
   done: number[];
 }
 
+/**
+ * The opening market cap is the first readable one. DexScreener lists a new
+ * coin 30-80 s after launch, so an empty read is retried each tick and only
+ * recorded as unreadable once the coin is this old.
+ */
+const OPEN_GIVE_UP_MS = 3 * 60_000;
+
+/** Pure: undefined = keep trying, otherwise the opening cap (null = gave up). */
+export function resolveOpening(cap: number | null, ageMs: number): number | null | undefined {
+  if (cap !== null) return cap;
+  return ageMs >= OPEN_GIVE_UP_MS ? null : undefined;
+}
+
 /** Pure: horizons (minutes) that are due and not recorded yet. */
 export function dueHorizons(check: PendingLaunch, now: number): number[] {
   return ALERT_HORIZONS_MIN.filter((h) => !check.done.includes(h) && now - check.t0 >= h * 60_000);
@@ -551,8 +564,11 @@ async function tick(): Promise<void> {
     for (const check of pending) {
       if (check.cap0 === undefined && now - check.t0 >= OPEN_DELAY_MS) {
         const snap = await fetchPumpCoinSnapshot(check.mint).catch(() => undefined);
-        check.cap0 = snap?.usdMarketCap ?? null;
-        append({ type: "open", t: Date.now(), mint: check.mint, kind: check.kind, capUsd: check.cap0 });
+        const opening = resolveOpening(snap?.usdMarketCap ?? null, now - check.t0);
+        if (opening !== undefined) {
+          check.cap0 = opening;
+          append({ type: "open", t: Date.now(), mint: check.mint, kind: check.kind, capUsd: opening });
+        }
         await new Promise((r) => setTimeout(r, 400));
       }
       for (const h of dueHorizons(check, now)) {

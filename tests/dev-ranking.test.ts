@@ -11,6 +11,7 @@ import {
   pendingFromLines,
   pruneCreatorCache,
   rankCreators,
+  resolveOpening,
   selectSeedCreators,
   summariseCreator,
   summariseOutcomes,
@@ -19,7 +20,7 @@ import {
   type PendingLaunch,
   type RankingCriteria,
 } from "../src/dev-ranking.js";
-import { toPumpCoinRecord, type PumpCoinRecord } from "../src/dev-reputation.js";
+import { snapshotFromDexPairs, toPumpCoinRecord, type PumpCoinRecord } from "../src/dev-reputation.js";
 
 const DAY = 86_400_000;
 const NOW = 1_800_000_000_000;
@@ -60,6 +61,36 @@ test("toPumpCoinRecord reads defensively: missing cap is null (not 0), missing c
   assert.equal(toPumpCoinRecord({ mint: "M" }), undefined);
   assert.equal(toPumpCoinRecord(null), undefined);
   assert.equal(toPumpCoinRecord("x"), undefined);
+});
+
+test("snapshotFromDexPairs reads a bonding-curve coin: market cap present, not graduated", () => {
+  // Shape captured live from DexScreener: dexId pumpfun, marketCap set, no liquidity.
+  const snap = snapshotFromDexPairs([{ dexId: "pumpfun", marketCap: 4416.62, fdv: 4416.62 }]);
+  assert.deepEqual(snap, { usdMarketCap: 4416.62, complete: false });
+});
+
+test("snapshotFromDexPairs marks a coin with a real pool as graduated and prefers the deepest pair", () => {
+  const snap = snapshotFromDexPairs([
+    { dexId: "pumpfun", marketCap: 60000, liquidity: { usd: 0 } },
+    { dexId: "pumpswap", marketCap: 72000, liquidity: { usd: 18000 } },
+  ]);
+  assert.deepEqual(snap, { usdMarketCap: 72000, complete: true });
+});
+
+test("snapshotFromDexPairs falls back to fdv and returns undefined for anything unreadable", () => {
+  assert.equal(snapshotFromDexPairs([{ dexId: "pumpfun", fdv: 5000 }])?.usdMarketCap, 5000);
+  assert.equal(snapshotFromDexPairs([{ dexId: "pumpfun" }])?.usdMarketCap, null);
+  assert.equal(snapshotFromDexPairs([]), undefined);
+  assert.equal(snapshotFromDexPairs(null), undefined);
+  assert.equal(snapshotFromDexPairs({ statusCode: 404 }), undefined);
+});
+
+test("resolveOpening keeps trying until the coin is listed, then gives up after 3 minutes", () => {
+  assert.equal(resolveOpening(2500, 20_000), 2500);
+  assert.equal(resolveOpening(null, 20_000), undefined);
+  assert.equal(resolveOpening(null, 179_000), undefined);
+  assert.equal(resolveOpening(null, 180_000), null);
+  assert.equal(resolveOpening(900, 200_000), 900, "a late success still counts");
 });
 
 test("summariseCreator counts only the creator's own coins", () => {
