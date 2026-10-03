@@ -150,3 +150,42 @@ test("MAYHEM_SNIPE config: off by default, only an explicit paper turns it on, 6
   assert.equal(buildConfig({ MAYHEM_SNIPE_MODE: "live" }).mayhemSnipeMode, "off", "there is no live mode");
   assert.throws(() => buildConfig({ MAYHEM_SNIPE_SLIPPAGE_PERCENT: "100" }), /MAYHEM_SNIPE_SLIPPAGE_PERCENT/);
 });
+
+test("minimum age: a liquid coin waits until it is old enough, then is bought if still liquid", () => {
+  const t0 = 1_000_000;
+  const rules: SnipeRules = { ...RULES, minAgeMs: 5_000 };
+  const rich = curve({ rSol: (3n * SOL) / 2n }); // $300
+  const early = evaluateCandidate(rich, t0, t0 + 2_000, 200, rules);
+  assert.equal(early.action, "wait");
+  assert.match(early.reason, /waiting until 5s old/);
+  assert.equal(evaluateCandidate(rich, t0, t0 + 4_999, 200, rules).action, "wait");
+  assert.equal(evaluateCandidate(rich, t0, t0 + 5_000, 200, rules).action, "buy", "exactly at the minimum age");
+  assert.equal(evaluateCandidate(rich, t0, t0 + 15_000, 200, rules).action, "buy");
+  assert.equal(evaluateCandidate(rich, t0, t0 + 16_000, 200, rules).action, "skip", "the deadline still wins");
+});
+
+test("minimum age: seed liquidity that is pulled before the minimum age is never bought", () => {
+  const t0 = 1_000_000;
+  const rules: SnipeRules = { ...RULES, minAgeMs: 5_000 };
+  const seeded = curve({ rSol: (3n * SOL) / 2n }); // $300 at 2s
+  assert.equal(evaluateCandidate(seeded, t0, t0 + 2_000, 200, rules).action, "wait");
+  const pulled = curve({ rSol: SOL / 20n }); // $10 at 6s: the seed was withdrawn
+  assert.equal(evaluateCandidate(pulled, t0, t0 + 6_000, 200, rules).action, "wait");
+  const end = evaluateCandidate(pulled, t0, t0 + 16_000, 200, rules);
+  assert.equal(end.action, "skip");
+  assert.match(end.reason, /< \$200 at the deadline/);
+});
+
+test("minimum age: unset or 0 keeps the old behaviour (buy the moment liquidity qualifies)", () => {
+  const t0 = 1_000_000;
+  const rich = curve({ rSol: (3n * SOL) / 2n });
+  assert.equal(evaluateCandidate(rich, t0, t0 + 1_000, 200, RULES).action, "buy");
+  assert.equal(evaluateCandidate(rich, t0, t0 + 1_000, 200, { ...RULES, minAgeMs: 0 }).action, "buy");
+});
+
+test("MAYHEM_SNIPE_MIN_AGE_SECONDS: defaults to 0, accepts 5, rejects out of range", () => {
+  assert.equal(buildConfig({}).mayhemSnipeMinAgeSeconds, 0);
+  assert.equal(buildConfig({ MAYHEM_SNIPE_MIN_AGE_SECONDS: "5" }).mayhemSnipeMinAgeSeconds, 5);
+  assert.throws(() => buildConfig({ MAYHEM_SNIPE_MIN_AGE_SECONDS: "120" }), /MAYHEM_SNIPE_MIN_AGE_SECONDS/);
+  assert.throws(() => buildConfig({ MAYHEM_SNIPE_MIN_AGE_SECONDS: "-1" }), /MAYHEM_SNIPE_MIN_AGE_SECONDS/);
+});

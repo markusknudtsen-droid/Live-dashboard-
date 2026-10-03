@@ -144,6 +144,11 @@ export function liquidityUsd(realSolLamports: bigint, solUsd: number): number {
 export interface SnipeRules {
   minLiquidityUsd: number;
   buyDeadlineMs: number;
+  /**
+   * Do not buy before the coin is this old. A coin still liquid at that age is bought; one
+   * whose liquidity was pulled in the meantime simply runs out the clock and is skipped.
+   */
+  minAgeMs?: number;
 }
 
 export interface Decision {
@@ -171,8 +176,12 @@ export function evaluateCandidate(
       : { action: "wait", reason: "no SOL price yet", liquidityUsd: 0 };
   }
   if (liq >= rules.minLiquidityUsd) {
-    return late
-      ? { action: "skip", reason: `reached $${liq.toFixed(0)} only after the ${rules.buyDeadlineMs / 1000}s deadline`, liquidityUsd: liq }
+    if (late) {
+      return { action: "skip", reason: `reached $${liq.toFixed(0)} only after the ${rules.buyDeadlineMs / 1000}s deadline`, liquidityUsd: liq };
+    }
+    const minAgeMs = rules.minAgeMs ?? 0;
+    return nowMs - launchMs < minAgeMs
+      ? { action: "wait", reason: `liquidity $${liq.toFixed(0)}, waiting until ${minAgeMs / 1000}s old`, liquidityUsd: liq }
       : { action: "buy", reason: `liquidity $${liq.toFixed(0)}`, liquidityUsd: liq };
   }
   return late
@@ -187,6 +196,8 @@ interface Tracked {
   symbol: string;
   launchMs: number;
   detectedAt: number;
+  /** Highest liquidity (USD) seen while tracking: shows how much early liquidity later vanished. */
+  peakLiq: number;
 }
 
 const active = new Map<string, Tracked>();
@@ -331,6 +342,7 @@ async function pollOnce(): Promise<void> {
     const rules: SnipeRules = {
       minLiquidityUsd: CONFIG.mayhemSnipeMinLiquidityUsd,
       buyDeadlineMs: CONFIG.mayhemSnipeBuyDeadlineSeconds * 1000,
+      minAgeMs: CONFIG.mayhemSnipeMinAgeSeconds * 1000,
     };
     for (let i = 0; i < tracked.length; i += 100) {
       const chunk = tracked.slice(i, i + 100);
@@ -352,10 +364,19 @@ async function pollOnce(): Promise<void> {
           return;
         }
         const d = evaluateCandidate(curve, t.launchMs, now, solUsd, rules);
+        t.peakLiq = Math.max(t.peakLiq, d.liquidityUsd);
         if (d.action === "wait") return;
         active.delete(t.mint);
         if (d.action === "skip") {
-          record({ type: "skip", mint: t.mint, symbol: t.symbol, reason: d.reason, liquidityUsd: d.liquidityUsd, ageMs: now - t.launchMs });
+          record({
+            type: "skip",
+            mint: t.mint,
+            symbol: t.symbol,
+            reason: d.reason,
+            liquidityUsd: d.liquidityUsd,
+            peakLiquidityUsd: t.peakLiq,
+            ageMs: now - t.launchMs,
+          });
           return;
         }
         void simulateBuy(t, curve, d.liquidityUsd, solUsd as number).catch(() => undefined);
@@ -381,7 +402,7 @@ export function startMayhemSnipe(): void {
           const now = Date.now();
           // Trust the chain's clock for "after launch", unless it is wildly off our own.
           const launchMs = Math.abs(now - launch.chainTimeMs) < 30_000 ? launch.chainTimeMs : now;
-          active.set(launch.mint, { mint: launch.mint, symbol: launch.symbol, launchMs, detectedAt: now });
+          active.set(launch.mint, { mint: launch.mint, symbol: launch.symbol, launchMs, detectedAt: now, peakLiq: 0 });
           void pollOnce().catch(() => undefined);
         } catch (error) {
           logger.debug(`mayhem snipe event ignored: ${error instanceof Error ? error.message : String(error)}`);

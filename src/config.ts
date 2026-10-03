@@ -200,6 +200,8 @@ export interface AppConfig {
   mayhemSnipeMinLiquidityUsd: number;
   /** Seconds after launch by which the buy must have filled, else the coin is skipped. */
   mayhemSnipeBuyDeadlineSeconds: number;
+  /** Do not buy before the coin is this old (0 = buy as soon as liquidity qualifies). */
+  mayhemSnipeMinAgeSeconds: number;
   /** Seconds after launch at which 100% is sold, whatever the price. */
   mayhemSnipeHoldSeconds: number;
   /** Slippage tolerance applied to BOTH the buy and the sell, in percent. */
@@ -571,6 +573,7 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     mayhemSnipeMode: (env.MAYHEM_SNIPE_MODE || "").trim().toLowerCase() === "paper" ? "paper" : "off",
     mayhemSnipeMinLiquidityUsd: parseNumberInRange("MAYHEM_SNIPE_MIN_LIQUIDITY_USD", env.MAYHEM_SNIPE_MIN_LIQUIDITY_USD, 200, 0, 1_000_000),
     mayhemSnipeBuyDeadlineSeconds: parseNumberInRange("MAYHEM_SNIPE_BUY_DEADLINE_SECONDS", env.MAYHEM_SNIPE_BUY_DEADLINE_SECONDS, 15, 1, 120),
+    mayhemSnipeMinAgeSeconds: parseNumberInRange("MAYHEM_SNIPE_MIN_AGE_SECONDS", env.MAYHEM_SNIPE_MIN_AGE_SECONDS, 0, 0, 119),
     mayhemSnipeHoldSeconds: parseNumberInRange("MAYHEM_SNIPE_HOLD_SECONDS", env.MAYHEM_SNIPE_HOLD_SECONDS, 40, 2, 3600),
     mayhemSnipeSlippagePercent: parseNumberInRange("MAYHEM_SNIPE_SLIPPAGE_PERCENT", env.MAYHEM_SNIPE_SLIPPAGE_PERCENT, 60, 0, 99),
     mayhemSnipeStakeSol: parseNumberInRange("MAYHEM_SNIPE_STAKE_SOL", env.MAYHEM_SNIPE_STAKE_SOL, 0.05, 0.001, 100),
@@ -741,9 +744,16 @@ export function validateConfig(config: AppConfig = CONFIG): void {
   if (config.mayhemSnipeMode !== "off") {
     console.log(
       `   🎯 MAYHEM_SNIPE (${config.mayhemSnipeMode}, simulation only): pump.fun mayhem coins with >= $${config.mayhemSnipeMinLiquidityUsd} ` +
-        `liquidity are bought within ${config.mayhemSnipeBuyDeadlineSeconds}s of launch and 100% sold at ${config.mayhemSnipeHoldSeconds}s; ` +
+        `liquidity are bought ${config.mayhemSnipeMinAgeSeconds > 0 ? `from ${config.mayhemSnipeMinAgeSeconds}s to ` : "within "}` +
+        `${config.mayhemSnipeBuyDeadlineSeconds}s of launch and 100% sold at ${config.mayhemSnipeHoldSeconds}s; ` +
         `${config.mayhemSnipeSlippagePercent}% slippage both ways, ${config.mayhemSnipeStakeSol} SOL per snipe.`
     );
+    if (config.mayhemSnipeMinAgeSeconds >= config.mayhemSnipeBuyDeadlineSeconds) {
+      console.warn(
+        `   ⚠️  MAYHEM_SNIPE_MIN_AGE_SECONDS (${config.mayhemSnipeMinAgeSeconds}) is not below the buy deadline ` +
+          `(${config.mayhemSnipeBuyDeadlineSeconds}s): the sniper can never buy.`
+      );
+    }
   }
   console.log(
     `   🔬 SMALL_CAP_GATE: coins under $${config.smallCapMaxMarketCapUsd.toLocaleString("en-US")} need RugCheck ` +
