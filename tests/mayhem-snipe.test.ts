@@ -1,16 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { PublicKey } from "@solana/web3.js";
-import { buildConfig } from "../src/config.js";
+import { buildConfig, validateConfig } from "../src/config.js";
 import {
   decodeCurve,
   evaluateCandidate,
+  holdersFromLargest,
+  holdersNeeded,
+  ladderAction,
   liquidityUsd,
   parseMayhemCreate,
   quoteBuy,
   quoteSell,
   withinSlippage,
   type CurveState,
+  type Ladder,
   type SnipeRules,
 } from "../src/mayhem-snipe.js";
 
@@ -181,6 +185,123 @@ test("minimum age: unset or 0 keeps the old behaviour (buy the moment liquidity 
   const rich = curve({ rSol: (3n * SOL) / 2n });
   assert.equal(evaluateCandidate(rich, t0, t0 + 1_000, 200, RULES).action, "buy");
   assert.equal(evaluateCandidate(rich, t0, t0 + 1_000, 200, { ...RULES, minAgeMs: 0 }).action, "buy");
+});
+
+const HOLDER_RULES: SnipeRules = { minLiquidityUsd: 3000, buyDeadlineMs: 120_000, minHolders: 6 };
+const LADDER: Ladder = { tp1Pct: 78, tp1SellPct: 50, tp2Pct: 300 };
+
+test("holders: non-empty token accounts minus the curve's own", () => {
+  assert.equal(holdersFromLargest([]), 0);
+  assert.equal(holdersFromLargest([{ amount: "500" }]), 0, "only the curve holds anything");
+  assert.equal(holdersFromLargest([{ amount: "500" }, { amount: "40" }, { amount: "0" }, { amount: "7" }]), 2);
+  assert.equal(holdersFromLargest(Array.from({ length: 20 }, () => ({ amount: "1" }))), 19, "the top-20 view caps at 19");
+});
+
+test("holders: a liquid coin waits for 6 holders, is bought at 6, and is skipped with the reason at the deadline", () => {
+  const t0 = 1_000_000;
+  const rich = curve({ rSol: 20n * SOL }); // 20 SOL at $200 = $4,000
+  assert.equal(evaluateCandidate(rich, t0, t0 + 10_000, 200, HOLDER_RULES, undefined).action, "wait");
+  const few = evaluateCandidate(rich, t0, t0 + 10_000, 200, HOLDER_RULES, 3);
+  assert.equal(few.action, "wait");
+  assert.match(few.reason, /holders 3 < 6/);
+  assert.equal(evaluateCandidate(rich, t0, t0 + 10_000, 200, HOLDER_RULES, 6).action, "buy", "exactly 6 is enough");
+  const late = evaluateCandidate(rich, t0, t0 + 121_000, 200, HOLDER_RULES, 3);
+  assert.equal(late.action, "skip");
+  assert.match(late.reason, /holders 3 < 6 at the deadline/);
+});
+
+test("holders: $3k liquidity is needed first, and 2 minutes is the limit", () => {
+  const t0 = 1_000_000;
+  const poor = curve({ rSol: (29n * SOL) / 2n }); // 14.5 SOL at $200 = $2,900
+  assert.equal(evaluateCandidate(poor, t0, t0 + 10_000, 200, HOLDER_RULES, 12).action, "wait", "$2,900 is not enough");
+  const rich = curve({ rSol: 20n * SOL });
+  assert.equal(evaluateCandidate(rich, t0, t0 + 119_000, 200, HOLDER_RULES, 8).action, "buy", "still inside the 2 minutes");
+  assert.equal(evaluateCandidate(rich, t0, t0 + 121_000, 200, HOLDER_RULES, 8).action, "skip", "older than 2 minutes");
+});
+
+test("holdersNeeded: only when liquidity, the age window and the mode all qualify", () => {
+  const t0 = 1_000_000;
+  const rich = curve({ rSol: 20n * SOL });
+  assert.equal(holdersNeeded(rich, t0, t0 + 10_000, 200, HOLDER_RULES), true);
+  assert.equal(holdersNeeded(curve({ rSol: SOL }), t0, t0 + 10_000, 200, HOLDER_RULES), false, "too little liquidity");
+  assert.equal(holdersNeeded(rich, t0, t0 + 121_000, 200, HOLDER_RULES), false, "past the deadline");
+  assert.equal(holdersNeeded(rich, t0, t0 + 2_000, 200, { ...HOLDER_RULES, minAgeMs: 5_000 }), false, "younger than the minimum age");
+  assert.equal(holdersNeeded(rich, t0, t0 + 10_000, 200, { ...HOLDER_RULES, minHolders: 0 }), false, "no holder rule");
+  assert.equal(holdersNeeded(rich, t0, t0 + 10_000, undefined, HOLDER_RULES), false, "no SOL price");
+  assert.equal(holdersNeeded(curve({ rSol: 20n * SOL, mayhem: 0 }), t0, t0 + 10_000, 200, HOLDER_RULES), false, "not a mayhem coin");
+});
+
+test("ladder: nothing below +78%, 50% at +78%, the rest at +300%, measured against the cost of what is left", () => {
+  const basis = 49_375_000; // 0.05 SOL less the 1.25% fee
+  const p = { basis, initialTokens: 1000n, tokens: 1000n, tp1Done: false };
+  assert.deepEqual(ladderAction(p, basis * 1.7799, LADDER), { leg: "none" });
+  assert.deepEqual(ladderAction(p, basis * 1.7801, LADDER), { leg: "tp1", fraction: 0.5 });
+  const half = { ...p, tokens: 500n, tp1Done: true };
+  assert.deepEqual(ladderAction(half, (basis / 2) * 3.99, LADDER), { leg: "none" }, "TP1 is never repeated");
+  assert.deepEqual(ladderAction(half, (basis / 2) * 4.01, LADDER), { leg: "tp2", fraction: 1 });
+});
+
+test("ladder: a price that gaps straight past +300% sells everything at once; an empty position never triggers", () => {
+  const p = { basis: 49_375_000, initialTokens: 1000n, tokens: 1000n, tp1Done: false };
+  assert.deepEqual(ladderAction(p, 49_375_000 * 4.5, LADDER), { leg: "tp2", fraction: 1 });
+  assert.deepEqual(ladderAction({ ...p, tokens: 0n }, 1e12, LADDER), { leg: "none" });
+});
+
+test("ladder on real curve maths: +90% fires TP1, +400% fires TP2, a drained curve with a high virtual price fires nothing", () => {
+  // A curve with 18 real SOL (about $3k at $170), constant product k kept across price moves.
+  const c0 = curve({ vSol: 48n * SOL, vTok: 670_625_000_000_000n, rSol: 18n * SOL });
+  const stake = SOL / 20n;
+  const tokens = quoteBuy(c0, stake, 125n);
+  const basis = Number(stake - (stake * 125n) / 10_000n);
+  const k = c0.vSol * c0.vTok;
+  const priceMoved = (factor: number, realSol?: bigint): CurveState => {
+    const vSol = BigInt(Math.round(Number(c0.vSol) * Math.sqrt(factor))); // price is proportional to vSol squared over k
+    return curve({ vSol, vTok: k / vSol, rSol: realSol ?? c0.rSol + (vSol - c0.vSol) });
+  };
+  const leg = (c: CurveState) =>
+    ladderAction({ basis, initialTokens: tokens, tokens, tp1Done: false }, Number(quoteSell(c, tokens, 0n)), LADDER).leg;
+  assert.equal(leg(c0), "none");
+  assert.equal(leg(priceMoved(1.5)), "none");
+  assert.equal(leg(priceMoved(2.0)), "tp1");
+  assert.equal(leg(priceMoved(5.0)), "tp2");
+  assert.equal(leg(priceMoved(5.0, 0n)), "none", "no real SOL left: the leftover virtual price cannot be sold into");
+});
+
+test("MAYHEM_SNIPE ladder config: off by default, the requested setup parses, bad values are rejected", () => {
+  const d = buildConfig({});
+  assert.equal(d.mayhemSnipeMinHolders, 0);
+  assert.equal(d.mayhemSnipeTp1Percent, 0);
+  assert.equal(d.mayhemSnipeTp1SellPercent, 50);
+  assert.equal(d.mayhemSnipeTp2Percent, 300);
+  const c = buildConfig({
+    MAYHEM_SNIPE_MODE: "paper",
+    MAYHEM_SNIPE_MIN_LIQUIDITY_USD: "3000",
+    MAYHEM_SNIPE_MIN_HOLDERS: "6",
+    MAYHEM_SNIPE_BUY_DEADLINE_SECONDS: "120",
+    MAYHEM_SNIPE_TP1_PERCENT: "78",
+    MAYHEM_SNIPE_TP2_PERCENT: "300",
+    MAYHEM_SNIPE_HOLD_SECONDS: "0",
+  });
+  assert.equal(c.mayhemSnipeMinLiquidityUsd, 3000);
+  assert.equal(c.mayhemSnipeMinHolders, 6);
+  assert.equal(c.mayhemSnipeBuyDeadlineSeconds, 120);
+  assert.equal(c.mayhemSnipeTp1Percent, 78);
+  assert.equal(c.mayhemSnipeHoldSeconds, 0);
+  assert.throws(() => buildConfig({ MAYHEM_SNIPE_MIN_HOLDERS: "20" }), /MAYHEM_SNIPE_MIN_HOLDERS/);
+  assert.throws(() => buildConfig({ MAYHEM_SNIPE_MIN_HOLDERS: "2.5" }), /MAYHEM_SNIPE_MIN_HOLDERS/);
+  assert.throws(() => buildConfig({ MAYHEM_SNIPE_TP1_SELL_PERCENT: "100" }), /MAYHEM_SNIPE_TP1_SELL_PERCENT/);
+});
+
+test("validateConfig: no time exit needs the ladder, and TP2 must be above TP1", () => {
+  const base = { DRY_RUN: "true", MAYHEM_SNIPE_MODE: "paper" };
+  assert.throws(() => validateConfig(buildConfig({ ...base, MAYHEM_SNIPE_HOLD_SECONDS: "0" })), /never sells/);
+  assert.throws(
+    () => validateConfig(buildConfig({ ...base, MAYHEM_SNIPE_TP1_PERCENT: "300", MAYHEM_SNIPE_TP2_PERCENT: "78" })),
+    /TP2_PERCENT must be above/
+  );
+  assert.doesNotThrow(() =>
+    validateConfig(buildConfig({ ...base, MAYHEM_SNIPE_TP1_PERCENT: "78", MAYHEM_SNIPE_HOLD_SECONDS: "0" }))
+  );
 });
 
 test("MAYHEM_SNIPE_MIN_AGE_SECONDS: defaults to 0, accepts 5, rejects out of range", () => {
