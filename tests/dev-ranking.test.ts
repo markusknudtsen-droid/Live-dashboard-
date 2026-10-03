@@ -252,12 +252,31 @@ test("buildRanking checkpoints every 10 new lookups with everything known so far
     },
     {
       ...OPTS,
+      criteria: { ...CRITERIA, topN: 100 },
       seedPages: 1,
       maxLookups: 25,
       onCheckpoint: (all) => void checkpoints.push(all.length),
     }
   );
   assert.deepEqual(checkpoints, [10, 20]);
+});
+
+test("buildRanking stops looking up creators once topN of them qualify", async () => {
+  let lookups = 0;
+  const result = await buildRanking(
+    {
+      fetchList: async (q) => {
+        if (q.startsWith("complete=true")) return Array.from({ length: 25 }, (_, i) => coin(`W${i}`, true));
+        lookups += 1;
+        const wallet = /creator=([^&]+)/.exec(q)?.[1] ?? "";
+        return Array.from({ length: 6 }, (_, i) => coin(wallet, i < 3));
+      },
+      sleep: async () => undefined,
+    },
+    { ...OPTS, criteria: { ...CRITERIA, topN: 4 }, seedPages: 1, maxLookups: 25 }
+  );
+  assert.equal(lookups, 4);
+  assert.equal(result.ranking.devs.length, 4);
 });
 
 test("pruneCreatorCache drops records older than 14 days but keeps undated ones", () => {

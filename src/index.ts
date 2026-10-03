@@ -52,6 +52,7 @@ import { fetchRugCheckReport } from "./rugcheck.js";
 import { fetchNewPoolMints } from "./geckoterminal.js";
 import { onchainDetectionAgeSeconds, recentOnchainMints, startOnchainFeed } from "./onchain-feed.js";
 import { startDevRanking } from "./dev-ranking.js";
+import { loadDevTradeLedger, recordDevTrade } from "./dev-trade-ledger.js";
 import { checkSmallCapGate } from "./small-cap-gate.js";
 import {
   fetchCreatorWallet,
@@ -1312,6 +1313,8 @@ async function main(): Promise<void> {
         wasLoss: (event.pnlPercent ?? 0) < 0,
       });
       recentExits = pruneExits(recentExits, Date.now(), pruneConfig());
+      // Remember the coin's creator and the result, so a later launch by them is recognised.
+      void recordDevTrade(event.tokenAddress, event.symbol, event.pnlPercent);
       // Persist immediately rather than waiting for cycle end. An exit record
       // held only in memory is lost if the process dies first, and the cooldown
       // then has no memory of the coin at all — which is how a token exited at a
@@ -1505,6 +1508,7 @@ async function main(): Promise<void> {
   // in-flight state.
   await startShadowLog();
   startOnchainFeed();
+  await loadDevTradeLedger();
   void startDevRanking();
   await runScheduledCycle();
 

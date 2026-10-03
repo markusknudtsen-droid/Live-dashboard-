@@ -22,7 +22,8 @@
 import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { CONFIG } from "./config.js";
-import { fetchPumpCoinList, fetchPumpCoinSnapshot, type PumpCoinRecord } from "./dev-reputation.js";
+import { knownDevSummary } from "./dev-trade-ledger.js";
+import { fetchPumpCoinList,fetchPumpCoinSnapshot, type PumpCoinRecord } from "./dev-reputation.js";
 import { logger } from "./logger.js";
 
 export const ALERT_HORIZONS_MIN = [1, 5, 15, 60];
@@ -203,6 +204,8 @@ export async function buildRanking(deps: BuildDeps, options: BuildOptions): Prom
     looked += 1;
     const summary = summariseCreator(wallet, coins, now);
     if (summary) merged.set(wallet, summary);
+    // Enough qualifying creators: the rest of the list adds nothing the alert can use.
+    if (rankCreators([...merged.values()], { ...options.criteria, topN: Infinity }, now).length >= options.criteria.topN) break;
     if (looked % 10 === 0) {
       options.onProgress?.(`looked up ${looked}/${wallets.length} new creators`);
       await options.onCheckpoint?.([...merged.values()]);
@@ -519,6 +522,15 @@ export function noteDevLaunch(launch: LaunchEvent): void {
   if (!CONFIG.devRankingEnabled || !launch.creator || !launch.mint) return;
   try {
     if (seenMints.has(launch.mint)) return;
+    const known = knownDevSummary(launch.creator);
+    if (known) {
+      seenMints.add(launch.mint);
+      append({ type: "known-dev-launch", t: Date.now(), mint: launch.mint, symbol: launch.symbol, creator: launch.creator, ...known });
+      logger.info(
+        `🔁 DEV ALERT (shadow, no trade): creator ${launch.creator} launched ${launch.symbol || "?"} ${launch.mint} — ` +
+          `we traded them ${known.trades}x before, ${known.wins} win(s), avg ${known.avgPnlPercent.toFixed(1)}%`
+      );
+    }
     const cls = classifyLaunch(launch.creator, topByWallet, sampler, launch.detectedAt);
     if (!cls) return;
     seenMints.add(launch.mint);
