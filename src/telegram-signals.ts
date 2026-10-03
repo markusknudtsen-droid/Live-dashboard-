@@ -67,10 +67,40 @@ export function extractSolanaMints(text: string): string[] {
 
 /** mint -> most recent mention. */
 const mentions = new Map<string, TelegramSignal>();
+/** mint -> every channel that mentioned it, each with its own latest mention time. */
+const channelSeen = new Map<string, Map<string, number>>();
 
 export function recordMention(mint: string, channel: string, seenAt: number): void {
   if (!mint) return;
   mentions.set(mint, { mint, channel, seenAt });
+  const seen = channelSeen.get(mint) ?? new Map<string, number>();
+  seen.set(channel, seenAt);
+  channelSeen.set(mint, seen);
+}
+
+/** Channels that mentioned this mint within the TTL, each judged on its own latest mention. */
+export function getTelegramChannels(mint: string, now: number, ttlMinutes: number): string[] {
+  if (ttlMinutes <= 0) return [];
+  const seen = channelSeen.get(mint);
+  if (!seen) return [];
+  return [...seen].filter(([, at]) => now - at <= ttlMinutes * 60_000).map(([channel]) => channel);
+}
+
+/**
+ * Confidence bonus for a coin mentioned in these channels: the HIGHEST bonus among them,
+ * so a coin posted in a 3-point and a 6-point channel gets 6 whatever the poll order.
+ * `perChannel` keys may be any form the operator pasted (URL, @name, name); channels not
+ * listed get `fallback`.
+ */
+export function bonusForChannels(
+  channels: string[],
+  perChannel: Record<string, number>,
+  fallback: number
+): number {
+  const byRef = new Map(Object.entries(perChannel).map(([ref, bonus]) => [normaliseChannel(ref), bonus]));
+  let best = -1;
+  for (const channel of channels) best = Math.max(best, byRef.get(normaliseChannel(channel)) ?? fallback);
+  return best < 0 ? fallback : best;
 }
 
 /**
@@ -102,12 +132,16 @@ export function recentMentionedMints(now: number, ttlMinutes: number): string[] 
 export function pruneMentions(now: number, ttlMinutes: number): void {
   const cutoff = now - Math.max(ttlMinutes, 1) * 60_000;
   for (const [mint, sig] of mentions) {
-    if (sig.seenAt < cutoff) mentions.delete(mint);
+    if (sig.seenAt < cutoff) {
+      mentions.delete(mint);
+      channelSeen.delete(mint);
+    }
   }
 }
 
 export function clearMentions(): void {
   mentions.clear();
+  channelSeen.clear();
 }
 
 /**

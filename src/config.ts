@@ -173,6 +173,13 @@ export interface AppConfig {
   telegramSession: string;
   telegramChannels: string[];
   telegramMentionBonus: number;
+  /**
+   * Per-channel override of telegramMentionBonus ("name:bonus,name:bonus"). A coin mentioned
+   * in several channels gets the highest of their bonuses; unlisted channels get
+   * telegramMentionBonus. Keys are kept as pasted (URL, @name or name) and matched with
+   * normaliseChannel() at lookup time.
+   */
+  telegramChannelBonus: Record<string, number>;
   telegramSignalTtlMinutes: number;
   /** Public channels read with no login via t.me/s/{channel}. Separate list:
    *  these do not require a session and can run even if MTProto login is
@@ -358,6 +365,27 @@ function parseBoolean(raw: string | undefined, fallback: boolean): boolean {
   return ["1", "true", "yes", "on"].includes(raw.trim().toLowerCase());
 }
 
+/**
+ * "solearlytrending:3,@other:8" -> { solearlytrending: 3, "@other": 8 }. A bad entry throws,
+ * like every other numeric setting here: a typo must fail loudly at startup rather than
+ * silently leave a channel on the wrong bonus.
+ */
+function parseChannelBonuses(raw: string | undefined): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const entry of (raw || "").split(",").map((e) => e.trim()).filter(Boolean)) {
+    // Split on the LAST colon: the channel itself may be a URL ("https://t.me/x") or "id:123".
+    const i = entry.lastIndexOf(":");
+    const ref = i > 0 ? entry.slice(0, i).trim() : "";
+    const rawBonus = i >= 0 ? entry.slice(i + 1).trim() : "";
+    const bonus = Number(rawBonus);
+    if (!ref || rawBonus === "" || !Number.isFinite(bonus) || bonus < 0 || bonus > 100) {
+      throw new Error(`TELEGRAM_CHANNEL_BONUS entry "${entry}" must look like channel:bonus, bonus between 0 and 100.`);
+    }
+    out[ref] = bonus;
+  }
+  return out;
+}
+
 function parseLogLevel(raw: string | undefined): AppConfig["logLevel"] {
   const level = (raw || "info").toLowerCase();
   if (level === "debug" || level === "info" || level === "warn" || level === "error") {
@@ -539,6 +567,7 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       .map((c) => c.trim())
       .filter((c) => c.length > 0),
     telegramMentionBonus: parseNumberInRange("TELEGRAM_MENTION_BONUS", env.TELEGRAM_MENTION_BONUS, 6, 0, 100),
+    telegramChannelBonus: parseChannelBonuses(env.TELEGRAM_CHANNEL_BONUS),
     telegramSignalTtlMinutes: parseNumberInRange("TELEGRAM_SIGNAL_TTL_MINUTES", env.TELEGRAM_SIGNAL_TTL_MINUTES, 30, 0, 1440),
     telegramScrapeChannels: (env.TELEGRAM_SCRAPE_CHANNELS || "")
       .split(",")
@@ -774,6 +803,12 @@ export function validateConfig(config: AppConfig = CONFIG): void {
     console.log(
       `   📡 TELEGRAM scrape (no login): ${config.telegramScrapeChannels.length} public channel(s), ` +
         `polled every ${config.telegramScrapeIntervalSeconds}s.`
+    );
+    const perChannel = Object.entries(config.telegramChannelBonus);
+    console.log(
+      `   📡 TELEGRAM bonus: +${config.telegramMentionBonus} by default` +
+        (perChannel.length > 0 ? `; per channel: ${perChannel.map(([c, b]) => `${c}=+${b}`).join(", ")}` : "") +
+        "; a coin in several channels takes the highest."
     );
   }
   if (config.telegramEnabled) {

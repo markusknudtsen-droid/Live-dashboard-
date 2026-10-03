@@ -81,7 +81,13 @@ import {
 } from "./boost-tracker.js";
 import type { TokenCandidate } from "./scanner.js";
 import { checkAnalysisModel, formatModelCheck } from "./model-preflight.js";
-import { startTelegramWatcher, getTelegramSignal, recentMentionedMints } from "./telegram-signals.js";
+import {
+  startTelegramWatcher,
+  getTelegramSignal,
+  getTelegramChannels,
+  bonusForChannels,
+  recentMentionedMints,
+} from "./telegram-signals.js";
 import { pollPublicChannel } from "./telegram-scrape.js";
 
 const tradeHistory: TradeHistoryItem[] = [];
@@ -943,11 +949,16 @@ async function runCycle(): Promise<void> {
     for (const s of signals) {
       const sig = getTelegramSignal(s.token.address, Date.now(), CONFIG.telegramSignalTtlMinutes);
       if (sig) {
+        // Per-channel weights (TELEGRAM_CHANNEL_BONUS): when several channels posted the
+        // coin the highest bonus wins, so the result never depends on poll order.
+        const channels = getTelegramChannels(s.token.address, Date.now(), CONFIG.telegramSignalTtlMinutes);
+        const seenIn = channels.length > 0 ? channels : [sig.channel];
+        const bonus = bonusForChannels(seenIn, CONFIG.telegramChannelBonus, CONFIG.telegramMentionBonus);
         const before = s.confidence;
-        s.confidence = Math.min(100, s.confidence + CONFIG.telegramMentionBonus);
+        s.confidence = Math.min(100, s.confidence + bonus);
         recordConfidenceBonus(s, "telegram", s.confidence - before);
         logger.info(
-          `📡 ${s.token.symbol}: ${before}% → ${s.confidence}% (+${CONFIG.telegramMentionBonus} mentioned in ${sig.channel})`
+          `📡 ${s.token.symbol}: ${before}% → ${s.confidence}% (+${bonus} mentioned in ${seenIn.join(" + ")})`
         );
       }
     }
