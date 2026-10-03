@@ -3,18 +3,27 @@ import assert from "node:assert/strict";
 import { PublicKey } from "@solana/web3.js";
 import { buildConfig, validateConfig } from "../src/config.js";
 import {
+  ammValueLamports,
   decodeCurve,
+  decodeMintAuthorities,
+  detailsNeeded,
+  detailsVerdict,
   evaluateCandidate,
   holdersFromLargest,
-  holdersNeeded,
   ladderAction,
   liquidityUsd,
+  noSellTimedOut,
+  parseCreate,
   parseMayhemCreate,
+  pollIntervalMs,
   quoteBuy,
   quoteSell,
+  rugTriggered,
+  top10Percent,
   withinSlippage,
+  type CoinDetails,
   type CurveState,
-  type Ladder,
+  type LadderLeg,
   type SnipeRules,
 } from "../src/mayhem-snipe.js";
 
@@ -40,12 +49,15 @@ function createLine(o: { symbol?: string; mayhem?: number; quote?: Uint8Array; t
 }
 
 /** A 141-byte BondingCurve account per the IDL. */
-function curveData(o: Partial<{ vTok: bigint; vSol: bigint; rTok: bigint; rSol: bigint; complete: number; mayhem: number; quote: Uint8Array }> = {}): Buffer {
+function curveData(
+  o: Partial<{ vTok: bigint; vSol: bigint; rTok: bigint; rSol: bigint; supply: bigint; complete: number; mayhem: number; quote: Uint8Array }> = {}
+): Buffer {
   const b = Buffer.alloc(141);
   b.writeBigUInt64LE(o.vTok ?? 1_073_000_000_000_000n, 8);
   b.writeBigUInt64LE(o.vSol ?? 30_000_000_000n, 16);
   b.writeBigUInt64LE(o.rTok ?? 793_100_000_000_000n, 24);
   b.writeBigUInt64LE(o.rSol ?? 0n, 32);
+  b.writeBigUInt64LE(o.supply ?? 1_000_000_000_000_000n, 40);
   b[48] = o.complete ?? 0;
   b[81] = o.mayhem ?? 1;
   if (o.quote) Buffer.from(o.quote).copy(b, 83);
@@ -61,6 +73,7 @@ test("parses a mayhem, SOL-quoted creation: mint, chain time, sanitised symbol",
   assert.equal(r.mint, MINT);
   assert.equal(r.symbol, "Evil$");
   assert.equal(r.chainTimeMs, 1_800_000_123_000);
+  assert.equal(r.mayhem, true);
 });
 
 test("ignores non-mayhem, other-quote, truncated and junk events; accepts a WSOL quote", () => {
@@ -72,16 +85,43 @@ test("ignores non-mayhem, other-quote, truncated and junk events; accepts a WSOL
   assert.equal(parseMayhemCreate([cut]), null);
 });
 
+test("parseCreate also returns ordinary (non-mayhem) launches, flagged, but still only SOL-quoted ones", () => {
+  const plain = parseCreate([createLine({ mayhem: 0, symbol: "PLAIN" })]);
+  assert.ok(plain);
+  assert.equal(plain.mayhem, false);
+  assert.equal(plain.symbol, "PLAIN");
+  assert.equal(plain.mint, MINT);
+  assert.equal(parseCreate([createLine({ mayhem: 0, quote: USDC })]), null);
+  assert.equal(parseCreate([createLine({ mayhem: 1 })])?.mayhem, true);
+});
+
 test("decodes a curve account and rejects a short one", () => {
   const c = decodeCurve(curveData({ rSol: 3n * SOL, mayhem: 1, complete: 0 }));
   assert.ok(c);
   assert.equal(c.rSol, 3n * SOL);
+  assert.equal(c.supply, 1_000_000_000_000_000n);
   assert.equal(c.mayhem, true);
   assert.equal(c.complete, false);
   assert.equal(c.quoteIsSol, true);
   assert.equal(decodeCurve(curveData({ quote: USDC }))?.quoteIsSol, false);
   assert.equal(decodeCurve(Buffer.alloc(50)), null);
   assert.equal(decodeCurve(null), null);
+});
+
+test("mint and freeze authority are read from the mint account (None = revoked)", () => {
+  const mintData = (o: { mint?: number; freeze?: number } = {}) => {
+    const b = Buffer.alloc(82);
+    b.writeUInt32LE(o.mint ?? 0, 0);
+    b.writeUInt32LE(o.freeze ?? 0, 46);
+    return b;
+  };
+  assert.deepEqual(decodeMintAuthorities(mintData()), { mintDisabled: true, freezeDisabled: true });
+  assert.deepEqual(decodeMintAuthorities(mintData({ mint: 1 })), { mintDisabled: false, freezeDisabled: true });
+  assert.deepEqual(decodeMintAuthorities(mintData({ freeze: 1 })), { mintDisabled: true, freezeDisabled: false });
+  assert.equal(decodeMintAuthorities(Buffer.alloc(40)), null);
+  assert.equal(decodeMintAuthorities(undefined), null);
+  // Token-2022 mints are longer (extensions) but share the first 82 bytes.
+  assert.deepEqual(decodeMintAuthorities(Buffer.concat([mintData(), Buffer.alloc(120)])), { mintDisabled: true, freezeDisabled: true });
 });
 
 test("with no fee a buy then sell on the post-trade curve returns the stake", () => {
@@ -117,7 +157,7 @@ test("liquidity is real SOL in USD", () => {
   assert.equal(liquidityUsd(2n * SOL, 150), 300);
 });
 
-test("decision: waits below $200, buys at or above it, and honours the 15s deadline", () => {
+test("decision: waits below the liquidity bar, buys at or above it, and honours the deadline", () => {
   const t0 = 1_000_000;
   const half = curve({ rSol: SOL / 2n }); // 0.5 SOL * $200 = $100
   assert.equal(evaluateCandidate(half, t0, t0 + 3_000, 200, RULES).action, "wait");
@@ -143,16 +183,11 @@ test("decision: wrong mode, wrong quote, graduated curve, or no SOL price never 
   assert.equal(evaluateCandidate(curve(rich), t0, t0 + 20_000, undefined, RULES).action, "skip");
 });
 
-test("MAYHEM_SNIPE config: off by default, only an explicit paper turns it on, 60% slippage default", () => {
-  const d = buildConfig({});
-  assert.equal(d.mayhemSnipeMode, "off");
-  assert.equal(d.mayhemSnipeMinLiquidityUsd, 200);
-  assert.equal(d.mayhemSnipeBuyDeadlineSeconds, 15);
-  assert.equal(d.mayhemSnipeHoldSeconds, 40);
-  assert.equal(d.mayhemSnipeSlippagePercent, 60);
-  assert.equal(buildConfig({ MAYHEM_SNIPE_MODE: " PAPER " }).mayhemSnipeMode, "paper");
-  assert.equal(buildConfig({ MAYHEM_SNIPE_MODE: "live" }).mayhemSnipeMode, "off", "there is no live mode");
-  assert.throws(() => buildConfig({ MAYHEM_SNIPE_SLIPPAGE_PERCENT: "100" }), /MAYHEM_SNIPE_SLIPPAGE_PERCENT/);
+test("requireMayhem=false lets an ordinary pump.fun coin through", () => {
+  const t0 = 1_000_000;
+  const plain = curve({ rSol: 5n * SOL, mayhem: 0 });
+  assert.equal(evaluateCandidate(plain, t0, t0 + 2_000, 200, { ...RULES, requireMayhem: false }).action, "buy");
+  assert.equal(evaluateCandidate(plain, t0, t0 + 2_000, 200, { ...RULES, requireMayhem: true }).action, "skip");
 });
 
 test("minimum age: a liquid coin waits until it is old enough, then is bought if still liquid", () => {
@@ -180,16 +215,6 @@ test("minimum age: seed liquidity that is pulled before the minimum age is never
   assert.match(end.reason, /< \$200 at the deadline/);
 });
 
-test("minimum age: unset or 0 keeps the old behaviour (buy the moment liquidity qualifies)", () => {
-  const t0 = 1_000_000;
-  const rich = curve({ rSol: (3n * SOL) / 2n });
-  assert.equal(evaluateCandidate(rich, t0, t0 + 1_000, 200, RULES).action, "buy");
-  assert.equal(evaluateCandidate(rich, t0, t0 + 1_000, 200, { ...RULES, minAgeMs: 0 }).action, "buy");
-});
-
-const HOLDER_RULES: SnipeRules = { minLiquidityUsd: 3000, buyDeadlineMs: 120_000, minHolders: 6 };
-const LADDER: Ladder = { tp1Pct: 78, tp1SellPct: 50, tp2Pct: 300 };
-
 test("holders: non-empty token accounts minus the curve's own", () => {
   assert.equal(holdersFromLargest([]), 0);
   assert.equal(holdersFromLargest([{ amount: "500" }]), 0, "only the curve holds anything");
@@ -197,58 +222,139 @@ test("holders: non-empty token accounts minus the curve's own", () => {
   assert.equal(holdersFromLargest(Array.from({ length: 20 }, () => ({ amount: "1" }))), 19, "the top-20 view caps at 19");
 });
 
-test("holders: a liquid coin waits for 6 holders, is bought at 6, and is skipped with the reason at the deadline", () => {
+test("top 10 holders' share of supply excludes the curve's own account and ignores empties", () => {
+  const supply = 1000n;
+  const accounts = [
+    { amount: "500" }, // the curve
+    { amount: "10" },
+    { amount: "80" },
+    { amount: "60" },
+    { amount: "0" },
+    { amount: "40" },
+    { amount: "30" },
+    { amount: "25" },
+    { amount: "20" },
+    { amount: "15" },
+    { amount: "15" },
+    { amount: "12" },
+    { amount: "5" }, // the 11th real holder: outside the top 10
+  ];
+  // top 10 real holders: 80+60+40+30+25+20+15+15+12+10 = 307 of 1000
+  assert.equal(top10Percent(accounts, supply), 30.7);
+  assert.equal(top10Percent([{ amount: "500" }], supply), 0, "only the curve");
+  assert.equal(top10Percent(accounts, 0n), 0);
+});
+
+const FULL: SnipeRules = {
+  minLiquidityUsd: 5000,
+  buyDeadlineMs: 600_000,
+  maxTop10Pct: 31,
+  requireAuthoritiesDisabled: true,
+  requireMayhem: false,
+};
+const GOOD: CoinDetails = { top10Pct: 20, mintDisabled: true, freezeDisabled: true };
+
+test("details verdict: unknown waits, a live authority is permanent, 31% is the inclusive ceiling", () => {
+  assert.equal(detailsVerdict({ minLiquidityUsd: 1, buyDeadlineMs: 1 }, undefined).ok, true, "no rules, no checks");
+  assert.equal(detailsVerdict(FULL, undefined).ok, false);
+  assert.match(detailsVerdict(FULL, { top10Pct: 10 }).reason, /authorities unknown/);
+  assert.equal(detailsVerdict(FULL, GOOD).ok, true);
+  const mint = detailsVerdict(FULL, { ...GOOD, mintDisabled: false });
+  assert.deepEqual([mint.ok, mint.permanent], [false, true]);
+  assert.match(mint.reason, /mint authority enabled/);
+  const freeze = detailsVerdict(FULL, { ...GOOD, freezeDisabled: false });
+  assert.deepEqual([freeze.ok, freeze.permanent], [false, true]);
+  assert.match(freeze.reason, /freeze authority enabled/);
+  assert.equal(detailsVerdict(FULL, { ...GOOD, top10Pct: 31 }).ok, true, "exactly 31% passes");
+  const high = detailsVerdict(FULL, { ...GOOD, top10Pct: 31.5 });
+  assert.deepEqual([high.ok, high.permanent], [false, false]);
+  assert.match(high.reason, /top 10 holders 31\.5% > 31%/);
+  assert.equal(detailsVerdict({ ...FULL, requireAuthoritiesDisabled: false, maxTop10Pct: 0, minHolders: 6 }, { holders: 6 }).ok, true);
+  assert.match(detailsVerdict({ ...FULL, minHolders: 6 }, { ...GOOD, holders: 3 }).reason, /holders 3 < 6/);
+});
+
+test("entry: $5k liquidity, then the on-chain checks, inside the 10-minute window", () => {
   const t0 = 1_000_000;
-  const rich = curve({ rSol: 20n * SOL }); // 20 SOL at $200 = $4,000
-  assert.equal(evaluateCandidate(rich, t0, t0 + 10_000, 200, HOLDER_RULES, undefined).action, "wait");
-  const few = evaluateCandidate(rich, t0, t0 + 10_000, 200, HOLDER_RULES, 3);
-  assert.equal(few.action, "wait");
-  assert.match(few.reason, /holders 3 < 6/);
-  assert.equal(evaluateCandidate(rich, t0, t0 + 10_000, 200, HOLDER_RULES, 6).action, "buy", "exactly 6 is enough");
-  const late = evaluateCandidate(rich, t0, t0 + 121_000, 200, HOLDER_RULES, 3);
-  assert.equal(late.action, "skip");
-  assert.match(late.reason, /holders 3 < 6 at the deadline/);
+  const rich = curve({ rSol: 30n * SOL, mayhem: 0 }); // 30 SOL at $200 = $6,000, an ordinary (non-mayhem) coin
+  const poor = curve({ rSol: (49n * SOL) / 2n, mayhem: 0 }); // 24.5 SOL = $4,900
+  assert.equal(evaluateCandidate(poor, t0, t0 + 60_000, 200, FULL, GOOD).action, "wait", "$4,900 is not enough");
+  assert.equal(evaluateCandidate(rich, t0, t0 + 60_000, 200, FULL, undefined).action, "wait", "details not read yet");
+  assert.equal(evaluateCandidate(rich, t0, t0 + 60_000, 200, FULL, GOOD).action, "buy");
+  assert.equal(evaluateCandidate(rich, t0, t0 + 599_000, 200, FULL, GOOD).action, "buy", "still inside the 10 minutes");
+  const old = evaluateCandidate(rich, t0, t0 + 601_000, 200, FULL, GOOD);
+  assert.equal(old.action, "skip");
+  assert.match(old.reason, /only after the 600s deadline/);
+
+  const enabled = evaluateCandidate(rich, t0, t0 + 10_000, 200, FULL, { ...GOOD, mintDisabled: false });
+  assert.equal(enabled.action, "skip", "a live authority is skipped at once, not polled to the deadline");
+  assert.match(enabled.reason, /mint authority enabled/);
+
+  const crowded = { ...GOOD, top10Pct: 40 };
+  assert.equal(evaluateCandidate(rich, t0, t0 + 100_000, 200, FULL, crowded).action, "wait", "concentration can still fall");
+  const end = evaluateCandidate(rich, t0, t0 + 601_000, 200, FULL, crowded);
+  assert.equal(end.action, "skip");
+  assert.match(end.reason, /top 10 holders 40\.0% > 31% at the deadline/);
 });
 
-test("holders: $3k liquidity is needed first, and 2 minutes is the limit", () => {
+test("detailsNeeded: only when liquidity, the age window and the mode qualify, and a detail rule is on", () => {
   const t0 = 1_000_000;
-  const poor = curve({ rSol: (29n * SOL) / 2n }); // 14.5 SOL at $200 = $2,900
-  assert.equal(evaluateCandidate(poor, t0, t0 + 10_000, 200, HOLDER_RULES, 12).action, "wait", "$2,900 is not enough");
-  const rich = curve({ rSol: 20n * SOL });
-  assert.equal(evaluateCandidate(rich, t0, t0 + 119_000, 200, HOLDER_RULES, 8).action, "buy", "still inside the 2 minutes");
-  assert.equal(evaluateCandidate(rich, t0, t0 + 121_000, 200, HOLDER_RULES, 8).action, "skip", "older than 2 minutes");
+  const rich = curve({ rSol: 30n * SOL, mayhem: 0 });
+  assert.equal(detailsNeeded(rich, t0, t0 + 60_000, 200, FULL), true);
+  assert.equal(detailsNeeded(curve({ rSol: SOL }), t0, t0 + 60_000, 200, FULL), false, "too little liquidity");
+  assert.equal(detailsNeeded(rich, t0, t0 + 601_000, 200, FULL), false, "past the deadline");
+  assert.equal(detailsNeeded(rich, t0, t0 + 2_000, 200, { ...FULL, minAgeMs: 5_000 }), false, "younger than the minimum age");
+  assert.equal(detailsNeeded(rich, t0, t0 + 60_000, 200, { ...FULL, maxTop10Pct: 0, requireAuthoritiesDisabled: false }), false, "no detail rule");
+  assert.equal(detailsNeeded(rich, t0, t0 + 60_000, undefined, FULL), false, "no SOL price");
+  assert.equal(detailsNeeded(rich, t0, t0 + 60_000, 200, { ...FULL, requireMayhem: true }), false, "not a mayhem coin");
 });
 
-test("holdersNeeded: only when liquidity, the age window and the mode all qualify", () => {
-  const t0 = 1_000_000;
-  const rich = curve({ rSol: 20n * SOL });
-  assert.equal(holdersNeeded(rich, t0, t0 + 10_000, 200, HOLDER_RULES), true);
-  assert.equal(holdersNeeded(curve({ rSol: SOL }), t0, t0 + 10_000, 200, HOLDER_RULES), false, "too little liquidity");
-  assert.equal(holdersNeeded(rich, t0, t0 + 121_000, 200, HOLDER_RULES), false, "past the deadline");
-  assert.equal(holdersNeeded(rich, t0, t0 + 2_000, 200, { ...HOLDER_RULES, minAgeMs: 5_000 }), false, "younger than the minimum age");
-  assert.equal(holdersNeeded(rich, t0, t0 + 10_000, 200, { ...HOLDER_RULES, minHolders: 0 }), false, "no holder rule");
-  assert.equal(holdersNeeded(rich, t0, t0 + 10_000, undefined, HOLDER_RULES), false, "no SOL price");
-  assert.equal(holdersNeeded(curve({ rSol: 20n * SOL, mayhem: 0 }), t0, t0 + 10_000, 200, HOLDER_RULES), false, "not a mayhem coin");
+test("poll cadence: every second while new or near the bar, slower as a quiet coin ages", () => {
+  assert.equal(pollIntervalMs(5_000, false), 1_000);
+  assert.equal(pollIntervalMs(60_000, false), 3_000);
+  assert.equal(pollIntervalMs(300_000, false), 10_000);
+  assert.equal(pollIntervalMs(300_000, true), 2_000, "a coin near the liquidity bar is watched closely");
+  assert.equal(pollIntervalMs(5_000, true), 1_000, "never slower than the age tier");
 });
 
-test("ladder: nothing below +78%, 50% at +78%, the rest at +300%, measured against the cost of what is left", () => {
-  const basis = 49_375_000; // 0.05 SOL less the 1.25% fee
-  const p = { basis, initialTokens: 1000n, tokens: 1000n, tp1Done: false };
-  assert.deepEqual(ladderAction(p, basis * 1.7799, LADDER), { leg: "none" });
-  assert.deepEqual(ladderAction(p, basis * 1.7801, LADDER), { leg: "tp1", fraction: 0.5 });
-  const half = { ...p, tokens: 500n, tp1Done: true };
-  assert.deepEqual(ladderAction(half, (basis / 2) * 3.99, LADDER), { leg: "none" }, "TP1 is never repeated");
-  assert.deepEqual(ladderAction(half, (basis / 2) * 4.01, LADDER), { leg: "tp2", fraction: 1 });
+const LADDER: LadderLeg[] = [
+  { pct: 75, sellPct: 30 },
+  { pct: 120, sellPct: 30 },
+  { pct: 300, sellPct: 100 },
+];
+const BASIS = 49_375_000; // 0.05 SOL less the 1.25% fee
+const pos = (tokens: bigint, legsDone: number) => ({ basis: BASIS, initialTokens: 1000n, tokens, legsDone });
+/** What the remaining tokens are worth when their price is `ratio` times the entry price. */
+const worth = (tokens: bigint, ratio: number) => BASIS * (Number(tokens) / 1000) * ratio;
+
+test("ladder: 30% at +75%, 30% at +120%, the rest at +300%, each measured on price", () => {
+  assert.deepEqual(ladderAction(pos(1000n, 0), worth(1000n, 1.74), LADDER), { leg: "none" });
+  const first = ladderAction(pos(1000n, 0), worth(1000n, 1.76), LADDER);
+  assert.deepEqual(first, { leg: "tp1", fraction: 0.3, done: 1 });
+  // after TP1 700 tokens remain; TP2 sells another 30% of the original = 30/70 of what is left
+  assert.deepEqual(ladderAction(pos(700n, 1), worth(700n, 2.19), LADDER), { leg: "none" });
+  const second = ladderAction(pos(700n, 1), worth(700n, 2.21), LADDER);
+  assert.equal(second.leg, "tp2");
+  assert.ok("fraction" in second && Math.abs(second.fraction - 30 / 70) < 1e-9);
+  assert.deepEqual(ladderAction(pos(400n, 2), worth(400n, 3.9), LADDER), { leg: "none" });
+  assert.deepEqual(ladderAction(pos(400n, 2), worth(400n, 4.1), LADDER), { leg: "tp3", fraction: 1, done: 3 });
 });
 
-test("ladder: a price that gaps straight past +300% sells everything at once; an empty position never triggers", () => {
-  const p = { basis: 49_375_000, initialTokens: 1000n, tokens: 1000n, tp1Done: false };
-  assert.deepEqual(ladderAction(p, 49_375_000 * 4.5, LADDER), { leg: "tp2", fraction: 1 });
-  assert.deepEqual(ladderAction({ ...p, tokens: 0n }, 1e12, LADDER), { leg: "none" });
+test("ladder: a price that gaps past several legs sells them together, and past the last sells everything", () => {
+  const gap = ladderAction(pos(1000n, 0), worth(1000n, 2.5), LADDER);
+  assert.equal(gap.leg, "tp2");
+  assert.ok("fraction" in gap && Math.abs(gap.fraction - 0.6) < 1e-9, "30% + 30% of the original");
+  assert.ok("done" in gap && gap.done === 2);
+  assert.deepEqual(ladderAction(pos(1000n, 0), worth(1000n, 5), LADDER), { leg: "tp3", fraction: 1, done: 3 });
 });
 
-test("ladder on real curve maths: +90% fires TP1, +400% fires TP2, a drained curve with a high virtual price fires nothing", () => {
-  // A curve with 18 real SOL (about $3k at $170), constant product k kept across price moves.
+test("ladder: nothing to do when finished, empty, or without legs", () => {
+  assert.deepEqual(ladderAction(pos(0n, 3), 1e12, LADDER), { leg: "none" });
+  assert.deepEqual(ladderAction(pos(400n, 3), 1e12, LADDER), { leg: "none" }, "all legs already done");
+  assert.deepEqual(ladderAction(pos(1000n, 0), 1e12, []), { leg: "none" });
+});
+
+test("ladder on real curve maths: +100% fires TP1, +150% fires TP1+TP2, +400% the last, a drained curve nothing", () => {
+  // A curve with 18 real SOL, constant product k kept across price moves.
   const c0 = curve({ vSol: 48n * SOL, vTok: 670_625_000_000_000n, rSol: 18n * SOL });
   const stake = SOL / 20n;
   const tokens = quoteBuy(c0, stake, 125n);
@@ -259,54 +365,112 @@ test("ladder on real curve maths: +90% fires TP1, +400% fires TP2, a drained cur
     return curve({ vSol, vTok: k / vSol, rSol: realSol ?? c0.rSol + (vSol - c0.vSol) });
   };
   const leg = (c: CurveState) =>
-    ladderAction({ basis, initialTokens: tokens, tokens, tp1Done: false }, Number(quoteSell(c, tokens, 0n)), LADDER).leg;
+    ladderAction({ basis, initialTokens: tokens, tokens, legsDone: 0 }, Number(quoteSell(c, tokens, 0n)), LADDER).leg;
   assert.equal(leg(c0), "none");
   assert.equal(leg(priceMoved(1.5)), "none");
   assert.equal(leg(priceMoved(2.0)), "tp1");
-  assert.equal(leg(priceMoved(5.0)), "tp2");
+  assert.equal(leg(priceMoved(2.5)), "tp2");
+  assert.equal(leg(priceMoved(5.0)), "tp3");
   assert.equal(leg(priceMoved(5.0, 0n)), "none", "no real SOL left: the leftover virtual price cannot be sold into");
 });
 
-test("MAYHEM_SNIPE ladder config: off by default, the requested setup parses, bad values are rejected", () => {
-  const d = buildConfig({});
-  assert.equal(d.mayhemSnipeMinHolders, 0);
-  assert.equal(d.mayhemSnipeTp1Percent, 0);
-  assert.equal(d.mayhemSnipeTp1SellPercent, 50);
-  assert.equal(d.mayhemSnipeTp2Percent, 300);
-  const c = buildConfig({
-    MAYHEM_SNIPE_MODE: "paper",
-    MAYHEM_SNIPE_MIN_LIQUIDITY_USD: "3000",
-    MAYHEM_SNIPE_MIN_HOLDERS: "6",
-    MAYHEM_SNIPE_BUY_DEADLINE_SECONDS: "120",
-    MAYHEM_SNIPE_TP1_PERCENT: "78",
-    MAYHEM_SNIPE_TP2_PERCENT: "300",
-    MAYHEM_SNIPE_HOLD_SECONDS: "0",
-  });
-  assert.equal(c.mayhemSnipeMinLiquidityUsd, 3000);
-  assert.equal(c.mayhemSnipeMinHolders, 6);
-  assert.equal(c.mayhemSnipeBuyDeadlineSeconds, 120);
-  assert.equal(c.mayhemSnipeTp1Percent, 78);
-  assert.equal(c.mayhemSnipeHoldSeconds, 0);
-  assert.throws(() => buildConfig({ MAYHEM_SNIPE_MIN_HOLDERS: "20" }), /MAYHEM_SNIPE_MIN_HOLDERS/);
-  assert.throws(() => buildConfig({ MAYHEM_SNIPE_MIN_HOLDERS: "2.5" }), /MAYHEM_SNIPE_MIN_HOLDERS/);
-  assert.throws(() => buildConfig({ MAYHEM_SNIPE_TP1_SELL_PERCENT: "100" }), /MAYHEM_SNIPE_TP1_SELL_PERCENT/);
+test("rug path: real liquidity 40% or more below its peak since the buy", () => {
+  assert.equal(rugTriggered(100, 61, 40), false);
+  assert.equal(rugTriggered(100, 60, 40), true, "exactly 40% down counts");
+  assert.equal(rugTriggered(100, 1, 40), true);
+  assert.equal(rugTriggered(100, 1, 0), false, "off when the setting is 0");
+  assert.equal(rugTriggered(0, 0, 40), false, "no peak recorded yet");
 });
 
-test("validateConfig: no time exit needs the ladder, and TP2 must be above TP1", () => {
-  const base = { DRY_RUN: "true", MAYHEM_SNIPE_MODE: "paper" };
-  assert.throws(() => validateConfig(buildConfig({ ...base, MAYHEM_SNIPE_HOLD_SECONDS: "0" })), /never sells/);
-  assert.throws(
-    () => validateConfig(buildConfig({ ...base, MAYHEM_SNIPE_TP1_PERCENT: "300", MAYHEM_SNIPE_TP2_PERCENT: "78" })),
-    /TP2_PERCENT must be above/
-  );
-  assert.doesNotThrow(() =>
-    validateConfig(buildConfig({ ...base, MAYHEM_SNIPE_TP1_PERCENT: "78", MAYHEM_SNIPE_HOLD_SECONDS: "0" }))
-  );
+test("no-sell timeout: 10 minutes after the buy with no take-profit sold yet, and never once one has sold", () => {
+  const bought = 1_000_000;
+  const ten = 600_000;
+  assert.equal(noSellTimedOut({ anySold: false, boughtAt: bought }, bought + ten - 1, ten), false);
+  assert.equal(noSellTimedOut({ anySold: false, boughtAt: bought }, bought + ten, ten), true);
+  assert.equal(noSellTimedOut({ anySold: true, boughtAt: bought }, bought + ten * 5, ten), false, "a sold position is not timed out");
+  assert.equal(noSellTimedOut({ anySold: false, boughtAt: bought }, bought + ten * 5, 0), false, "off when 0");
+});
+
+test("AMM pricing after graduation: tokens x USD price / SOL price, in lamports", () => {
+  // 2,000 tokens (6 decimals) at $0.0005 with SOL at $200 = 0.005 SOL
+  assert.equal(ammValueLamports(2_000_000_000n, 0.0005, 200), 5_000_000n);
+  assert.equal(ammValueLamports(0n, 0.0005, 200), 0n);
+  assert.equal(ammValueLamports(2_000_000_000n, 0, 200), 0n);
+  assert.equal(ammValueLamports(2_000_000_000n, 0.0005, 0), 0n);
+});
+
+test("MAYHEM_SNIPE config: off by default, only an explicit paper turns it on, 60% slippage default", () => {
+  const d = buildConfig({});
+  assert.equal(d.mayhemSnipeMode, "off");
+  assert.equal(d.mayhemSnipeMinLiquidityUsd, 200);
+  assert.equal(d.mayhemSnipeBuyDeadlineSeconds, 15);
+  assert.equal(d.mayhemSnipeHoldSeconds, 40);
+  assert.equal(d.mayhemSnipeSlippagePercent, 60);
+  assert.equal(buildConfig({ MAYHEM_SNIPE_MODE: " PAPER " }).mayhemSnipeMode, "paper");
+  assert.equal(buildConfig({ MAYHEM_SNIPE_MODE: "live" }).mayhemSnipeMode, "off", "there is no live mode");
+  assert.throws(() => buildConfig({ MAYHEM_SNIPE_SLIPPAGE_PERCENT: "100" }), /MAYHEM_SNIPE_SLIPPAGE_PERCENT/);
 });
 
 test("MAYHEM_SNIPE_MIN_AGE_SECONDS: defaults to 0, accepts 5, rejects out of range", () => {
   assert.equal(buildConfig({}).mayhemSnipeMinAgeSeconds, 0);
   assert.equal(buildConfig({ MAYHEM_SNIPE_MIN_AGE_SECONDS: "5" }).mayhemSnipeMinAgeSeconds, 5);
-  assert.throws(() => buildConfig({ MAYHEM_SNIPE_MIN_AGE_SECONDS: "120" }), /MAYHEM_SNIPE_MIN_AGE_SECONDS/);
+  assert.throws(() => buildConfig({ MAYHEM_SNIPE_MIN_AGE_SECONDS: "3600" }), /MAYHEM_SNIPE_MIN_AGE_SECONDS/);
   assert.throws(() => buildConfig({ MAYHEM_SNIPE_MIN_AGE_SECONDS: "-1" }), /MAYHEM_SNIPE_MIN_AGE_SECONDS/);
+});
+
+test("MAYHEM_SNIPE new-rules config: everything defaults to off, and the requested setup parses", () => {
+  const d = buildConfig({});
+  assert.equal(d.mayhemSnipeOnlyMayhem, true);
+  assert.equal(d.mayhemSnipeMinHolders, 0);
+  assert.equal(d.mayhemSnipeMaxTop10Percent, 0);
+  assert.equal(d.mayhemSnipeRequireAuthoritiesDisabled, false);
+  assert.deepEqual(d.mayhemSnipeLadder, []);
+  assert.equal(d.mayhemSnipeNoSellTimeoutSeconds, 0);
+  assert.equal(d.mayhemSnipeRugDropPercent, 0);
+  const c = buildConfig({
+    MAYHEM_SNIPE_MODE: "paper",
+    MAYHEM_SNIPE_ONLY_MAYHEM: "false",
+    MAYHEM_SNIPE_MIN_LIQUIDITY_USD: "5000",
+    MAYHEM_SNIPE_BUY_DEADLINE_SECONDS: "600",
+    MAYHEM_SNIPE_MAX_TOP10_PERCENT: "31",
+    MAYHEM_SNIPE_REQUIRE_AUTHORITIES_DISABLED: "true",
+    MAYHEM_SNIPE_LADDER: "75:30,120:30,300:rest",
+    MAYHEM_SNIPE_NO_SELL_TIMEOUT_SECONDS: "600",
+    MAYHEM_SNIPE_RUG_DROP_PERCENT: "40",
+    MAYHEM_SNIPE_HOLD_SECONDS: "0",
+  });
+  assert.equal(c.mayhemSnipeOnlyMayhem, false);
+  assert.equal(c.mayhemSnipeMinLiquidityUsd, 5000);
+  assert.equal(c.mayhemSnipeBuyDeadlineSeconds, 600);
+  assert.equal(c.mayhemSnipeMaxTop10Percent, 31);
+  assert.equal(c.mayhemSnipeRequireAuthoritiesDisabled, true);
+  assert.deepEqual(c.mayhemSnipeLadder, [
+    { pct: 75, sellPct: 30 },
+    { pct: 120, sellPct: 30 },
+    { pct: 300, sellPct: 100 },
+  ]);
+  assert.equal(c.mayhemSnipeNoSellTimeoutSeconds, 600);
+  assert.equal(c.mayhemSnipeRugDropPercent, 40);
+  assert.equal(c.mayhemSnipeHoldSeconds, 0);
+});
+
+test("MAYHEM_SNIPE_LADDER: a single leg, the last share is optional, and malformed ladders are rejected", () => {
+  assert.deepEqual(buildConfig({ MAYHEM_SNIPE_LADDER: "300" }).mayhemSnipeLadder, [{ pct: 300, sellPct: 100 }]);
+  assert.deepEqual(buildConfig({ MAYHEM_SNIPE_LADDER: "50:40, 200:rest" }).mayhemSnipeLadder, [
+    { pct: 50, sellPct: 40 },
+    { pct: 200, sellPct: 100 },
+  ]);
+  for (const bad of ["75:30,50:30,300", "75:60,120:60,300", "75,120", "75:30,abc", "75:0,300", "75:100,300", "0:30,300", ":30,300"]) {
+    assert.throws(() => buildConfig({ MAYHEM_SNIPE_LADDER: bad }), /MAYHEM_SNIPE_LADDER/, `should reject "${bad}"`);
+  }
+  assert.throws(() => buildConfig({ MAYHEM_SNIPE_MAX_TOP10_PERCENT: "101" }), /MAYHEM_SNIPE_MAX_TOP10_PERCENT/);
+  assert.throws(() => buildConfig({ MAYHEM_SNIPE_RUG_DROP_PERCENT: "100" }), /MAYHEM_SNIPE_RUG_DROP_PERCENT/);
+});
+
+test("validateConfig: no time exit needs a ladder", () => {
+  const base = { DRY_RUN: "true", MAYHEM_SNIPE_MODE: "paper" };
+  assert.throws(() => validateConfig(buildConfig({ ...base, MAYHEM_SNIPE_HOLD_SECONDS: "0" })), /never sells/);
+  assert.doesNotThrow(() =>
+    validateConfig(buildConfig({ ...base, MAYHEM_SNIPE_LADDER: "75:30,120:30,300:rest", MAYHEM_SNIPE_HOLD_SECONDS: "0" }))
+  );
 });

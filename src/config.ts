@@ -204,14 +204,22 @@ export interface AppConfig {
   mayhemSnipeMinAgeSeconds: number;
   /** Minimum holders (token accounts other than the curve's, read on-chain). 0 = no check. */
   mayhemSnipeMinHolders: number;
+  /** Only mayhem-mode launches (true), or every pump.fun launch (false). */
+  mayhemSnipeOnlyMayhem: boolean;
+  /** Skip a coin whose 10 biggest holders (the curve's own account excluded) own more than this % of supply. 0 = off. */
+  mayhemSnipeMaxTop10Percent: number;
+  /** Require both mint and freeze authority to be revoked (read from the mint account). */
+  mayhemSnipeRequireAuthoritiesDisabled: boolean;
   /**
-   * Take-profit ladder: sell TP1_SELL_PERCENT of the position when its price is TP1_PERCENT above
-   * cost and the rest at TP2_PERCENT, instantly and with no other checks. TP1_PERCENT 0 = ladder
-   * off (the timed exit is used). There is no stop-loss.
+   * Take-profit ladder, "75:30,120:30,300:rest": each leg sells its share of the ORIGINAL position
+   * when the price is that % above cost; the last leg sells what is left. Sells fire instantly with
+   * no other checks. Empty = no ladder (the timed exit is used).
    */
-  mayhemSnipeTp1Percent: number;
-  mayhemSnipeTp1SellPercent: number;
-  mayhemSnipeTp2Percent: number;
+  mayhemSnipeLadder: Array<{ pct: number; sellPct: number }>;
+  /** Ladder mode: sell 100% if no take-profit has sold this long after the buy. 0 = off. */
+  mayhemSnipeNoSellTimeoutSeconds: number;
+  /** Ladder mode "rug path": sell 100% when real liquidity falls this % below its peak since the buy. 0 = off. */
+  mayhemSnipeRugDropPercent: number;
   /** Seconds after launch at which 100% is sold, whatever the price. */
   mayhemSnipeHoldSeconds: number;
   /** Slippage tolerance applied to BOTH the buy and the sell, in percent. */
@@ -403,6 +411,35 @@ function parseScanChains(raw: string | undefined): string[] {
     .filter(Boolean);
 }
 
+/**
+ * "75:30,120:30,300:rest" -> [{pct:75,sellPct:30},{pct:120,sellPct:30},{pct:300,sellPct:100}].
+ * Each leg sells sellPct% of the ORIGINAL position when the price is pct% above cost; the last
+ * leg sells whatever is left (write "rest" or leave the share off). Empty = no ladder. A bad
+ * value throws at startup rather than silently running a different exit.
+ */
+function parseSnipeLadder(raw: string | undefined): Array<{ pct: number; sellPct: number }> {
+  const bad = (why: string): never => {
+    throw new Error(`MAYHEM_SNIPE_LADDER ${why} (expected e.g. 75:30,120:30,300:rest).`);
+  };
+  const entries = (raw || "").split(",").map((e) => e.trim()).filter(Boolean);
+  const legs: Array<{ pct: number; sellPct: number }> = [];
+  entries.forEach((entry, i) => {
+    const [pctRaw = "", shareRaw = ""] = entry.split(":").map((x) => x.trim());
+    const pct = Number(pctRaw);
+    if (pctRaw === "" || !Number.isFinite(pct) || pct <= 0 || pct > 1_000_000) bad(`has an invalid price gain in "${entry}"`);
+    let sellPct = 100;
+    if (i < entries.length - 1) {
+      sellPct = Number(shareRaw);
+      if (shareRaw === "" || !Number.isFinite(sellPct) || sellPct <= 0 || sellPct >= 100) bad(`needs a share between 0 and 100 in "${entry}"`);
+    }
+    const prev = legs[legs.length - 1];
+    if (prev && pct <= prev.pct) bad("must have rising price gains");
+    legs.push({ pct, sellPct });
+  });
+  if (legs.slice(0, -1).reduce((s, l) => s + l.sellPct, 0) >= 100) bad("sells 100% or more before its last leg");
+  return legs;
+}
+
 export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   return {
     openRouterApiKey: env.OPENROUTER_API_KEY || "",
@@ -582,13 +619,16 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     // Only an explicit "paper" turns it on; there is no live mode, so anything else is off.
     mayhemSnipeMode: (env.MAYHEM_SNIPE_MODE || "").trim().toLowerCase() === "paper" ? "paper" : "off",
     mayhemSnipeMinLiquidityUsd: parseNumberInRange("MAYHEM_SNIPE_MIN_LIQUIDITY_USD", env.MAYHEM_SNIPE_MIN_LIQUIDITY_USD, 200, 0, 1_000_000),
-    mayhemSnipeBuyDeadlineSeconds: parseNumberInRange("MAYHEM_SNIPE_BUY_DEADLINE_SECONDS", env.MAYHEM_SNIPE_BUY_DEADLINE_SECONDS, 15, 1, 120),
-    mayhemSnipeMinAgeSeconds: parseNumberInRange("MAYHEM_SNIPE_MIN_AGE_SECONDS", env.MAYHEM_SNIPE_MIN_AGE_SECONDS, 0, 0, 119),
+    mayhemSnipeBuyDeadlineSeconds: parseNumberInRange("MAYHEM_SNIPE_BUY_DEADLINE_SECONDS", env.MAYHEM_SNIPE_BUY_DEADLINE_SECONDS, 15, 1, 3600),
+    mayhemSnipeMinAgeSeconds: parseNumberInRange("MAYHEM_SNIPE_MIN_AGE_SECONDS", env.MAYHEM_SNIPE_MIN_AGE_SECONDS, 0, 0, 3599),
     // 19 is the most the on-chain top-20 view can show (one account is the curve's own).
     mayhemSnipeMinHolders: parseIntegerInRange("MAYHEM_SNIPE_MIN_HOLDERS", env.MAYHEM_SNIPE_MIN_HOLDERS, 0, 0, 19),
-    mayhemSnipeTp1Percent: parseNumberInRange("MAYHEM_SNIPE_TP1_PERCENT", env.MAYHEM_SNIPE_TP1_PERCENT, 0, 0, 100_000),
-    mayhemSnipeTp1SellPercent: parseNumberInRange("MAYHEM_SNIPE_TP1_SELL_PERCENT", env.MAYHEM_SNIPE_TP1_SELL_PERCENT, 50, 1, 99),
-    mayhemSnipeTp2Percent: parseNumberInRange("MAYHEM_SNIPE_TP2_PERCENT", env.MAYHEM_SNIPE_TP2_PERCENT, 300, 1, 1_000_000),
+    mayhemSnipeOnlyMayhem: parseBoolean(env.MAYHEM_SNIPE_ONLY_MAYHEM, true),
+    mayhemSnipeMaxTop10Percent: parseNumberInRange("MAYHEM_SNIPE_MAX_TOP10_PERCENT", env.MAYHEM_SNIPE_MAX_TOP10_PERCENT, 0, 0, 100),
+    mayhemSnipeRequireAuthoritiesDisabled: parseBoolean(env.MAYHEM_SNIPE_REQUIRE_AUTHORITIES_DISABLED, false),
+    mayhemSnipeLadder: parseSnipeLadder(env.MAYHEM_SNIPE_LADDER),
+    mayhemSnipeNoSellTimeoutSeconds: parseNumberInRange("MAYHEM_SNIPE_NO_SELL_TIMEOUT_SECONDS", env.MAYHEM_SNIPE_NO_SELL_TIMEOUT_SECONDS, 0, 0, 86_400),
+    mayhemSnipeRugDropPercent: parseNumberInRange("MAYHEM_SNIPE_RUG_DROP_PERCENT", env.MAYHEM_SNIPE_RUG_DROP_PERCENT, 0, 0, 99),
     // 0 = no time exit, which is only allowed together with the take-profit ladder (checked in validateConfig).
     mayhemSnipeHoldSeconds: parseNumberInRange("MAYHEM_SNIPE_HOLD_SECONDS", env.MAYHEM_SNIPE_HOLD_SECONDS, 40, 0, 3600),
     mayhemSnipeSlippagePercent: parseNumberInRange("MAYHEM_SNIPE_SLIPPAGE_PERCENT", env.MAYHEM_SNIPE_SLIPPAGE_PERCENT, 60, 0, 99),
@@ -759,21 +799,25 @@ export function validateConfig(config: AppConfig = CONFIG): void {
   }
   if (config.mayhemSnipeMode !== "off") {
     console.log(
-      `   🎯 MAYHEM_SNIPE (${config.mayhemSnipeMode}, simulation only): pump.fun mayhem coins with >= $${config.mayhemSnipeMinLiquidityUsd} ` +
+      `   🎯 MAYHEM_SNIPE (${config.mayhemSnipeMode}, simulation only): pump.fun ${config.mayhemSnipeOnlyMayhem ? "mayhem " : ""}coins with >= $${config.mayhemSnipeMinLiquidityUsd} ` +
         `liquidity are bought ${config.mayhemSnipeMinAgeSeconds > 0 ? `from ${config.mayhemSnipeMinAgeSeconds}s to ` : "within "}` +
         `${config.mayhemSnipeBuyDeadlineSeconds}s of launch` +
-        (config.mayhemSnipeMinHolders > 0 ? ` and have ${config.mayhemSnipeMinHolders}+ holders` : "") +
-        (config.mayhemSnipeTp1Percent > 0
-          ? `; sells ${config.mayhemSnipeTp1SellPercent}% at +${config.mayhemSnipeTp1Percent}% and the rest at +${config.mayhemSnipeTp2Percent}%` +
-            (config.mayhemSnipeHoldSeconds > 0 ? `, any remainder at ${config.mayhemSnipeHoldSeconds}s` : " (no time exit, no stop-loss)")
+        (config.mayhemSnipeMinHolders > 0 ? `, ${config.mayhemSnipeMinHolders}+ holders` : "") +
+        (config.mayhemSnipeMaxTop10Percent > 0 ? `, top 10 holders <= ${config.mayhemSnipeMaxTop10Percent}%` : "") +
+        (config.mayhemSnipeRequireAuthoritiesDisabled ? ", mint and freeze disabled" : "") +
+        (config.mayhemSnipeLadder.length > 0
+          ? `; sells ` +
+            config.mayhemSnipeLadder
+              .map((l, i, all) => (i === all.length - 1 ? `the rest at +${l.pct}%` : `${l.sellPct}% at +${l.pct}%`))
+              .join(", ") +
+            (config.mayhemSnipeRugDropPercent > 0 ? `; 100% on a ${config.mayhemSnipeRugDropPercent}% liquidity drop` : "") +
+            (config.mayhemSnipeNoSellTimeoutSeconds > 0 ? `; 100% if nothing sold ${config.mayhemSnipeNoSellTimeoutSeconds}s after the buy` : "") +
+            (config.mayhemSnipeHoldSeconds > 0 ? `; any remainder ${config.mayhemSnipeHoldSeconds}s after launch` : "")
           : `; 100% sold at ${config.mayhemSnipeHoldSeconds}s`) +
         `; ${config.mayhemSnipeSlippagePercent}% slippage both ways, ${config.mayhemSnipeStakeSol} SOL per snipe.`
     );
-    if (config.mayhemSnipeTp1Percent === 0 && config.mayhemSnipeHoldSeconds === 0) {
-      throw new Error("MAYHEM_SNIPE_HOLD_SECONDS=0 (no time exit) needs MAYHEM_SNIPE_TP1_PERCENT, otherwise the sniper never sells.");
-    }
-    if (config.mayhemSnipeTp1Percent > 0 && config.mayhemSnipeTp2Percent <= config.mayhemSnipeTp1Percent) {
-      throw new Error("MAYHEM_SNIPE_TP2_PERCENT must be above MAYHEM_SNIPE_TP1_PERCENT.");
+    if (config.mayhemSnipeLadder.length === 0 && config.mayhemSnipeHoldSeconds === 0) {
+      throw new Error("MAYHEM_SNIPE_HOLD_SECONDS=0 (no time exit) needs MAYHEM_SNIPE_LADDER, otherwise the sniper never sells.");
     }
     if (config.mayhemSnipeMinAgeSeconds >= config.mayhemSnipeBuyDeadlineSeconds) {
       console.warn(
