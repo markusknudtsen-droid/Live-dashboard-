@@ -20,6 +20,10 @@
  * numeric check, and the bonus is withheld — the same outcome as a 404.
  */
 
+import { PublicKey } from "@solana/web3.js";
+import { CONFIG } from "./config.js";
+import { PUMP_FUN_PROGRAM } from "./onchain-launchpads.js";
+
 export interface DevReputation {
   followers: number;
   migratedTokens: number;
@@ -261,10 +265,92 @@ export async function fetchPumpCoinSnapshot(
 /**
  * Resolve the creator wallet for a mint. Only pump.fun mints have one; anything
  * else returns undefined and simply gets no dev bonus.
+ *
+ * pump.fun removed GET /coins/{mint} (now a 404), which silently turned the dev
+ * bonus off. The creator is stored in the coin's on-chain BondingCurve account
+ * instead, so it is read from the RPC: a PDA of the pump.fun program seeded
+ * with the mint. Verified live on 2026-10-03 against a graduated coin, a live
+ * one and an older, shorter account.
  */
-export async function fetchCreatorWallet(mint: string, timeoutMs = 6000): Promise<string | undefined> {
+const BONDING_CURVE_DISCRIMINATOR = [23, 183, 248, 55, 96, 216, 172, 96];
+/** 8 discriminator + 5 u64 reserve/supply fields + 1 `complete` flag. */
+const BONDING_CURVE_CREATOR_OFFSET = 49;
+const BONDING_CURVE_MIN_LENGTH = BONDING_CURVE_CREATOR_OFFSET + 32;
+
+/** The creator never changes, so a hit is kept; a miss is retried after this. */
+const CREATOR_MISS_TTL_MS = 5 * 60 * 1000;
+const CREATOR_CACHE_MAX = 2000;
+const creatorCache = new Map<string, { at: number; creator: string | undefined }>();
+
+export function clearCreatorWalletCache(): void {
+  creatorCache.clear();
+}
+
+/** Pure: the BondingCurve PDA for a mint, or undefined for an invalid mint. */
+export function bondingCurveAddress(mint: string): string | undefined {
+  try {
+    return PublicKey.findProgramAddressSync(
+      [Buffer.from("bonding-curve"), new PublicKey(mint).toBuffer()],
+      new PublicKey(PUMP_FUN_PROGRAM)
+    )[0].toBase58();
+  } catch {
+    return undefined;
+  }
+}
+
+/** Pure: creator wallet from raw BondingCurve account bytes; undefined for anything else. */
+export function creatorFromBondingCurve(data: Uint8Array): string | undefined {
+  if (data.length < BONDING_CURVE_MIN_LENGTH) return undefined;
+  if (BONDING_CURVE_DISCRIMINATOR.some((byte, i) => data[i] !== byte)) return undefined;
+  const creator = data.subarray(BONDING_CURVE_CREATOR_OFFSET, BONDING_CURVE_CREATOR_OFFSET + 32);
+  if (creator.every((byte) => byte === 0)) return undefined;
+  return new PublicKey(creator).toBase58();
+}
+
+async function fetchAccountBytes(address: string, timeoutMs: number): Promise<Uint8Array | undefined> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(CONFIG.solanaRpcUrl, {
+      method: "POST",
+      signal: controller.signal,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "getAccountInfo",
+        params: [address, { encoding: "base64", commitment: "confirmed" }],
+      }),
+    });
+    if (!res.ok) return undefined;
+    const body = (await res.json()) as { result?: { value?: { data?: unknown } | null } };
+    const data = body?.result?.value?.data;
+    return Array.isArray(data) && typeof data[0] === "string" ? Buffer.from(data[0], "base64") : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function fetchCreatorWallet(
+  mint: string,
+  timeoutMs = 6000,
+  now: number = Date.now()
+): Promise<string | undefined> {
   if (!mint) return undefined;
-  const raw = await getJson(`${PUMP_API}/coins/${encodeURIComponent(mint)}`, timeoutMs);
-  const coin = (raw ?? undefined) as PumpCoin | undefined;
-  return typeof coin?.creator === "string" && coin.creator.length > 0 ? coin.creator : undefined;
+  const hit = creatorCache.get(mint);
+  if (hit && (hit.creator !== undefined || now - hit.at < CREATOR_MISS_TTL_MS)) return hit.creator;
+
+  const curve = bondingCurveAddress(mint);
+  if (!curve) return undefined;
+  const bytes = await fetchAccountBytes(curve, timeoutMs);
+  const creator = bytes ? creatorFromBondingCurve(bytes) : undefined;
+
+  if (creatorCache.size >= CREATOR_CACHE_MAX) {
+    const oldest = creatorCache.keys().next().value;
+    if (oldest !== undefined) creatorCache.delete(oldest);
+  }
+  creatorCache.set(mint, { at: now, creator });
+  return creator;
 }

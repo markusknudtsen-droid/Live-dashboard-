@@ -45,7 +45,7 @@ import {
   type ParsedTxLike,
 } from "./onchain-launchpads.js";
 
-export const PUMP_FUN_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+export { PUMP_FUN_PROGRAM } from "./onchain-launchpads.js";
 /** PDA that is the new mint's authority; present only in create transactions. */
 export const PUMP_FUN_MINT_AUTHORITY = "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM";
 

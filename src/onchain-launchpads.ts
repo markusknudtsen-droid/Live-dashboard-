@@ -12,6 +12,8 @@
 
 /** Raydium LaunchLab: the program behind Stonk.fun (and LetsBonk) launches. */
 export const LAUNCHLAB_PROGRAM = "LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj";
+/** pump.fun's program: its BondingCurve accounts are PDAs of this program. */
+export const PUMP_FUN_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 /** LaunchLab instructions that create a new token + curve. */
 export const LAUNCHLAB_CREATION_INSTRUCTIONS: readonly string[] = ["InitializeWithToken2022", "InitializeV2"];
 /** Stonk.fun's platform config on LaunchLab: present in its creation transactions. */
