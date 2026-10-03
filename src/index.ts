@@ -1,5 +1,5 @@
 import { CONFIG, validateConfig } from "./config.js";
-import { recordShadowCandidates, recordShadowReject, startShadowLog } from "./shadow-log.js";
+import { recordShadowCandidates, recordShadowGmgn, recordShadowReject, startShadowLog } from "./shadow-log.js";
 import {
   candidateMinLiquidityUsd,
   isWithinNewCoinAgeWindow,
@@ -49,6 +49,7 @@ import { adjustConfidence, checkRugGates, qualifiesForInstantBuy } from "./entry
 import { recordConfidenceBonus } from "./entry-features.js";
 import { recallVerdict, rememberVerdict, type AnalysisCache } from "./analysis-cache.js";
 import { fetchRugCheckReport } from "./rugcheck.js";
+import { checkGmgn, describeGmgn, fetchGmgnReport, gmgnActive, gmgnLimitsFromConfig } from "./gmgn.js";
 import { fetchNewPoolMints } from "./geckoterminal.js";
 import { onchainDetectionAgeSeconds, recentOnchainMints, startOnchainFeed } from "./onchain-feed.js";
 import { startDevRanking } from "./dev-ranking.js";
@@ -1158,6 +1159,40 @@ async function runCycle(): Promise<void> {
         logger.warn(`⛔ ${signal.token.symbol} rejected by RugCheck gate: ${gate.reason}`);
         recordShadowReject(signal.token.address, `rugcheck: ${gate.reason}`, rc ? { rc } : undefined);
         continue;
+      }
+    }
+
+    // GMGN second opinion (GMGN_MODE=shadow|gate). Runs after every existing gate, so
+    // it only sees coins that were about to be bought. Gate mode waits and can reject;
+    // shadow mode is fire-and-forget (never delays or blocks a buy) and only logs what
+    // it WOULD have rejected. Unknown GMGN data always passes.
+    if (gmgnActive()) {
+      const symbol = signal.token.symbol;
+      const mint = signal.token.address;
+      const readGmgn = async () => {
+        const gm = await fetchGmgnReport(mint);
+        const verdict = checkGmgn(gm, gmgnLimitsFromConfig());
+        const outcome = !verdict.known ? "no signal" : verdict.pass ? "ok" : `would reject: ${verdict.reason}`;
+        logger.info(`🔎 GMGN ${symbol} [${CONFIG.gmgnMode}]: ${describeGmgn(gm)} → ${outcome}`);
+        recordShadowGmgn(mint, {
+          symbol,
+          mode: CONFIG.gmgnMode,
+          pass: verdict.pass,
+          known: verdict.known,
+          reason: verdict.reason,
+          gmgn: gm ?? null,
+        });
+        return verdict;
+      };
+      if (CONFIG.gmgnMode === "gate") {
+        const verdict = await readGmgn();
+        if (!verdict.pass) {
+          logger.warn(`⛔ ${symbol} rejected by GMGN gate: ${verdict.reason}`);
+          recordShadowReject(mint, `gmgn: ${verdict.reason}`);
+          continue;
+        }
+      } else {
+        void readGmgn().catch(() => undefined);
       }
     }
 

@@ -323,6 +323,17 @@ export interface AppConfig {
   profitSweepMinSol: number;
   /** Caps a single sweep's size. 0 disables the cap (sweep the full excess). */
   profitSweepMaxSol: number;
+  /**
+   * GMGN second opinion (read-only API key, never a wallet key). off = untouched;
+   * shadow = fetch and LOG what it would have rejected, never block; gate = reject.
+   */
+  gmgnMode: "off" | "shadow" | "gate";
+  gmgnApiKey: string;
+  /** Reject limits (gate mode), % of GMGN's analysed trader cohort — NOT % of supply. */
+  gmgnMaxBundlerPct: number;
+  gmgnMaxSniperPct: number;
+  gmgnMaxRatTraderPct: number;
+  gmgnMaxBotDegenPct: number;
 }
 
 function parseNumberInRange(
@@ -356,6 +367,12 @@ function parseIntegerInRange(
 function parseBoolean(raw: string | undefined, fallback: boolean): boolean {
   if (!raw) return fallback;
   return ["1", "true", "yes", "on"].includes(raw.trim().toLowerCase());
+}
+
+/** Anything but an explicit shadow/gate is "off", so a typo can never switch the gate on. */
+function parseGmgnMode(raw: string | undefined): AppConfig["gmgnMode"] {
+  const mode = (raw || "off").trim().toLowerCase();
+  return mode === "shadow" || mode === "gate" ? mode : "off";
 }
 
 function parseLogLevel(raw: string | undefined): AppConfig["logLevel"] {
@@ -621,6 +638,14 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     profitSweepReserveSol: parseNumberInRange("PROFIT_SWEEP_RESERVE_SOL", env.PROFIT_SWEEP_RESERVE_SOL, 0.5, 0, 1000),
     profitSweepMinSol: parseNumberInRange("PROFIT_SWEEP_MIN_SOL", env.PROFIT_SWEEP_MIN_SOL, 0.1, 0, 1000),
     profitSweepMaxSol: parseNumberInRange("PROFIT_SWEEP_MAX_SOL", env.PROFIT_SWEEP_MAX_SOL, 0, 0, 1000),
+    gmgnMode: parseGmgnMode(env.GMGN_MODE),
+    gmgnApiKey: (env.GMGN_API_KEY || "").trim(),
+    // Defaults are the top deduction tier of GMGN's own contract-dd skill, untested
+    // for this strategy: tune from the shadow data before trusting gate mode.
+    gmgnMaxBundlerPct: parseNumberInRange("GMGN_MAX_BUNDLER_PCT", env.GMGN_MAX_BUNDLER_PCT, 30, 0, 100),
+    gmgnMaxSniperPct: parseNumberInRange("GMGN_MAX_SNIPER_PCT", env.GMGN_MAX_SNIPER_PCT, 15, 0, 100),
+    gmgnMaxRatTraderPct: parseNumberInRange("GMGN_MAX_RAT_TRADER_PCT", env.GMGN_MAX_RAT_TRADER_PCT, 5, 0, 100),
+    gmgnMaxBotDegenPct: parseNumberInRange("GMGN_MAX_BOT_DEGEN_PCT", env.GMGN_MAX_BOT_DEGEN_PCT, 70, 0, 100),
   };
 }
 
@@ -809,6 +834,14 @@ export function validateConfig(config: AppConfig = CONFIG): void {
         `${config.withdrawalAddress}` +
         (config.profitSweepMaxSol > 0 ? ` (max ${config.profitSweepMaxSol} SOL/sweep)` : "") +
         ". No confirmation step — this path is fully autonomous."
+    );
+  }
+  if (config.gmgnMode !== "off") {
+    console.log(
+      config.gmgnApiKey
+        ? `   🔎 GMGN_MODE=${config.gmgnMode}: read-only GMGN check at the buy gate` +
+            (config.gmgnMode === "shadow" ? " (logs only, never blocks)." : " (rejects on bundler/sniper/rat/bot limits).")
+        : `   ⚠️  GMGN_MODE=${config.gmgnMode} but GMGN_API_KEY is empty: GMGN check stays inactive.`
     );
   }
 }

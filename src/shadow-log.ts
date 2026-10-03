@@ -125,6 +125,15 @@ export function recordShadowReject(mint: string, reason: string, extra?: Record<
   append({ type: "reject", t: Date.now(), mint, reason, ...extra });
 }
 
+/**
+ * Record what GMGN said about a coin that reached the buy gate and what it would have
+ * decided. Joined offline with the candidate's +1/+5/+15/+60 min outcomes by mint.
+ */
+export function recordShadowGmgn(mint: string, extra: Record<string, unknown>): void {
+  if (!CONFIG.shadowEnabled) return;
+  append({ type: "gmgn", t: Date.now(), mint, ...extra });
+}
+
 async function tick(): Promise<void> {
   const now = Date.now();
   for (const check of pending) {
