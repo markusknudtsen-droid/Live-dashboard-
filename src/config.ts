@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { PublicKey } from "@solana/web3.js";
 import { parseLadder, describeLadder, type LadderRung } from "./take-profit-ladder.js";
+import { parseFeedSources, type FeedSourceId } from "./onchain-launchpads.js";
 import { parsePositionTiers, describeTiers, type PositionTier } from "./position-sizing.js";
 
 export interface AppConfig {
@@ -267,6 +268,24 @@ export interface AppConfig {
   /** pump.fun's creation feed as a third candidate source. */
   pumpfunDiscoveryEnabled: boolean;
   pumpfunDiscoveryLimit: number;
+  /** Real-time pump.fun creations from the chain itself (ONCHAIN_FEED_ENABLED). */
+  onchainFeedEnabled: boolean;
+  /** Websocket URL; empty derives it from SOLANA_RPC_URL. */
+  onchainFeedWsUrl: string;
+  /** Which launchpads the on-chain feed watches (ONCHAIN_FEED_SOURCES: pumpfun,stonkfun). */
+  onchainFeedSources: FeedSourceId[];
+  /** How long a detected mint is offered to the scanner before it is dropped. */
+  onchainFeedTtlSeconds: number;
+  onchainFeedLimit: number;
+  /** Rank pump.fun creators by migrated launches and log (never trade) when a top one launches. */
+  devRankingEnabled: boolean;
+  devRankingTopN: number;
+  devRankingMinLaunches: number;
+  devRankingMinMigrated: number;
+  devRankingMaxIdleDays: number;
+  devRankingRefreshHours: number;
+  /** One non-top launch is tracked as a baseline this often; 0 turns the baseline off. */
+  devRankingControlEveryMinutes: number;
   devReputationEnabled: boolean;
   devMinFollowers: number;
   devMinMigratedTokens: number;
@@ -566,6 +585,24 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     narrativeTrendEnabled: parseBoolean(env.NARRATIVE_TREND_ENABLED, false),
     pumpfunDiscoveryEnabled: parseBoolean(env.PUMPFUN_DISCOVERY_ENABLED, false),
     pumpfunDiscoveryLimit: parseNumberInRange("PUMPFUN_DISCOVERY_LIMIT", env.PUMPFUN_DISCOVERY_LIMIT, 20, 1, 100),
+    onchainFeedEnabled: parseBoolean(env.ONCHAIN_FEED_ENABLED, false),
+    onchainFeedWsUrl: (env.ONCHAIN_FEED_WS_URL || "").trim(),
+    onchainFeedSources: parseFeedSources(env.ONCHAIN_FEED_SOURCES),
+    onchainFeedTtlSeconds: parseNumberInRange("ONCHAIN_FEED_TTL_SECONDS", env.ONCHAIN_FEED_TTL_SECONDS, 180, 10, 3600),
+    onchainFeedLimit: parseNumberInRange("ONCHAIN_FEED_LIMIT", env.ONCHAIN_FEED_LIMIT, 30, 1, 100),
+    devRankingEnabled: parseBoolean(env.DEV_RANKING_ENABLED, false),
+    devRankingTopN: parseNumberInRange("DEV_RANKING_TOP_N", env.DEV_RANKING_TOP_N, 10, 1, 100),
+    devRankingMinLaunches: parseNumberInRange("DEV_RANKING_MIN_LAUNCHES", env.DEV_RANKING_MIN_LAUNCHES, 5, 1, 1000),
+    devRankingMinMigrated: parseNumberInRange("DEV_RANKING_MIN_MIGRATED", env.DEV_RANKING_MIN_MIGRATED, 3, 1, 1000),
+    devRankingMaxIdleDays: parseNumberInRange("DEV_RANKING_MAX_IDLE_DAYS", env.DEV_RANKING_MAX_IDLE_DAYS, 30, 1, 3650),
+    devRankingRefreshHours: parseNumberInRange("DEV_RANKING_REFRESH_HOURS", env.DEV_RANKING_REFRESH_HOURS, 6, 1, 168),
+    devRankingControlEveryMinutes: parseNumberInRange(
+      "DEV_RANKING_CONTROL_EVERY_MINUTES",
+      env.DEV_RANKING_CONTROL_EVERY_MINUTES,
+      5,
+      0,
+      1440
+    ),
     devReputationEnabled: parseBoolean(env.DEV_REPUTATION_ENABLED, false),
     devMinFollowers: parseNumberInRange("DEV_MIN_FOLLOWERS", env.DEV_MIN_FOLLOWERS, 2000, 0, 10_000_000),
     devMinMigratedTokens: parseNumberInRange("DEV_MIN_MIGRATED_TOKENS", env.DEV_MIN_MIGRATED_TOKENS, 3, 0, 10_000),
@@ -691,6 +728,12 @@ export function validateConfig(config: AppConfig = CONFIG): void {
     console.log(
       `   🦎 GECKOTERMINAL: up to ${config.geckoTerminalNewPoolsLimit} newest Solana pool(s) per cycle, ` +
         `resolved via DexScreener like every other source.`
+    );
+  }
+  if (config.onchainFeedEnabled) {
+    console.log(
+      `   ⛓️  ONCHAIN_FEED: real-time ${config.onchainFeedSources.join(" + ")} creations over the RPC websocket, offered for ` +
+        `${config.onchainFeedTtlSeconds}s and resolved via DexScreener like every other source.`
     );
   }
   if (config.takeProfitLadder.length > 0) {
