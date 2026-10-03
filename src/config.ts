@@ -191,6 +191,24 @@ export interface AppConfig {
   blockDangerRisks: boolean;
   /** Global dead-coin floor, applied to every candidate regardless of size. */
   minMarketCapUsd: number;
+  /**
+   * Pump.fun "mayhem mode" sniper. off (default) or paper: it only SIMULATES against the
+   * live bonding curve and never signs or sends anything. A live mode does not exist.
+   */
+  mayhemSnipeMode: "off" | "paper";
+  /** Real SOL in the curve (the liquidity that can be pulled out), in USD, needed to buy. */
+  mayhemSnipeMinLiquidityUsd: number;
+  /** Seconds after launch by which the buy must have filled, else the coin is skipped. */
+  mayhemSnipeBuyDeadlineSeconds: number;
+  /** Seconds after launch at which 100% is sold, whatever the price. */
+  mayhemSnipeHoldSeconds: number;
+  /** Slippage tolerance applied to BOTH the buy and the sell, in percent. */
+  mayhemSnipeSlippagePercent: number;
+  mayhemSnipeStakeSol: number;
+  /** Total pump.fun fee per trade, percent (assumed 1.25: protocol + creator; unverified). */
+  mayhemSnipeFeePercent: number;
+  /** Simulated time between quote and fill, ms: what a live transaction would face. */
+  mayhemSnipeFillDelayMs: number;
   /** Below this market cap, checkSmallCapGate() applies instead of the normal rug gate. */
   smallCapMaxMarketCapUsd: number;
   smallCapMinHolders: number;
@@ -549,6 +567,15 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     maxRugCheckScoreRaw: parseNumberInRange("MAX_RUGCHECK_SCORE_RAW", env.MAX_RUGCHECK_SCORE_RAW, 5000, 0, 10_000_000),
     blockDangerRisks: parseBoolean(env.BLOCK_DANGER_RISKS, true),
     minMarketCapUsd: parseNumberInRange("MIN_MARKET_CAP_USD", env.MIN_MARKET_CAP_USD, 7000, 0, 100_000_000),
+    // Only an explicit "paper" turns it on; there is no live mode, so anything else is off.
+    mayhemSnipeMode: (env.MAYHEM_SNIPE_MODE || "").trim().toLowerCase() === "paper" ? "paper" : "off",
+    mayhemSnipeMinLiquidityUsd: parseNumberInRange("MAYHEM_SNIPE_MIN_LIQUIDITY_USD", env.MAYHEM_SNIPE_MIN_LIQUIDITY_USD, 200, 0, 1_000_000),
+    mayhemSnipeBuyDeadlineSeconds: parseNumberInRange("MAYHEM_SNIPE_BUY_DEADLINE_SECONDS", env.MAYHEM_SNIPE_BUY_DEADLINE_SECONDS, 15, 1, 120),
+    mayhemSnipeHoldSeconds: parseNumberInRange("MAYHEM_SNIPE_HOLD_SECONDS", env.MAYHEM_SNIPE_HOLD_SECONDS, 40, 2, 3600),
+    mayhemSnipeSlippagePercent: parseNumberInRange("MAYHEM_SNIPE_SLIPPAGE_PERCENT", env.MAYHEM_SNIPE_SLIPPAGE_PERCENT, 60, 0, 99),
+    mayhemSnipeStakeSol: parseNumberInRange("MAYHEM_SNIPE_STAKE_SOL", env.MAYHEM_SNIPE_STAKE_SOL, 0.05, 0.001, 100),
+    mayhemSnipeFeePercent: parseNumberInRange("MAYHEM_SNIPE_FEE_PERCENT", env.MAYHEM_SNIPE_FEE_PERCENT, 1.25, 0, 20),
+    mayhemSnipeFillDelayMs: parseNumberInRange("MAYHEM_SNIPE_FILL_DELAY_MS", env.MAYHEM_SNIPE_FILL_DELAY_MS, 800, 0, 10_000),
     smallCapMaxMarketCapUsd: parseNumberInRange("SMALL_CAP_MAX_MARKET_CAP_USD", env.SMALL_CAP_MAX_MARKET_CAP_USD, 40_000, 0, 100_000_000),
     smallCapMinHolders: parseNumberInRange("SMALL_CAP_MIN_HOLDERS", env.SMALL_CAP_MIN_HOLDERS, 60, 0, 1_000_000),
     smallCapMaxDevHoldingPct: parseNumberInRange("SMALL_CAP_MAX_DEV_HOLDING_PCT", env.SMALL_CAP_MAX_DEV_HOLDING_PCT, 8, 0, 100),
@@ -710,6 +737,13 @@ export function validateConfig(config: AppConfig = CONFIG): void {
   }
   if (config.minMarketCapUsd > 0) {
     console.log(`   📉 MIN_MARKET_CAP_USD: skipping coins below $${config.minMarketCapUsd.toLocaleString("en-US")}.`);
+  }
+  if (config.mayhemSnipeMode !== "off") {
+    console.log(
+      `   🎯 MAYHEM_SNIPE (${config.mayhemSnipeMode}, simulation only): pump.fun mayhem coins with >= $${config.mayhemSnipeMinLiquidityUsd} ` +
+        `liquidity are bought within ${config.mayhemSnipeBuyDeadlineSeconds}s of launch and 100% sold at ${config.mayhemSnipeHoldSeconds}s; ` +
+        `${config.mayhemSnipeSlippagePercent}% slippage both ways, ${config.mayhemSnipeStakeSol} SOL per snipe.`
+    );
   }
   console.log(
     `   🔬 SMALL_CAP_GATE: coins under $${config.smallCapMaxMarketCapUsd.toLocaleString("en-US")} need RugCheck ` +

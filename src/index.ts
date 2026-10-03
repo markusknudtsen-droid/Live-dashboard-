@@ -83,6 +83,7 @@ import type { TokenCandidate } from "./scanner.js";
 import { checkAnalysisModel, formatModelCheck } from "./model-preflight.js";
 import { startTelegramWatcher, getTelegramSignal, recentMentionedMints } from "./telegram-signals.js";
 import { pollPublicChannel } from "./telegram-scrape.js";
+import { startMayhemSnipe } from "./mayhem-snipe.js";
 
 const tradeHistory: TradeHistoryItem[] = [];
 
@@ -1506,6 +1507,7 @@ async function main(): Promise<void> {
   await startShadowLog();
   startOnchainFeed();
   void startDevRanking();
+  startMayhemSnipe(); // paper-only pump.fun mayhem sniper; a no-op unless MAYHEM_SNIPE_MODE=paper
   await runScheduledCycle();
 
   setInterval(() => {
