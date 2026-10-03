@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 // spike and gave it back on the way down. A separate file from trader.test.ts
 // because those tests assert the DEFAULT behaviour (both flags off).
 process.env.DRY_RUN = "true";
+process.env.HARD_BUY_GATE_ENABLED = "false"; // synthetic tokens: the on-chain authority check is tested in buy-gate.test.ts
 process.env.PAPER_STARTING_BALANCE_SOL = "5";
 process.env.OPENROUTER_API_KEY = "test";
 process.env.TRAILING_STOP_ENABLED = "true";

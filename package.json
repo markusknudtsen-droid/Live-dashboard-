@@ -29,7 +29,8 @@
     "hash-password": "tsx server/hash-password.ts",
     "telegram-login": "tsx scripts/telegram-login.ts",
     "dev-ranking": "tsx scripts/dev-ranking.ts",
-    "analyze-trades": "tsx scripts/analyze-trades.ts"
+    "analyze-trades": "tsx scripts/analyze-trades.ts",
+    "fresh-report": "tsx scripts/fresh-report.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

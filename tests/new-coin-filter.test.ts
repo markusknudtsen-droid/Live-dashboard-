@@ -75,7 +75,7 @@ test("new-coin scanning is off unless enabled, and its knobs are configurable", 
   assert.equal(buildConfig({ WATCH_NEW_COINS: "true" }).watchNewCoins, true);
   assert.equal(buildConfig({}).newCoinMaxAgeHours, 1);
   assert.equal(buildConfig({ NEW_COIN_MAX_AGE_HOURS: "2" }).newCoinMaxAgeHours, 2);
-  assert.equal(buildConfig({}).newCoinMinLiquidityUsd, 4800);
+  assert.equal(buildConfig({}).newCoinMinLiquidityUsd, 3000);
   assert.equal(buildConfig({ NEW_COIN_MIN_LIQUIDITY_USD: "4500" }).newCoinMinLiquidityUsd, 4500);
 });
 

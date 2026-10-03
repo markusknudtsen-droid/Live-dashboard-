@@ -33,6 +33,7 @@
 import { Connection, PublicKey } from "@solana/web3.js";
 import { CONFIG } from "./config.js";
 import { noteDevLaunch } from "./dev-ranking.js";
+import { noteFreshLaunch } from "./fresh-coin-recorder.js";
 import { logger } from "./logger.js";
 import {
   LAUNCHLAB_CREATION_INSTRUCTIONS,
@@ -295,6 +296,7 @@ export function startOnchainFeed(): void {
               stats.detected += 1;
               stats.lastEventAt = created.detectedAt;
               noteDevLaunch({ ...created, source: "pumpfun" });
+              noteFreshLaunch({ ...created, source: "pumpfun" });
             } catch (error) {
               logger.debug(`on-chain feed event ignored: ${error instanceof Error ? error.message : String(error)}`);
             }

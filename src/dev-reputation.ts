@@ -307,7 +307,7 @@ export function creatorFromBondingCurve(data: Uint8Array): string | undefined {
   return new PublicKey(creator).toBase58();
 }
 
-async function fetchAccountBytes(address: string, timeoutMs: number): Promise<Uint8Array | undefined> {
+export async function fetchAccountBytes(address: string, timeoutMs: number): Promise<Uint8Array | undefined> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {

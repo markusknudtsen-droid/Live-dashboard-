@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 // 8% trail, a +40% first ladder rung selling half, and a 23% runner trail for
 // what is left. Config is read at import, so set it first.
 process.env.DRY_RUN = "true";
+process.env.HARD_BUY_GATE_ENABLED = "false"; // synthetic tokens: the on-chain authority check is tested in buy-gate.test.ts
 process.env.PAPER_STARTING_BALANCE_SOL = "5";
 process.env.OPENROUTER_API_KEY = "test";
 process.env.TRAILING_STOP_ENABLED = "true";

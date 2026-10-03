@@ -127,6 +127,17 @@ export interface AppConfig {
   watchNewCoins: boolean;
   newCoinMaxAgeHours: number;
   newCoinMinLiquidityUsd: number;
+  /**
+   * Last check before ANY buy (all paths go through executeBuy): liquidity at
+   * least buyMinLiquidityUsd, and the mint and freeze authorities both revoked,
+   * read from the chain itself. Fails closed when the chain read fails.
+   */
+  hardBuyGateEnabled: boolean;
+  buyMinLiquidityUsd: number;
+  /** Shadow-only recorder of fresh pump.fun curves (never trades): data/shadow-fresh-coins.jsonl. */
+  freshRecorderEnabled: boolean;
+  /** Record one in every N launches (plus every launch by a known or top creator). */
+  freshRecorderSampleEvery: number;
   newCoinMinMomentumPercent: number;
   /** Candidates sent to the model per cycle. Was hardcoded at 5. */
   maxCandidatesPerCycle: number;
@@ -517,7 +528,11 @@ export function buildConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     maxConcurrentPositions: parseNumberInRange("MAX_CONCURRENT_POSITIONS", env.MAX_CONCURRENT_POSITIONS, 3, 1, 20),
     watchNewCoins: parseBoolean(env.WATCH_NEW_COINS, false),
     newCoinMaxAgeHours: parseNumberInRange("NEW_COIN_MAX_AGE_HOURS", env.NEW_COIN_MAX_AGE_HOURS, 1, 0.05, 168),
-    newCoinMinLiquidityUsd: parseNumberInRange("NEW_COIN_MIN_LIQUIDITY_USD", env.NEW_COIN_MIN_LIQUIDITY_USD, 4800, 0, 100_000_000),
+    newCoinMinLiquidityUsd: parseNumberInRange("NEW_COIN_MIN_LIQUIDITY_USD", env.NEW_COIN_MIN_LIQUIDITY_USD, 3000, 0, 100_000_000),
+    hardBuyGateEnabled: parseBoolean(env.HARD_BUY_GATE_ENABLED, true),
+    buyMinLiquidityUsd: parseNumberInRange("BUY_MIN_LIQUIDITY_USD", env.BUY_MIN_LIQUIDITY_USD, 3000, 0, 100_000_000),
+    freshRecorderEnabled: parseBoolean(env.FRESH_RECORDER_ENABLED, false),
+    freshRecorderSampleEvery: parseNumberInRange("FRESH_RECORDER_SAMPLE_EVERY", env.FRESH_RECORDER_SAMPLE_EVERY, 4, 1, 1000),
     newCoinMinMomentumPercent: parseNumberInRange("NEW_COIN_MIN_MOMENTUM_PERCENT", env.NEW_COIN_MIN_MOMENTUM_PERCENT, 15, -100, 10_000),
     maxCandidatesPerCycle: parseNumberInRange("MAX_CANDIDATES_PER_CYCLE", env.MAX_CANDIDATES_PER_CYCLE, 5, 1, 25),
     analysisConcurrency: parseNumberInRange("ANALYSIS_CONCURRENCY", env.ANALYSIS_CONCURRENCY, 4, 1, 10),

@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 // The MCP server forces DRY_RUN itself, but set it here too so any module
 // loaded first in this process is already in paper mode.
 process.env.DRY_RUN = "true";
+process.env.HARD_BUY_GATE_ENABLED = "false"; // synthetic tokens: the on-chain authority check is tested in buy-gate.test.ts
 process.env.PAPER_STARTING_BALANCE_SOL = "10";
 process.env.OPENROUTER_API_KEY = "test";
 

@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 // SOLANA_PRIVATE_KEY is required; OPENROUTER_API_KEY is only set so building the
 // config succeeds (these tests never call the AI analyzer).
 process.env.DRY_RUN = "true";
+process.env.HARD_BUY_GATE_ENABLED = "false"; // synthetic tokens: the on-chain authority check is tested in buy-gate.test.ts
 process.env.PAPER_STARTING_BALANCE_SOL = "5";
 process.env.OPENROUTER_API_KEY = "test";
 

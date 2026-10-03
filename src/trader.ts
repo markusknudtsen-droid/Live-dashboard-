@@ -11,6 +11,7 @@ import {
 import bs58 from "bs58";
 import { randomBytes } from "node:crypto";
 import { CONFIG } from "./config.js";
+import { checkHardBuyGate } from "./buy-gate.js";
 import { shouldExitOnLiquidityDrop, updatePeakLiquidity, DEFAULT_RUG_EXIT } from "./rug-exit.js";
 import { updateTrailingStop } from "./trailing-stop.js";
 import { decideSweep } from "./profit-sweep.js";
@@ -518,6 +519,23 @@ export async function executeBuy(signal: TradeSignal): Promise<TradeResult> {
       timestamp: Date.now(),
       error: "SHADOW_NO_TRADE is on: not buying",
     };
+  }
+  // Last line of defence for every buy path: liquidity floor and revoked
+  // mint/freeze authorities, read from the chain. Outside the lock: it awaits RPC.
+  if (CONFIG.hardBuyGateEnabled) {
+    const gate = await checkHardBuyGate(signal.token);
+    if (!gate.ok) {
+      logger.warn(`⛔ HARD BUY GATE: ${signal.token.symbol} — ${gate.reason}`);
+      return {
+        success: false,
+        entryPrice: signal.token.priceUsd,
+        amountSol: signal.positionSizeSol,
+        tokenAddress: signal.token.address,
+        tokenSymbol: signal.token.symbol,
+        timestamp: Date.now(),
+        error: `HARD_BUY_GATE: ${gate.reason}`,
+      };
+    }
   }
   return withTraderLock(buyQueue, () => executeBuyLocked(signal));
 }
